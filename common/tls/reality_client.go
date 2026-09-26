@@ -123,12 +123,15 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
+	uConn, err := newUClient(conn, uConfig, e.uClient.id)
+	if err != nil {
+		return nil, err
+	}
 	verifier.UConn = uConn
 	// X25519MLKEM768 is kept as the fingerprint carries it: REALITY servers
 	// since Xray-core v26.9.8 (XTLS/REALITY@8cdf7bf) reject a Client Hello
 	// without an X25519MLKEM768 key share placed before the optional X25519 one.
-	err := uConn.BuildHandshakeState()
+	err = uConn.BuildHandshakeState()
 	if err != nil {
 		return nil, err
 	}
