@@ -268,6 +268,8 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 				},
 			},
 		}
+		// The client is thrown away after this fetch: do not leave its connections open.
+		defer httpClient.CloseIdleConnections()
 	}
 	request, err := http.NewRequest("GET", s.options.RemoteOptions.URL, nil)
 	if err != nil {
@@ -280,6 +282,8 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 	if err != nil {
 		return err
 	}
+	// Also on an unexpected status, otherwise the connection stays open.
+	defer response.Body.Close()
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
