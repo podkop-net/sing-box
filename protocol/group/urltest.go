@@ -119,6 +119,14 @@ func (s *URLTest) PerformUpdateCheck() {
 	s.group.performUpdateCheck()
 }
 
+// InterfaceUpdated re-checks the group when the default interface changes
+// (e.g. WAN came up after boot), instead of waiting for the next interval.
+func (s *URLTest) InterfaceUpdated() {
+	if s.group != nil {
+		go s.group.CheckOutbounds(true)
+	}
+}
+
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	s.group.Touch()
 	var outbound adapter.Outbound
