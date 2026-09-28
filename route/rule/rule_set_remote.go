@@ -108,7 +108,9 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	if s.lastUpdated.IsZero() {
 		err := s.fetch(ctx, startContext)
 		if err != nil {
-			return E.Cause(err, "initial rule-set: ", s.options.Tag)
+			// Start with an empty rule-set instead of failing the whole start:
+			// loopUpdate keeps retrying until the first download succeeds.
+			s.logger.Error(E.Cause(err, "initial rule-set: ", s.options.Tag, ", starting empty and retrying"))
 		}
 	}
 	s.updateTicker = time.NewTicker(s.updateInterval)
@@ -204,6 +206,21 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 }
 
 func (s *RemoteRuleSet) loopUpdate() {
+	// Never downloaded (initial fetch failed): retry with backoff instead of
+	// waiting a whole update_interval.
+	for delay := 5 * time.Second; s.lastUpdated.IsZero(); delay = min(delay*2, 30*time.Second) {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		err := s.fetch(s.ctx, nil)
+		if err != nil {
+			s.logger.Error("fetch rule-set ", s.options.Tag, ": ", err)
+		} else {
+			notifyRuleSetRecovered(s.logger, s.options.Tag)
+		}
+	}
 	if time.Since(s.lastUpdated) > s.updateInterval {
 		err := s.fetch(s.ctx, nil)
 		if err != nil {
