@@ -50,6 +50,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		defaultDomainStrategy: C.DomainStrategy(options.Strategy),
 	}
 	router.client = NewClient(ClientOptions{
+		Context:          ctx,
 		DisableCache:     options.DNSClientOptions.DisableCache,
 		DisableExpire:    options.DNSClientOptions.DisableExpire,
 		IndependentCache: options.DNSClientOptions.IndependentCache,

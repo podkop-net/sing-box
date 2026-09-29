@@ -32,6 +32,7 @@ var (
 var _ adapter.DNSClient = (*Client)(nil)
 
 type Client struct {
+	ctx                context.Context
 	timeout            time.Duration
 	disableCache       bool
 	disableExpire      bool
@@ -47,6 +48,7 @@ type Client struct {
 }
 
 type ClientOptions struct {
+	Context          context.Context
 	Timeout          time.Duration
 	DisableCache     bool
 	DisableExpire    bool
@@ -59,6 +61,7 @@ type ClientOptions struct {
 
 func NewClient(options ClientOptions) *Client {
 	client := &Client{
+		ctx:              options.Context,
 		timeout:          options.Timeout,
 		disableCache:     options.DisableCache,
 		disableExpire:    options.DisableExpire,
@@ -200,9 +203,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 			return nil, ErrResponseRejectedCached
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	response, err := transport.Exchange(ctx, message)
-	cancel()
+	response, err := c.exchangeTransport(ctx, transport, message)
 	if err != nil {
 		var rcodeError RcodeError
 		if errors.As(err, &rcodeError) {

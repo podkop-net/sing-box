@@ -16,6 +16,7 @@ type TransportAdapter struct {
 	dependencies  []string
 	strategy      C.DomainStrategy
 	clientSubnet  netip.Prefix
+	fallback      *fallbackServer // remote servers only, see client_fallback.go
 }
 
 func NewTransportAdapter(transportType string, transportTag string, dependencies []string) TransportAdapter {
@@ -54,6 +55,7 @@ func NewTransportAdapterWithRemoteOptions(transportType string, transportTag str
 		dependencies:  dependencies,
 		strategy:      C.DomainStrategy(remoteOptions.LegacyStrategy),
 		clientSubnet:  remoteOptions.LegacyClientSubnet,
+		fallback:      newFallbackServer(remoteOptions),
 	}
 }
 
@@ -75,4 +77,8 @@ func (a *TransportAdapter) LegacyStrategy() C.DomainStrategy {
 
 func (a *TransportAdapter) LegacyClientSubnet() netip.Prefix {
 	return a.clientSubnet
+}
+
+func (a *TransportAdapter) fallbackState() *fallbackServer {
+	return a.fallback
 }
