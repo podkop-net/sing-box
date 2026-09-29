@@ -41,6 +41,8 @@ type UDPTransport struct {
 	callbackAccess sync.RWMutex
 	queryId        uint16
 	callbacks      map[uint16]*udpCallback
+
+	fresh *freshSocket // one socket per query, see udp_fresh.go
 }
 
 type udpCallback struct {
@@ -61,7 +63,9 @@ func NewUDP(ctx context.Context, logger log.ContextLogger, tag string, options o
 	if !serverAddr.IsValid() {
 		return nil, E.New("invalid server address: ", serverAddr)
 	}
-	return NewUDPRaw(logger, dns.NewTransportAdapterWithRemoteOptions(C.DNSTypeUDP, tag, options), transportDialer, serverAddr), nil
+	transport := NewUDPRaw(logger, dns.NewTransportAdapterWithRemoteOptions(C.DNSTypeUDP, tag, options), transportDialer, serverAddr)
+	transport.fresh = &freshSocket{ctx: ctx, options: options}
+	return transport, nil
 }
 
 func NewUDPRaw(logger logger.ContextLogger, adapter dns.TransportAdapter, dialerInstance N.Dialer, serverAddr M.Socksaddr) *UDPTransport {
@@ -114,7 +118,7 @@ func (t *UDPTransport) nextAvailableQueryId() (uint16, error) {
 }
 
 func (t *UDPTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
-	response, err := t.exchange(ctx, message)
+	response, err := t.exchangeQuery(ctx, message)
 	if err != nil {
 		return nil, err
 	}
