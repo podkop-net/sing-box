@@ -458,4 +458,5 @@ func (r *Router) ResetNetwork() {
 	for _, transport := range r.transport.Transports() {
 		transport.Reset()
 	}
+	ResetFallbackProviders() // the output device may have changed
 }

@@ -1,7 +1,6 @@
 package dns
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"net/netip"
@@ -14,9 +13,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
-	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 
@@ -27,8 +24,9 @@ import (
 //
 // When a DNS server that sing-box reaches directly through the WAN fails to answer
 // (timeout, refused or reset connection, TLS or HTTP error), the query is sent to the
-// provider's servers, read from the file named by SING_BOX_DNS_FALLBACK (OpenWrt keeps
-// them in /tmp/resolv.conf.d/resolv.conf.auto).
+// provider's servers: the DNS servers that netifd knows for the output device of sing-box
+// (see client_fallback_provider.go). Setting SING_BOX_DNS_FALLBACK turns this on; the
+// init script of podkop-engine does it when podkop is installed.
 //
 // Which servers qualify is decided once, from the configuration: a plain socket (no
 // detour, or a detour to a direct outbound) without dial fields that send it another
@@ -45,7 +43,7 @@ import (
 // brings it back. A SERVFAIL is retried through the provider as well but does not count
 // against the server: it is usually about one domain. When the provider fails to answer
 // twice in a row, the fallback is off for that server for a minute.
-var fallbackResolvConf = os.Getenv("SING_BOX_DNS_FALLBACK")
+var fallbackEnabled = os.Getenv("SING_BOX_DNS_FALLBACK") != ""
 
 const (
 	fallbackPrimaryTimeout = 3500 * time.Millisecond
@@ -55,19 +53,10 @@ const (
 	fallbackProbeMax       = 5 * time.Minute
 	fallbackProviderAfter  = 2           // provider failures in a row that switch the fallback off
 	fallbackUnusableFor    = time.Minute // then the provider is tried again, as dnscrypt-proxy does
-	fallbackRereadAfter    = time.Minute
-	fallbackRereadEmpty    = 5 * time.Second
 	fallbackMaxTTL         = 60
-	fallbackMaxServers     = 3
 )
 
 var (
-	errNoProviders = E.New("no provider DNS listed in ", fallbackResolvConf)
-
-	// provider queries have their own sockets: a burst of queries waiting for a silent
-	// server must not keep them from the provider
-	fallbackSocketSlots = make(chan struct{}, 256)
-
 	// not public, besides what netip reports: CGNAT (also Tailscale) and "this network"
 	fallbackNonPublic = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("0.0.0.0/8")}
 	fallbackLocalTLDs = []string{".localhost", ".local", ".lan", ".home.arpa", ".internal"}
@@ -87,17 +76,17 @@ type fallbackServer struct {
 	probeAt       time.Time
 	probeEvery    time.Duration
 	unusableUntil time.Time
-	providers     []M.Socksaddr
-	readAt        time.Time
+
+	providers *providerSet // shared by all servers
 }
 
 // newFallbackServer returns the fallback state of a remote server, nil when the fallback
 // is not enabled.
 func newFallbackServer(options option.RemoteDNSServerOptions) *fallbackServer {
-	if fallbackResolvConf == "" {
+	if !fallbackEnabled {
 		return nil
 	}
-	return &fallbackServer{options: options}
+	return &fallbackServer{options: options, providers: fallbackProviders}
 }
 
 func fallbackFor(transport adapter.DNSTransport) *fallbackServer {
@@ -119,7 +108,7 @@ func exchangeWithFallback(ctx context.Context, baseCtx context.Context, logger l
 		if state.probeDue() {
 			go probeServer(context.WithoutCancel(ctx), logger, transport, state, message.Copy())
 		}
-		response, err := state.exchangeProvider(ctx, message)
+		response, err := state.exchangeProvider(ctx, baseCtx, logger, message)
 		if err == nil {
 			return response, nil
 		}
@@ -129,7 +118,7 @@ func exchangeWithFallback(ctx context.Context, baseCtx context.Context, logger l
 		}
 		return transport.Exchange(ctx, message)
 	}
-	usable := state.usable()
+	usable := state.usable(baseCtx, logger)
 	primaryCtx, cancel := ctx, context.CancelFunc(func() {})
 	if usable {
 		primaryCtx, cancel = context.WithTimeout(ctx, fallbackPrimaryTimeout)
@@ -141,7 +130,7 @@ func exchangeWithFallback(ctx context.Context, baseCtx context.Context, logger l
 		state.success()
 		servfail := (err == nil && response.Rcode == mDNS.RcodeServerFailure) || (err != nil && int(rcodeError) == mDNS.RcodeServerFailure)
 		if usable && servfail {
-			alternative, altErr := state.exchangeProvider(ctx, message)
+			alternative, altErr := state.exchangeProvider(ctx, baseCtx, logger, message)
 			if altErr == nil && (alternative.Rcode == mDNS.RcodeSuccess || alternative.Rcode == mDNS.RcodeNameError) {
 				return alternative, nil
 			}
@@ -151,7 +140,7 @@ func exchangeWithFallback(ctx context.Context, baseCtx context.Context, logger l
 	if !usable || ctx.Err() != nil {
 		return nil, err // the provider is not used now, or the caller gave the query up
 	}
-	alternative, altErr := state.exchangeProvider(ctx, message)
+	alternative, altErr := state.exchangeProvider(ctx, baseCtx, logger, message)
 	if altErr != nil {
 		if ctx.Err() == nil {
 			state.providerFailed(ctx, logger, tag, altErr)
@@ -196,6 +185,7 @@ func (s *fallbackServer) decide(ctx context.Context, logger logger.ContextLogger
 			} else {
 				s.dialer = dialer
 				s.eligible = true
+				s.providers.list(ctx, logger) // at once: the first query may need them
 			}
 		}
 		if logger == nil {
@@ -313,11 +303,11 @@ func (s *fallbackServer) isDown() bool {
 
 // usable reports whether the provider may be used now: it has not stopped answering
 // lately and is known.
-func (s *fallbackServer) usable() bool {
+func (s *fallbackServer) usable(ctx context.Context, logger logger.ContextLogger) bool {
 	s.access.Lock()
 	blocked := time.Now().Before(s.unusableUntil)
 	s.access.Unlock()
-	return !blocked && len(s.providerServers()) > 0
+	return !blocked && s.providers.known(ctx, logger)
 }
 
 // probeDue reserves the next background check of a server that is set aside.
@@ -350,14 +340,10 @@ func (s *fallbackServer) failure(ctx context.Context, logger logger.ContextLogge
 	s.down = true
 	s.probeEvery = fallbackProbeFirst
 	s.probeAt = time.Now().Add(s.probeEvery)
-	providers := make([]string, 0, len(s.providers))
-	for _, provider := range s.providers {
-		providers = append(providers, provider.String())
-	}
 	s.access.Unlock()
 	if logger != nil {
 		// the logger formats only strings, numbers, errors and Stringers
-		logger.WarnContext(ctx, "server ", tag, " failed ", fallbackDownAfter, " times in a row (", cause, "), answering from provider DNS ", strings.Join(providers, ", "), " until it is back")
+		logger.WarnContext(ctx, "server ", tag, " failed ", fallbackDownAfter, " times in a row (", cause, "), answering from provider DNS ", s.providers.names(), " until it is back")
 	}
 }
 
@@ -385,75 +371,6 @@ func (s *fallbackServer) providerFailed(ctx context.Context, logger logger.Conte
 	if logger != nil {
 		logger.WarnContext(ctx, "provider DNS does not answer for server ", tag, " (", cause, "), no fallback for it for ", fallbackUnusableFor)
 	}
-}
-
-func (s *fallbackServer) providerServers() []M.Socksaddr {
-	s.access.Lock()
-	defer s.access.Unlock()
-	rereadAfter := fallbackRereadAfter
-	if len(s.providers) == 0 {
-		rereadAfter = fallbackRereadEmpty // e.g. the WAN is not up yet
-	}
-	if s.readAt.IsZero() || time.Since(s.readAt) > rereadAfter {
-		s.providers = readNameservers(fallbackResolvConf, s.options.DNSServerAddressOptions.Build())
-		s.readAt = time.Now()
-	}
-	return s.providers
-}
-
-// exchangeProvider asks the provider's servers in turn, from a fresh socket each time and
-// through the server's own dialer.
-func (s *fallbackServer) exchangeProvider(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
-	providers := s.providerServers()
-	if len(providers) == 0 {
-		return nil, errNoProviders
-	}
-	ctx, cancel := context.WithTimeout(ctx, fallbackTimeout)
-	defer cancel()
-	deadline, _ := ctx.Deadline()
-	var err error
-	for i, server := range providers {
-		// a silent server leaves time to the next ones
-		serverCtx, serverCancel := context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(providers)-i))
-		var response *mDNS.Msg
-		response, err = exchangeFresh(serverCtx, fallbackSocketSlots, s.dialer, server, message)
-		serverCancel()
-		if err == nil {
-			s.access.Lock()
-			s.providerFails = 0
-			s.access.Unlock()
-			capTTL(response, fallbackMaxTTL)
-			return response, nil
-		}
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	return nil, err
-}
-
-// readNameservers reads the "nameserver" lines of a resolv.conf file, skipping loopback
-// addresses (they would lead back to dnsmasq and sing-box itself) and the server itself.
-func readNameservers(path string, server M.Socksaddr) []M.Socksaddr {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-	var servers []M.Socksaddr
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() && len(servers) < fallbackMaxServers {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 || fields[0] != "nameserver" {
-			continue
-		}
-		address, err := netip.ParseAddr(fields[1])
-		if err != nil || address.IsLoopback() || address.IsUnspecified() || (server.IsIP() && address.Unmap() == server.Addr.Unmap()) {
-			continue
-		}
-		servers = append(servers, M.SocksaddrFrom(address, 53))
-	}
-	return servers
 }
 
 // capTTL keeps provider answers short-lived, so that the server takes over again soon
