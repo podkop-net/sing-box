@@ -299,7 +299,12 @@ func init() {
 	weights := utls.DefaultWeights
 	weights.TLSVersMax_Set_VersionTLS13 = 1
 	weights.FirstKeyShare_Set_CurveP256 = 0
-	randomizedFingerprint = utls.HelloRandomized
+	// X25519MLKEM768 always offered: REALITY servers since Xray-core v26.9.8 refuse a
+	// Client Hello without it (its key share: randomizedSpec).
+	weights.CurveIDs_Append_X25519 = 1
+	// ALPN always sent, as Xray-core does: without it gRPC and HTTP/2 transports cannot
+	// agree on h2, for as long as the process keeps the seed.
+	randomizedFingerprint = utls.HelloRandomizedALPN
 	randomizedFingerprint.Seed, _ = utls.NewPRNGSeed()
 	randomizedFingerprint.Weights = &weights
 }
