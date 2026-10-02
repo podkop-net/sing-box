@@ -400,6 +400,11 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, routeContext tun.Dire
 	return directRouteOutbound.NewDirectRouteConnection(metadata, routeContext, timeout)
 }
 
+// errMissingFakeIPRecord: a connection to a FakeIP address the store has no record for. The
+// store forgets an address that was given out shortly before a crash, or that nobody used
+// for a long time; a client may still hold it.
+var errMissingFakeIPRecord = E.New("missing fakeip record")
+
 func (r *Router) matchRule(
 	ctx context.Context, metadata *adapter.InboundContext, preMatch bool, supportBypass bool,
 	inputConn net.Conn, inputPacketConn N.PacketConn,
@@ -408,13 +413,29 @@ func (r *Router) matchRule(
 	buffers []*buf.Buffer, packetBuffers []*N.PacketBuffer, fatalErr error,
 ) {
 	r.searchProcessInfo(ctx, metadata)
+	// A connection to a FakeIP address without a record is not refused at once: if a rule
+	// sniffs it and the client names the domain itself (TLS, HTTP, QUIC), that domain is
+	// where it goes, as if the record were there. Without a name it is refused once the
+	// rules are through.
+	var missingFakeIP bool
 	if metadata.Destination.Addr.IsValid() && r.dnsTransport.FakeIP() != nil && r.dnsTransport.FakeIP().Store().Contains(metadata.Destination.Addr) {
 		domain, loaded := r.dnsTransport.FakeIP().Store().Lookup(metadata.Destination.Addr)
 		if !loaded {
-			fatalErr = E.New("missing fakeip record, try enable `experimental.cache_file`")
-			return
-		}
-		if domain != "" {
+			if preMatch {
+				fatalErr = errMissingFakeIPRecord
+				return
+			}
+			missingFakeIP = true
+			defer func() {
+				if missingFakeIP && fatalErr == nil {
+					selectedRule = nil
+					buf.ReleaseMulti(buffers)
+					N.ReleaseMultiPacketBuffer(packetBuffers)
+					buffers, packetBuffers = nil, nil
+					fatalErr = errMissingFakeIPRecord
+				}
+			}()
+		} else if domain != "" {
 			metadata.OriginDestination = metadata.Destination
 			metadata.Destination = M.Socksaddr{
 				Fqdn: domain,
@@ -528,6 +549,16 @@ match:
 				if newErr != nil {
 					fatalErr = newErr
 					return
+				}
+				if missingFakeIP && M.IsDomainName(metadata.Domain) {
+					missingFakeIP = false
+					metadata.OriginDestination = metadata.Destination
+					metadata.Destination = M.Socksaddr{
+						Fqdn: metadata.Domain,
+						Port: metadata.Destination.Port,
+					}
+					metadata.FakeIP = true
+					r.logger.InfoContext(ctx, "missing fakeip record, sniffed domain used: ", metadata.Domain)
 				}
 			} else if metadata.Network != N.NetworkICMP {
 				selectedRule = currentRule
