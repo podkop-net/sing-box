@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/bbolt"
@@ -46,6 +47,7 @@ type CacheFile struct {
 	rdrcTimeout        time.Duration
 	DB                 *bbolt.DB
 	resetAccess        sync.Mutex
+	generation         atomic.Uint64 // counts resetDB: what was saved before is gone
 	saveMetadataAccess sync.Mutex
 	saveMetadata       *adapter.FakeIPMetadata
 	saveMetadataTimer  *time.Timer
@@ -205,6 +207,7 @@ func (c *CacheFile) update(fn func(tx *bbolt.Tx) error) (err error) {
 func (c *CacheFile) resetDB() {
 	c.resetAccess.Lock()
 	defer c.resetAccess.Unlock()
+	c.generation.Add(1)
 	c.DB.Close()
 	os.Remove(c.path)
 	db, err := bbolt.Open(c.path, 0o666, &bbolt.Options{Timeout: time.Second})
