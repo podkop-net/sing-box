@@ -91,7 +91,7 @@ func (l *Listener) Start() error {
 			return err
 		}
 		l.packetOutboundClosed = make(chan struct{})
-		l.packetOutbound = make(chan *N.PacketBuffer, 64)
+		l.packetOutbound = make(chan *N.PacketBuffer, udpOutputQueueSize)
 		go l.loopUDPIn()
 		if !l.disablePacketOutput {
 			go l.loopUDPOut()
