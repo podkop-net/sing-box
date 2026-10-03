@@ -6,9 +6,11 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 
 	"github.com/sagernet/sing-box/common/badtls"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -85,6 +87,28 @@ func ClientHandshake(ctx context.Context, conn net.Conn, config Config) (Conn, e
 	return tlsConn, nil
 }
 
+// withReadWait gives a client connection the read waiter of badtls, as ClientHandshake
+// does (podkop-engine): the dialer of the proxy protocols returned the bare connection,
+// so the copy loop took a buffer before every blocking read and an idle proxied
+// connection held it for as long as the server stayed silent. With the read waiter the
+// buffer is taken only once a whole record has arrived. A connection badtls cannot handle
+// is kept as it is, unlike in ClientHandshake: a change in the layout of crypto/tls or
+// utls must cost the read waiter, not every TLS dial.
+func withReadWait(tlsConn Conn) Conn {
+	readWaitConn, err := badtls.NewReadWaitConn(tlsConn)
+	if err == nil {
+		return readWaitConn
+	}
+	if err != os.ErrInvalid {
+		readWaitFailure.Do(func() {
+			log.StdLogger().Warn("TLS read waiter unavailable: ", err)
+		})
+	}
+	return tlsConn
+}
+
+var readWaitFailure sync.Once
+
 type Dialer interface {
 	N.Dialer
 	DialTLSContext(ctx context.Context, destination M.Socksaddr) (Conn, error)
@@ -137,7 +161,7 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 		}
 		return nil, err
 	}
-	return tlsConn, nil
+	return withReadWait(tlsConn), nil
 }
 
 func (d *defaultDialer) Upstream() any {
