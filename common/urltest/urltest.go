@@ -116,21 +116,7 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	if err != nil {
 		return
 	}
-	client := http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return instance, nil
-			},
-			TLSClientConfig: &tls.Config{
-				Time:    ntp.TimeFuncFromContext(ctx),
-				RootCAs: adapter.RootPoolFromContext(ctx),
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Timeout: C.TCPTimeout,
-	}
+	client := probeClient(ctx, instance)
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
@@ -139,4 +125,27 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	resp.Body.Close()
 	t = uint16(time.Since(start) / time.Millisecond)
 	return
+}
+
+// probeClient makes an HTTP client that speaks over instance only, the connection the test
+// dialed through the member: no redirects, no compression asked for (a download test counts
+// the bytes that cross the link, and a body of zeros would compress to nothing), the TCP
+// timeout.
+func probeClient(ctx context.Context, instance net.Conn) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return instance, nil
+			},
+			TLSClientConfig: &tls.Config{
+				Time:    ntp.TimeFuncFromContext(ctx),
+				RootCAs: adapter.RootPoolFromContext(ctx),
+			},
+			DisableCompression: true,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: C.TCPTimeout,
+	}
 }

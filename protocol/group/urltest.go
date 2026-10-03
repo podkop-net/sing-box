@@ -115,8 +115,10 @@ func (s *URLTest) CheckOutbounds() {
 	s.group.CheckOutbounds(true)
 }
 
+// PerformUpdateCheck is the Clash API's: it does not wait for the selection, which may run a
+// download test.
 func (s *URLTest) PerformUpdateCheck() {
-	s.group.performUpdateCheck()
+	s.group.requestUpdateCheck()
 }
 
 // InterfaceUpdated re-checks the group when the default interface changes
@@ -138,7 +140,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	default:
 		return nil, E.Extend(N.ErrUnknownNetwork, network)
 	}
-	if outbound == nil {
+	if outbound == nil || s.group.selectionPending(outbound) {
 		outbound, _ = s.group.Select(network)
 	}
 	if outbound == nil {
@@ -163,7 +165,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	s.group.Touch()
 	outbound := s.group.selectedOutboundUDP.Load()
-	if outbound == nil {
+	if outbound == nil || s.group.selectionPending(outbound) {
 		outbound, _ = s.group.Select(N.NetworkUDP)
 	}
 	if outbound == nil {
@@ -231,6 +233,8 @@ type URLTestGroup struct {
 	confirms                     map[string]*memberConfirm
 	epoch                        time.Time
 	successes                    sync.Map // member tag → *atomic.Int64, its last successful TCP dial, since epoch
+	downloadLink                 string
+	frozen                       common.TypedValue[map[string]time.Time] // member tag → when it last failed the download test
 }
 
 func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
@@ -269,6 +273,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: interruptExternalConnections,
 		epoch:                        time.Now(),
+		downloadLink:                 downloadTestLink,
 	}, nil
 }
 
@@ -311,6 +316,11 @@ func (g *URLTestGroup) Close() error {
 }
 
 func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+	return g.selectAmong(network, nil)
+}
+
+// selectAmong is Select without the members that skip says to pass over.
+func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history *adapter.URLTestHistory) bool) (adapter.Outbound, bool) {
 	var minDelay uint16
 	var minOutbound adapter.Outbound
 	var selected adapter.Outbound
@@ -321,7 +331,8 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		selected = g.selectedOutboundUDP.Load()
 	}
 	if selected != nil {
-		if history := g.history.LoadURLTestHistory(RealTag(selected)); history != nil {
+		tag := RealTag(selected)
+		if history := g.history.LoadURLTestHistory(tag); history != nil && (skip == nil || !skip(tag, history)) {
 			minOutbound = selected
 			minDelay = history.Delay
 		}
@@ -330,8 +341,9 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		if !common.Contains(detour.Network(), network) {
 			continue
 		}
-		history := g.history.LoadURLTestHistory(RealTag(detour))
-		if history == nil {
+		tag := RealTag(detour)
+		history := g.history.LoadURLTestHistory(tag)
+		if history == nil || (skip != nil && skip(tag, history)) {
 			continue
 		}
 		if minDelay == 0 || minDelay > history.Delay+g.tolerance {
@@ -381,8 +393,18 @@ func (g *URLTestGroup) CheckOutbounds(force bool) {
 	_, _ = g.urlTest(g.ctx, force)
 }
 
+// URLTest is the Clash API's round: it does not wait for the selection, which may run a
+// download test.
 func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
-	return g.urlTest(ctx, false)
+	result, err := g.urlTestRound(ctx, false)
+	g.requestUpdateCheck()
+	return result, err
+}
+
+func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint16, error) {
+	result, err := g.urlTestRound(ctx, force)
+	g.performUpdateCheck()
+	return result, err
 }
 
 type urlTestResult struct {
@@ -390,7 +412,8 @@ type urlTestResult struct {
 	err   error
 }
 
-func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint16, error) {
+// urlTestRound tests the members, one round at a time; the selection is not part of the round.
+func (g *URLTestGroup) urlTestRound(ctx context.Context, force bool) (map[string]uint16, error) {
 	result := make(map[string]uint16)
 	if g.checking.Swap(true) {
 		return result, nil
@@ -438,16 +461,20 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 		})
 	}
 	b.Wait()
-	g.performUpdateCheck()
 	return result, nil
 }
 
 func (g *URLTestGroup) performUpdateCheck() {
 	g.updateAccess.Lock()
 	defer g.updateAccess.Unlock()
+	g.updateSelection()
+}
+
+// updateSelection is performUpdateCheck under its lock.
+func (g *URLTestGroup) updateSelection() {
 	var updated bool
 	// the selection is read by every dial, which may run while it changes: stored atomically
-	if outbound, exists := g.Select(N.NetworkTCP); outbound != nil {
+	if outbound, exists := g.selectTested(); outbound != nil {
 		if selected := g.selectedOutboundTCP.Load(); selected == nil || (exists && outbound != selected) {
 			if selected != nil {
 				updated = true
@@ -456,7 +483,7 @@ func (g *URLTestGroup) performUpdateCheck() {
 			g.selectedOutboundTCP.Store(outbound)
 		}
 	}
-	if outbound, exists := g.Select(N.NetworkUDP); outbound != nil {
+	if outbound, exists := g.selectUDP(); outbound != nil {
 		if selected := g.selectedOutboundUDP.Load(); selected == nil || (exists && outbound != selected) {
 			if selected != nil {
 				updated = true

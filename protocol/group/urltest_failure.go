@@ -95,14 +95,17 @@ func (g *URLTestGroup) succeededSince(tag string, start time.Time) bool {
 }
 
 // requestUpdateCheck selects again in the background; failures that come while a selection
-// waits to run are covered by it.
+// waits to run are covered by it, so at most one selection waits at any time (a selection
+// may run long: the download test).
 func (g *URLTestGroup) requestUpdateCheck() {
 	if g.updatePending.Swap(true) {
 		return
 	}
 	go func() {
+		g.updateAccess.Lock()
+		defer g.updateAccess.Unlock()
 		g.updatePending.Store(false)
-		g.performUpdateCheck()
+		g.updateSelection()
 	}()
 }
 
