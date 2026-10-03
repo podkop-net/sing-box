@@ -1,3 +1,5 @@
+//go:build !podkop_slim
+
 package include
 
 import (
