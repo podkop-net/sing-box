@@ -165,3 +165,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
+
+replace github.com/sagernet/sing-vmess => github.com/FiyeroT/sing-vmess v0.2.8-pdk13.1
