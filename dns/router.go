@@ -295,10 +295,12 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 				} else if errors.Is(err, ErrResponseRejected) {
 					rejected = true
 					r.logger.DebugContext(ctx, E.Cause(err, "response rejected for ", FormatQuestion(message.Question[0].String())))
-				} else if len(message.Question) > 0 {
-					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())))
-				} else {
-					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for <empty query>"))
+				} else if !IsLoggedFailure(err) {
+					if len(message.Question) > 0 {
+						r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())))
+					} else {
+						r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for <empty query>"))
+					}
 				}
 			}
 			if responseCheck != nil && rejected {
@@ -339,7 +341,7 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 				r.logger.DebugContext(ctx, "response rejected for ", domain, " (cached)")
 			} else if errors.Is(err, ErrResponseRejected) {
 				r.logger.DebugContext(ctx, "response rejected for ", domain)
-			} else {
+			} else if !IsLoggedFailure(err) {
 				r.logger.ErrorContext(ctx, E.Cause(err, "lookup failed for ", domain))
 			}
 		}

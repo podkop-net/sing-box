@@ -45,6 +45,7 @@ type Client struct {
 	cacheLock          compatible.Map[transportCacheKey, chan struct{}]
 	transportCache     freelru.Cache[transportCacheKey, *dns.Msg]
 	transportCacheLock compatible.Map[transportCacheKey, chan struct{}]
+	failures           failureLog
 }
 
 type ClientOptions struct {
@@ -209,7 +210,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 		if errors.As(err, &rcodeError) {
 			response = FixedResponseStatus(message, int(rcodeError))
 		} else {
-			return nil, err
+			return nil, c.failures.failed(ctx, c.logger, transport.Tag(), message, err)
 		}
 	} else {
 		stripDNSPadding(response)
