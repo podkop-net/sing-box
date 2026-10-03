@@ -17,6 +17,14 @@ type Inbound interface {
 	Tag() string
 }
 
+// InboundListenAddress is implemented by an inbound that gives a connection its own listen
+// address as the destination (a direct inbound without an override, which expects a rule to
+// hijack it). The router uses it to refuse a connection that was not hijacked and would be
+// dialled back to the same inbound, looping without end.
+type InboundListenAddress interface {
+	ListenAddress() M.Socksaddr
+}
+
 type TCPInjectableInbound interface {
 	Inbound
 	ConnectionHandlerEx

@@ -146,6 +146,10 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		selectedOutbound = defaultOutbound
 	}
 
+	if r.wouldLoopToInbound(&metadata, selectedOutbound) {
+		buf.ReleaseMulti(buffers)
+		return E.New("refused connection to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")
+	}
 	for _, buffer := range buffers {
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
@@ -270,6 +274,10 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 			return E.New("UDP is not supported by outbound: ", defaultOutbound.Tag())
 		}
 		selectedOutbound = defaultOutbound
+	}
+	if r.wouldLoopToInbound(&metadata, selectedOutbound) {
+		N.ReleaseMultiPacketBuffer(packetBuffers)
+		return E.New("refused packet to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")
 	}
 	for _, buffer := range packetBuffers {
 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
@@ -404,6 +412,53 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, routeContext tun.Dire
 // store forgets an address that was given out shortly before a crash, or that nobody used
 // for a long time; a client may still hold it.
 var errMissingFakeIPRecord = E.New("missing fakeip record")
+
+// wouldLoopToInbound reports whether dialing selectedOutbound would send the connection
+// back to the listen address of the inbound it arrived on. A direct inbound without an
+// override hands out its own address as the destination, expecting a rule to hijack it;
+// when nothing does, the connection falls to the direct outbound, which dials that address,
+// and the packet returns to the same inbound as a new session, round after round. Only the
+// direct outbound dials the raw destination, and only a return to the SAME inbound is a
+// loop: a connection chained to a different local inbound (a urltest member pointed at a
+// mixed inbound) goes through a proxy outbound to another inbound and is left alone.
+func (r *Router) wouldLoopToInbound(metadata *adapter.InboundContext, selectedOutbound adapter.Outbound) bool {
+	if metadata.Inbound == "" {
+		return false
+	}
+	// a group dials through the member it has selected
+	for range 8 {
+		group, isGroup := selectedOutbound.(adapter.OutboundGroup)
+		if !isGroup {
+			break
+		}
+		member, loaded := r.outbound.Outbound(group.Now())
+		if !loaded {
+			return false
+		}
+		selectedOutbound = member
+	}
+	if selectedOutbound.Type() != C.TypeDirect {
+		return false
+	}
+	inbound, loaded := r.inbound.Get(metadata.Inbound)
+	if !loaded {
+		return false
+	}
+	listenInbound, isListen := inbound.(adapter.InboundListenAddress)
+	if !isListen {
+		return false
+	}
+	listen := listenInbound.ListenAddress()
+	if !listen.Addr.IsValid() || metadata.Destination.Port != listen.Port {
+		return false
+	}
+	if listen.Addr.IsUnspecified() {
+		// a listener on every address is reached at any of them: a connection accepted on
+		// it carries the one it came in on as its original destination
+		return metadata.Destination.Addr == listen.Addr || (metadata.OriginDestination.Addr.IsValid() && metadata.Destination.Addr == metadata.OriginDestination.Addr)
+	}
+	return metadata.Destination.Addr == listen.Addr
+}
 
 func (r *Router) matchRule(
 	ctx context.Context, metadata *adapter.InboundContext, preMatch bool, supportBypass bool,

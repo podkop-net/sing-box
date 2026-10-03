@@ -3,6 +3,7 @@ package direct
 import (
 	"context"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -23,6 +24,7 @@ func RegisterInbound(registry *inbound.Registry) {
 }
 
 type Inbound struct {
+	listenAddress M.Socksaddr
 	inbound.Adapter
 	ctx                 context.Context
 	router              adapter.ConnectionRouterEx
@@ -58,6 +60,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		udpTimeout = C.UDPTimeout
 	}
 	inbound.udpNat = udpnat.New(inbound, inbound.preparePacketConnection, udpTimeout, false)
+	// the address the loop guard compares with (adapter.InboundListenAddress): from the
+	// options, as the listeners bind it, and set before any connection is accepted
+	inbound.listenAddress = M.SocksaddrFrom(options.ListenOptions.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1})), options.ListenOptions.ListenPort)
 	inbound.listener = listener.New(listener.Options{
 		Context:           ctx,
 		Logger:            logger,
@@ -78,6 +83,12 @@ func (i *Inbound) Start(stage adapter.StartStage) error {
 
 func (i *Inbound) Close() error {
 	return i.listener.Close()
+}
+
+// ListenAddress reports the address this inbound listens on, which it also hands out as the
+// destination of a connection when there is no override. See adapter.InboundListenAddress.
+func (i *Inbound) ListenAddress() M.Socksaddr {
+	return i.listenAddress
 }
 
 func (i *Inbound) NewPacketEx(buffer *buf.Buffer, source M.Socksaddr) {
