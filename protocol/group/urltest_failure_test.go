@@ -110,6 +110,31 @@ func TestURLTestDialTimeoutSwitches(t *testing.T) {
 	waitSelected(t, group, "spare")
 }
 
+// quicIdleTimeout is the error quic-go gives when the server went silent: a timeout that
+// also matches net.ErrClosed.
+type quicIdleTimeout struct{}
+
+func (quicIdleTimeout) Error() string        { return "timeout: no recent network activity" }
+func (quicIdleTimeout) Timeout() bool        { return true }
+func (quicIdleTimeout) Temporary() bool      { return false }
+func (quicIdleTimeout) Is(target error) bool { return target == net.ErrClosed }
+
+// A Hysteria2 or TUIC server went silent: the QUIC connection times out and the dial fails
+// with an error that also reports itself closed. It is the server's failure, not a close
+// the caller made.
+func TestURLTestQUICTimeoutSwitches(t *testing.T) {
+	link, _ := testURL(t, 0)
+	silent := newTestMember(C.TypeHysteria2, "silent", func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return nil, quicIdleTimeout{}
+	})
+	spare := newTestMember(C.TypeHysteria2, "spare", dialWorking)
+	urlTest, group := newTestURLTest(t, link, silent, spare)
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.ErrorIs(t, err, net.ErrClosed)
+	waitSelected(t, group, "spare")
+}
+
 // A socks member failed to reach one destination but works: one URL test proves it, the
 // group keeps it and its test result (the periodic test keeps its schedule), and the test
 // is not repeated for every failed connection. Each false alarm doubles the pause before

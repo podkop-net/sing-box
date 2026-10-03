@@ -58,8 +58,12 @@ func serverOnlyDial(outbound adapter.Outbound) bool {
 // write (start is zero).
 func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound, network string, err error, start time.Time) {
 	// A reset, an EOF, a closed pipe or a timeout are the member's: E.IsClosedOrCanceled
-	// counts them as closed, which suits a copy loop, not this.
-	if ctx.Err() != nil || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+	// counts them as closed, which suits a copy loop, not this. A timeout stays the
+	// member's even when it also reports itself closed: the idle and handshake timeouts of
+	// quic-go (Hysteria2, TUIC) match net.ErrClosed.
+	var netErr net.Error
+	timeout := errors.As(err, &netErr) && netErr.Timeout()
+	if ctx.Err() != nil || !timeout && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed)) {
 		return
 	}
 	tag := RealTag(member)
