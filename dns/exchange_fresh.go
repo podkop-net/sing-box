@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -21,10 +22,23 @@ import (
 // per query (RFC 5452), and no per-socket rate limit of a public resolver applied to the
 // whole router (Yandex DNS answers only about 20 queries per burst and 20 per second per
 // source port and drops the rest). The reply must match the ID and the question; the
-// socket is closed on every return path, including cancellation.
+// socket is closed on every return path, including cancellation. While no answer has come
+// the same datagram is sent again (see freshRetransmitAt).
 
 // freshSocketSlots caps the sockets open at once, like dnsmasq --dns-forward-max.
 var freshSocketSlots = make(chan struct{}, 256)
+
+// freshRetransmitAt are the times after the first send at which the same datagram is sent
+// again while no answer has come, so that a lost query or reply costs about a second, not
+// the whole deadline. Duplicate queries of clients do not help here: the DNS client makes
+// them wait on the exchange in flight. One second, then doubling, as the Windows and
+// Apple resolvers, Chromium and dnsmasq --fast-dns-retry do and RFC 8085 recommends; three
+// sends in all, the limit of RFC 9520. The caller's deadline cuts the schedule short: the
+// provider fallback gives its servers 1.5-3 s, so they get two sends. The socket and ID
+// stay the same: a reply to any send is accepted (RFC 1035 7.3), so a slow but working
+// server is not punished, one port and ID stay in flight (RFC 5452), and a source port
+// carries three packets at most.
+var freshRetransmitAt = []time.Duration{time.Second, 3 * time.Second}
 
 func ExchangeFresh(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, message *mDNS.Msg) (*mDNS.Msg, error) {
 	return exchangeFresh(ctx, freshSocketSlots, dialer, serverAddr, message)
@@ -59,6 +73,12 @@ func exchangeFresh(ctx context.Context, slots chan struct{}, dialer N.Dialer, se
 	_, err = conn.Write(rawMessage)
 	if err != nil {
 		return nil, E.Cause(err, "write request")
+	}
+	// the timers get their own copy: the request buffer goes back to the pool on return
+	retransmit := append([]byte(nil), rawMessage...)
+	for _, at := range freshRetransmitAt {
+		timer := time.AfterFunc(at, func() { conn.Write(retransmit) })
+		defer timer.Stop()
 	}
 
 	udpSize := 2048

@@ -338,7 +338,13 @@ func (s *fallbackServer) exchangeProvider(ctx context.Context, baseCtx context.C
 // closed with the context.
 func (s *fallbackServer) exchangeAll(ctx context.Context, servers []M.Socksaddr, message *mDNS.Msg) (*mDNS.Msg, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// the losers end with the context (it closes their sockets); wait for them, so that
+	// nothing of this exchange runs on after it returned
+	var exchanges sync.WaitGroup
+	defer func() {
+		cancel()
+		exchanges.Wait()
+	}()
 	type result struct {
 		server   M.Socksaddr
 		response *mDNS.Msg
@@ -346,7 +352,9 @@ func (s *fallbackServer) exchangeAll(ctx context.Context, servers []M.Socksaddr,
 	}
 	results := make(chan result, len(servers))
 	for _, server := range servers {
+		exchanges.Add(1)
 		go func(server M.Socksaddr) {
+			defer exchanges.Done()
 			response, err := exchangeFresh(ctx, fallbackSocketSlots, s.dialer, server, message)
 			results <- result{server, response, err}
 		}(server)
