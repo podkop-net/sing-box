@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -78,7 +79,22 @@ func (s *RemoteRuleSet) Name() string {
 }
 
 func (s *RemoteRuleSet) String() string {
-	return strings.Join(F.MapToString(s.rules), " ")
+	return strings.Join(F.MapToString(s.currentRules()), " ")
+}
+
+// currentRules reads the rules under the lock that loadBytes swaps them under: since the
+// start deadline (podkop-engine) a set routinely gets its rules while connections match it.
+func (s *RemoteRuleSet) currentRules() []adapter.HeadlessRule {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.rules
+}
+
+// dropRules forgets the rules, under the same lock.
+func (s *RemoteRuleSet) dropRules() {
+	s.access.Lock()
+	s.rules = nil
+	s.access.Unlock()
 }
 
 func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.HTTPStartContext) error {
@@ -146,7 +162,7 @@ func (s *RemoteRuleSet) DecRef() {
 
 func (s *RemoteRuleSet) Cleanup() {
 	if s.refs.Load() == 0 {
-		s.rules = nil
+		s.dropRules()
 	}
 }
 
@@ -226,7 +242,7 @@ func (s *RemoteRuleSet) loopUpdate() {
 		if err != nil {
 			s.logger.Error("fetch rule-set ", s.options.Tag, ": ", err)
 		} else if s.refs.Load() == 0 {
-			s.rules = nil
+			s.dropRules()
 		}
 	}
 	for {
@@ -245,12 +261,67 @@ func (s *RemoteRuleSet) updateOnce() {
 	if err != nil {
 		s.logger.Error("fetch rule-set ", s.options.Tag, ": ", err)
 	} else if s.refs.Load() == 0 {
-		s.rules = nil
+		s.dropRules()
 	}
+}
+
+// A rule-set download must not hang the start (the inbounds listen only after every rule-set
+// has started) nor the background updates, yet a large list on a slow router link is normal
+// and must still load. So the start gets a short TOTAL deadline — on timeout it starts empty
+// and the updater fills it in later — while every fetch, start or update, is bounded by a
+// no-progress (stall) timer that fires only when the transfer delivers nothing for a while,
+// never cutting off a slow but steady download. ruleSetMaxSize caps the bytes read into
+// memory: a backstop against an endless stream, not a memory guarantee (parsing a list costs
+// several times its wire size, so a genuinely large list is a separate memory concern).
+var (
+	ruleSetStartDeadline = 30 * time.Second
+	ruleSetStallTimeout  = 30 * time.Second
+)
+
+const ruleSetMaxSize = 50 << 20
+
+// stallResetReader resets a watchdog on every read that carries data, so a transfer making
+// steady progress is never cut off while one that goes silent is.
+type stallResetReader struct {
+	reader io.Reader
+	reset  func()
+}
+
+func (r *stallResetReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.reset()
+	}
+	return n, err
 }
 
 func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPStartContext) error {
 	s.logger.Debug("updating rule-set ", s.options.Tag, " from URL: ", s.options.RemoteOptions.URL)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if startContext != nil {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(ctx, ruleSetStartDeadline)
+		defer stop()
+	}
+	// Fire the stall timer if the request produces nothing (no response headers, then no body
+	// bytes) for the stall timeout; each read that carries data resets it below.
+	var stalled atomic.Bool
+	stall := time.AfterFunc(ruleSetStallTimeout, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	defer stall.Stop()
+	// name the bound that cut the fetch: the context errors alone read like a shutdown
+	describe := func(err error) error {
+		if stalled.Load() {
+			return E.Cause(err, "no data for ", ruleSetStallTimeout)
+		}
+		if startContext != nil && errors.Is(err, context.DeadlineExceeded) {
+			return E.Cause(err, "start deadline of ", ruleSetStartDeadline, " reached")
+		}
+		return err
+	}
 	var httpClient *http.Client
 	if startContext != nil {
 		httpClient = startContext.HTTPClient(s.options.RemoteOptions.DownloadDetour, s.dialer)
@@ -280,10 +351,16 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 	}
 	response, err := httpClient.Do(request.WithContext(ctx))
 	if err != nil {
-		return err
+		if startContext != nil {
+			// the start fetches share this client's pooled connections: one that stalled
+			// would carry the next batch of rule-sets into the same wait
+			httpClient.CloseIdleConnections()
+		}
+		return describe(err)
 	}
 	// Also on an unexpected status, otherwise the connection stays open.
 	defer response.Body.Close()
+	stall.Reset(ruleSetStallTimeout)
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
@@ -304,10 +381,14 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 	default:
 		return E.New("unexpected status: ", response.Status)
 	}
-	content, err := io.ReadAll(response.Body)
+	body := &stallResetReader{reader: response.Body, reset: func() { stall.Reset(ruleSetStallTimeout) }}
+	content, err := io.ReadAll(io.LimitReader(body, ruleSetMaxSize+1))
 	if err != nil {
 		response.Body.Close()
-		return err
+		return describe(err)
+	}
+	if len(content) > ruleSetMaxSize {
+		return E.New("rule-set larger than ", ruleSetMaxSize>>20, " MB")
 	}
 	err = s.loadBytes(content)
 	if err != nil {
@@ -335,7 +416,7 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 }
 
 func (s *RemoteRuleSet) Close() error {
-	s.rules = nil
+	s.dropRules()
 	s.cancel()
 	if s.updateTicker != nil {
 		s.updateTicker.Stop()
@@ -353,7 +434,7 @@ func (s *RemoteRuleSet) matchStates(metadata *adapter.InboundContext) ruleMatchS
 
 func (s *RemoteRuleSet) matchStatesWithBase(metadata *adapter.InboundContext, base ruleMatchState) ruleMatchStateSet {
 	var stateSet, definitiveStateSet ruleMatchStateSet
-	for _, rule := range s.rules {
+	for _, rule := range s.currentRules() {
 		nestedMetadata := *metadata
 		nestedMetadata.ResetRuleMatchCache()
 		stateSet = stateSet.merge(matchHeadlessRuleStatesWithBase(rule, &nestedMetadata, base))
