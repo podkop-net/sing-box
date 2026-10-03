@@ -246,6 +246,17 @@ func QUICClientHello(ctx context.Context, metadata *adapter.InboundContext, pack
 				return err
 			}
 			index := len(decrypted) - decryptedReader.Len()
+			// length comes from the packet: a crafted CRYPTO frame can name more bytes
+			// than the decrypted payload holds. Refuse such a packet instead of slicing
+			// out of range and panicking.
+			if index < 0 || length > uint64(len(decrypted)-index) {
+				return os.ErrInvalid
+			}
+			// An empty frame carries nothing to reassemble, and the reassembly below
+			// would match a fragment that does not move the offset again and again.
+			if length == 0 {
+				continue
+			}
 			fragments = append(fragments, qCryptoFragment{offset, length, decrypted[index : index+int(length)]})
 			_, err = decryptedReader.Seek(int64(length), io.SeekCurrent)
 			if err != nil {
@@ -281,6 +292,15 @@ func QUICClientHello(ctx context.Context, metadata *adapter.InboundContext, pack
 	for _, fragment := range fragments {
 		frameLen += fragment.length
 	}
+	// The reassembled CRYPTO data is a TLS ClientHello, whose record length is written just
+	// below as a uint16 — so the format already tops out at 65535 bytes. A stream of valid
+	// Initial packets whose CRYPTO fragments sum past that is not a real handshake but an
+	// attempt to make the sniffer accumulate and re-copy unbounded data across packets (the
+	// per-packet read timeout is the only other limit). Refuse it; a genuine ClientHello is
+	// far smaller. This also keeps the int() conversion below in range on 32-bit builds.
+	if frameLen > 0xFFFF {
+		return os.ErrInvalid
+	}
 	buffer := buf.NewSize(5 + int(frameLen))
 	defer buffer.Release()
 	buffer.WriteByte(0x16)
@@ -291,7 +311,7 @@ func QUICClientHello(ctx context.Context, metadata *adapter.InboundContext, pack
 find:
 	for {
 		for _, fragment := range fragments {
-			if fragment.offset == index {
+			if fragment.offset == index && fragment.length > 0 {
 				buffer.Write(fragment.payload)
 				index = fragment.offset + fragment.length
 				length++
