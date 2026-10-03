@@ -395,8 +395,12 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 		if checked[realTag] {
 			continue
 		}
+		// A member that some group tested within this round is not tested again. The
+		// group's own test from the previous round must not count: it finished at most one
+		// test timeout after that round began, so it is at least interval minus that timeout
+		// old. Comparing with the whole interval made every other round skip it.
 		history := g.history.LoadURLTestHistory(realTag)
-		if !force && history != nil && time.Since(history.Time) < g.interval {
+		if !force && history != nil && time.Since(history.Time) < g.interval-C.TCPTimeout {
 			continue
 		}
 		checked[realTag] = true
