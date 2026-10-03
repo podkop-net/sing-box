@@ -61,7 +61,7 @@ func (c *GunConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *GunConn) read(b []byte) (n int, err error) {
-	if c.reader == nil {
+	if c.create != nil {
 		<-c.create
 		if c.err != nil {
 			return 0, c.err
@@ -141,7 +141,18 @@ func (c *GunConn) FrontHeadroom() int {
 }
 
 func (c *GunConn) Close() error {
-	return common.Close(c.rawReader, c.writer)
+	// the reader is set by setup, in the request goroutine: read it only once that is done
+	var reader io.Reader
+	if c.create != nil {
+		select {
+		case <-c.create:
+			reader = c.rawReader
+		default:
+		}
+	} else {
+		reader = c.rawReader
+	}
+	return common.Close(reader, c.writer)
 }
 
 func (c *GunConn) LocalAddr() net.Addr {

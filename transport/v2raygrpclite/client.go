@@ -91,10 +91,16 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	go func() {
 		response, err := c.transport.RoundTrip(request)
 		if err != nil {
+			// RoundTrip failed, so the request never established and nothing will ever read
+			// the request-body pipe: closing its read end with the error releases a Write
+			// blocked on it (the synchronous first write of the handshake) with that error
+			pipeInReader.CloseWithError(err)
 			conn.setup(nil, err)
 		} else if response.StatusCode != 200 {
 			response.Body.Close()
-			conn.setup(nil, E.New("v2ray-grpc: unexpected status: ", response.Status))
+			err = E.New("v2ray-grpc: unexpected status: ", response.Status)
+			pipeInReader.CloseWithError(err)
+			conn.setup(nil, err)
 		} else {
 			conn.setup(response.Body, nil)
 		}
