@@ -143,7 +143,23 @@ func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
 			}
 		}
 	}
-	return c.UConn.HandshakeContext(ctx)
+	err := c.UConn.HandshakeContext(ctx)
+	if err != nil {
+		return err
+	}
+	releaseHandshakeState(c.UConn)
+	return nil
+}
+
+// releaseHandshakeState drops what only the handshake reads: the ClientHello, the private
+// keys of the key shares (an ML-KEM-768 decapsulation key takes ~8 KiB) and the extension
+// objects. The connection keeps them for its whole life otherwise; after the handshake
+// uTLS works through the embedded Conn, which does not use them.
+func releaseHandshakeState(uConn *utls.UConn) {
+	uConn.HandshakeState.Hello = nil
+	uConn.HandshakeState.ServerHello = nil
+	uConn.HandshakeState.State13 = utls.TLS13OnlyState{}
+	uConn.Extensions = nil
 }
 
 func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {

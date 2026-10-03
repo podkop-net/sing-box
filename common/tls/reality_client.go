@@ -219,6 +219,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		return nil, E.New("reality verification failed")
 	}
 
+	releaseHandshakeState(uConn)
 	return &realityClientConnWrapper{uConn}, nil
 }
 
