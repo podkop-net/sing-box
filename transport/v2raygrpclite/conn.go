@@ -9,10 +9,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/sagernet/sing-box/common/readwait"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/baderror"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/varbin"
 )
 
@@ -96,6 +98,29 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 	n, err = c.reader.Read(b)
 	c.readRemaining -= n
 	return
+}
+
+// CreateReadWaiter lets the copy loop wait for the next bytes in the frame reader's own
+// buffer before it takes a buffer (podkop-engine, see common/readwait).
+func (c *GunConn) CreateReadWaiter() (N.ReadWaiter, bool) {
+	return readwait.NewPeekWaiter(c, c.waitData), true
+}
+
+// waitData waits at the start of a message only: Peek fills the reader's 4 KiB buffer,
+// and a read then gets no more than that, while inside a message a read with the copy
+// loop's buffer goes past the empty reader buffer to the body directly.
+func (c *GunConn) waitData() error {
+	if c.create != nil {
+		<-c.create
+		if c.err != nil {
+			return c.err
+		}
+	}
+	if c.readRemaining > 0 {
+		return nil
+	}
+	_, err := c.reader.Peek(1)
+	return err
 }
 
 func (c *GunConn) Write(b []byte) (n int, err error) {
