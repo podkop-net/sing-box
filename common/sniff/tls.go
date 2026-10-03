@@ -12,12 +12,18 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
+// errClientHelloCaptured ends the server handshake as soon as the ClientHello is parsed.
+// Returning (nil, nil) from GetConfigForClient would let it go on into the server's key
+// exchange (X25519, plus ML-KEM for the post-quantum hellos current browsers send) and only
+// then fail for want of a certificate: about 30 times the cost of the parse, all discarded.
+var errClientHelloCaptured = errors.New("tls: client hello captured")
+
 func TLSClientHello(ctx context.Context, metadata *adapter.InboundContext, reader io.Reader) error {
 	var clientHello *tls.ClientHelloInfo
 	err := tls.Server(bufio.NewReadOnlyConn(reader), &tls.Config{
 		GetConfigForClient: func(argHello *tls.ClientHelloInfo) (*tls.Config, error) {
 			clientHello = argHello
-			return nil, nil
+			return nil, errClientHelloCaptured
 		},
 	}).HandshakeContext(ctx)
 	if clientHello != nil {
