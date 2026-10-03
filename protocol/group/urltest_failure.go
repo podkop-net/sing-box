@@ -120,7 +120,8 @@ type memberConfirm struct {
 	lastFailure time.Time
 }
 
-// confirmFailure has one URL test of the member tell its failure from the destination's.
+// confirmFailure has one URL test of the member tell its failure from the destination's,
+// and reports whether it started one.
 // The test is the periodic one, with its timeout; a failed test makes the member
 // unavailable, and the group selects again. A test that finds the member working changes
 // nothing (the periodic test keeps its schedule), but delays the next one: as long as the
@@ -130,16 +131,28 @@ type memberConfirm struct {
 // persists, like an application calling a dead site again and again, so costs at most one
 // test per interval, as many as the periodic test, while an isolated one leaves the member
 // unwatched only for the length of a test.
-func (g *URLTestGroup) confirmFailure(tag string, member adapter.Outbound) {
+func (g *URLTestGroup) confirmFailure(tag string, member adapter.Outbound) bool {
+	return g.confirmWith(&g.confirms, tag, member)
+}
+
+// confirmUnanswered is confirmFailure for connections that got no answer (see
+// urltest_response.go), with pauses of its own: a quiet router whose traffic goes to dead
+// destinations keeps the member passing these tests, and must not delay the tests of
+// failed dials.
+func (g *URLTestGroup) confirmUnanswered(tag string, member adapter.Outbound) bool {
+	return g.confirmWith(&g.unansweredConfirms, tag, member)
+}
+
+func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag string, member adapter.Outbound) bool {
 	now := time.Now()
 	g.confirmAccess.Lock()
-	if g.confirms == nil {
-		g.confirms = make(map[string]*memberConfirm)
+	if *confirms == nil {
+		*confirms = make(map[string]*memberConfirm)
 	}
-	state := g.confirms[tag]
+	state := (*confirms)[tag]
 	if state == nil {
 		state = &memberConfirm{}
-		g.confirms[tag] = state
+		(*confirms)[tag] = state
 	}
 	if now.Sub(state.lastFailure) > g.interval {
 		state.pause, state.notBefore = 0, time.Time{}
@@ -147,7 +160,7 @@ func (g *URLTestGroup) confirmFailure(tag string, member adapter.Outbound) {
 	state.lastFailure = now
 	if state.running || now.Before(state.notBefore) {
 		g.confirmAccess.Unlock()
-		return
+		return false
 	}
 	state.running = true
 	g.confirmAccess.Unlock()
@@ -162,6 +175,9 @@ func (g *URLTestGroup) confirmFailure(tag string, member adapter.Outbound) {
 			state.notBefore = now.Add(state.pause)
 		}
 		g.confirmAccess.Unlock()
+		if err == nil {
+			g.memberTestPassed(tag, start)
+		}
 		if err == nil || g.ctx.Err() != nil {
 			return
 		}
@@ -169,6 +185,7 @@ func (g *URLTestGroup) confirmFailure(tag string, member adapter.Outbound) {
 		g.history.DeleteURLTestHistory(tag)
 		g.performUpdateCheck()
 	}()
+	return true
 }
 
 // testOutbound runs one URL test of detour, bounded by the TCP timeout.
@@ -197,11 +214,15 @@ func testOutbound(ctx context.Context, link string, detour adapter.Outbound) (ui
 // replaceable, and the copy loop writes to the connection under it directly.
 type handshakeConn struct {
 	net.Conn
-	done   atomic.Bool
-	failed func(error)
+	done    atomic.Bool
+	failed  func(error)
+	writing func() // called before a write that carries data, until the handshake is done
 }
 
 func (c *handshakeConn) Write(b []byte) (int, error) {
+	if c.writing != nil && len(b) > 0 && !c.done.Load() {
+		c.writing()
+	}
 	n, err := c.Conn.Write(b)
 	if c.done.Load() {
 		return n, err

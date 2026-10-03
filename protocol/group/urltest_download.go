@@ -119,10 +119,12 @@ func (g *URLTestGroup) setFrozen(tag string, at time.Time) {
 func (g *URLTestGroup) downloadStopped(tag string, member adapter.Outbound) bool {
 	ctx, cancel := context.WithTimeout(g.ctx, downloadTestTimeout)
 	defer cancel()
+	start := time.Now()
 	received, elapsed, err := urltest.DownloadTest(ctx, g.downloadLink, member)
 	switch {
 	case err == nil:
 		g.logger.Debug("outbound ", tag, " download test: ", received, " bytes in ", elapsed.Milliseconds(), "ms")
+		g.memberTestPassed(tag, start)
 	case errors.Is(err, urltest.ErrDownloadStopped):
 		g.logger.Warn("outbound ", tag, " download test: ", err)
 		return true
