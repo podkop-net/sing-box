@@ -50,6 +50,8 @@ type Box struct {
 	router          *route.Router
 	internalService []adapter.LifecycleService
 	done            chan struct{}
+	debugOptions    option.DebugOptions
+	memoryLimit     func()
 }
 
 type Options struct {
@@ -124,7 +126,8 @@ func New(options Options) (*Box, error) {
 
 	ctx = pause.WithDefaultManager(ctx)
 	experimentalOptions := common.PtrValueOrDefault(options.Experimental)
-	err := applyDebugOptions(common.PtrValueOrDefault(experimentalOptions.Debug))
+	debugOptions := common.PtrValueOrDefault(experimentalOptions.Debug)
+	err := applyDebugOptions(debugOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +386,7 @@ func New(options Options) (*Box, error) {
 		internalServices = append(internalServices, adapter.NewLifecycleService(ntpService, "ntp service"))
 	}
 	return &Box{
+		debugOptions:    debugOptions,
 		network:         networkManager,
 		endpoint:        endpointManager,
 		inbound:         inboundManager,
@@ -446,6 +450,7 @@ func (s *Box) preStart() error {
 	if err != nil {
 		return E.Cause(err, "start logger")
 	}
+	s.memoryLimit = startMemoryLimit(s.logger, s.debugOptions)
 	err = adapter.StartNamed(s.logger, adapter.StartStateInitialize, s.internalService) // cache-file clash-api v2ray-api
 	if err != nil {
 		return err
@@ -501,6 +506,9 @@ func (s *Box) Close() error {
 		close(s.done)
 	}
 	var err error
+	if s.memoryLimit != nil {
+		s.memoryLimit()
+	}
 	for _, closeItem := range []struct {
 		name    string
 		service adapter.Lifecycle
