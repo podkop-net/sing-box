@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -48,6 +49,7 @@ type HTTPSTransport struct {
 	transportAccess  sync.Mutex
 	transport        *HTTPSTransportWrapper
 	transportResetAt time.Time
+	answeredStartAt  atomic.Int64 // unix nanoseconds: the latest start among the answered exchanges
 }
 
 func NewHTTPS(ctx context.Context, logger log.ContextLogger, tag string, options option.RemoteHTTPSDNSServerOptions) (adapter.DNSTransport, error) {
@@ -160,6 +162,12 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	response, err := t.exchange(ctx, message)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
+			// A query that began after this one was answered: the connection is alive
+			// and the timeout is about this query alone (a slow upstream for one name).
+			// A reset would open a new connection and leave the old one open.
+			if t.answeredStartAt.Load() > startAt.UnixNano() {
+				return nil, err
+			}
 			t.transportAccess.Lock()
 			defer t.transportAccess.Unlock()
 			if t.transportResetAt.After(startAt) {
@@ -170,6 +178,12 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 			t.transportResetAt = time.Now()
 		}
 		return nil, err
+	}
+	for started := startAt.UnixNano(); ; {
+		latest := t.answeredStartAt.Load()
+		if started <= latest || t.answeredStartAt.CompareAndSwap(latest, started) {
+			break
+		}
 	}
 	return response, nil
 }
