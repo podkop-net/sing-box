@@ -119,7 +119,13 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 	if err != nil {
 		return nil, err
 	}
-	tlsConn, err := aTLS.ClientHandshake(ctx, conn, d.config)
+	// The handshake is bounded as in ClientHandshake above (and by handshake_timeout in
+	// 1.14, same default): a server that accepts the connection and never answers the
+	// ClientHello kept a dial waiting for as long as its caller did, which for a proxied
+	// connection has no deadline (podkop-engine).
+	handshakeCtx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+	tlsConn, err := aTLS.ClientHandshake(handshakeCtx, conn, d.config)
+	cancel()
 	if err != nil {
 		conn.Close()
 		var echErr *tls.ECHRejectionError
