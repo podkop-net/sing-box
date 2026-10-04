@@ -15,8 +15,12 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 
 	"github.com/stretchr/testify/require"
 )
@@ -294,4 +298,46 @@ func TestURLTestDownloadCheckOff(t *testing.T) {
 	_, _ = urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
 	waitSelected(t, group, "b")
 	require.Equal(t, int32(0), frozen.gets.Load())
+}
+
+// download_url sets the group's test URL: absent, the environment's is taken; empty, the
+// test is off; a URL the test could not use is an error of the configuration.
+func TestURLTestDownloadURLOption(t *testing.T) {
+	environment := downloadTestLink
+	t.Cleanup(func() { downloadTestLink = environment })
+	downloadTestLink = "http://environment.test/64k"
+	for _, testCase := range []struct {
+		name   string
+		option *string
+		link   string
+		err    bool
+	}{
+		{"absent", nil, "http://environment.test/64k", false},
+		{"empty", common.Ptr(""), "", false},
+		{"https", common.Ptr("https://download.test/64k"), "https://download.test/64k", false},
+		{"http with a port", common.Ptr("http://download.test:8080/64k"), "http://download.test:8080/64k", false},
+		{"no scheme", common.Ptr("download.test/64k"), "", true},
+		{"not http", common.Ptr("ftp://download.test/64k"), "", true},
+		{"no host", common.Ptr("https:///64k"), "", true},
+		{"unparsable", common.Ptr("://download.test"), "", true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			member := newTestMember(C.TypeVLESS, "a", dialWorking)
+			ctx := service.ContextWithPtr(context.Background(), urltest.NewHistoryStorage())
+			manager := &testOutboundManager{members: map[string]adapter.Outbound{"a": member}}
+			ctx = service.ContextWith[adapter.OutboundManager](ctx, manager)
+			created, err := NewURLTest(ctx, nil, log.NewNOPFactory().NewLogger("urltest"), "auto", option.URLTestOutboundOptions{
+				Outbounds:   []string{"a"},
+				DownloadURL: testCase.option,
+			})
+			if testCase.err {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			urlTest := created.(*URLTest)
+			require.NoError(t, urlTest.Start())
+			require.Equal(t, testCase.link, urlTest.group.downloadLink)
+		})
+	}
 }

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net/url"
 	"os"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -26,13 +28,35 @@ import (
 // is the user's. The member in use is tested only when it was taken as the last resort,
 // frozen: a connection that freezes only once it carries data is not seen here.
 //
-// The test URL comes from SING_BOX_URLTEST_DOWNLOAD_URL (the init script sets it from
-// /etc/config/sing-box); without it nothing changes.
+// The test URL is the group's download_url; a group without the option takes
+// SING_BOX_URLTEST_DOWNLOAD_URL (the init script sets it from /etc/config/sing-box), and an
+// empty download_url turns the test off for the group. Without either nothing changes.
 
 var (
 	downloadTestLink    = os.Getenv("SING_BOX_URLTEST_DOWNLOAD_URL")
 	downloadTestTimeout = C.TCPTimeout
 )
+
+// groupDownloadLink is the download test URL of a group with the download_url option
+// downloadURL (nil when absent). A URL the test could not use is a configuration error,
+// which sing-box check reports: an http or https URL with a host.
+func groupDownloadLink(downloadURL *string) (string, error) {
+	if downloadURL == nil {
+		return downloadTestLink, nil
+	}
+	link := *downloadURL
+	if link == "" {
+		return "", nil
+	}
+	linkURL, err := url.Parse(link)
+	if err != nil {
+		return "", E.Cause(err, "parse download_url")
+	}
+	if (linkURL.Scheme != "http" && linkURL.Scheme != "https") || linkURL.Hostname() == "" {
+		return "", E.New("download_url: an http or https URL with a host expected: ", link)
+	}
+	return link, nil
+}
 
 // selectTested chooses the TCP member as Select does, except that a member the group would
 // switch to first passes the download test. When no candidate passes, a current member

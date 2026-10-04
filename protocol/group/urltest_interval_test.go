@@ -87,7 +87,7 @@ func TestURLTestFreshness(t *testing.T) {
 			history.StoreURLTestHistory("member", &adapter.URLTestHistory{Time: time.Now().Add(-testCase.age), Delay: 10})
 			ctx := service.ContextWithPtr(context.Background(), history)
 			manager := &testOutboundManager{members: map[string]adapter.Outbound{"member": member}}
-			group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{member}, link, interval, 50, 0, false)
+			group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), []adapter.Outbound{member}, link, "", interval, 50, 0, false)
 			require.NoError(t, err)
 			_, _ = group.urlTest(ctx, false)
 			require.Equal(t, testCase.tested, member.dials.Load() > 0)
