@@ -29,7 +29,7 @@ type GunConn struct {
 	flusher       http.Flusher
 	create        chan struct{}
 	err           error
-	readRemaining int
+	readRemaining uint64
 }
 
 func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunConn {
@@ -71,11 +71,11 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 	}
 
 	if c.readRemaining > 0 {
-		if len(b) > c.readRemaining {
+		if uint64(len(b)) > c.readRemaining {
 			b = b[:c.readRemaining]
 		}
 		n, err = c.reader.Read(b)
-		c.readRemaining -= n
+		c.readRemaining -= uint64(n)
 		return
 	}
 
@@ -89,14 +89,13 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 		return
 	}
 
-	readLen := int(dataLen)
-	c.readRemaining = readLen
-	if len(b) > readLen {
-		b = b[:readLen]
+	c.readRemaining = dataLen
+	if uint64(len(b)) > dataLen {
+		b = b[:dataLen]
 	}
 
 	n, err = c.reader.Read(b)
-	c.readRemaining -= n
+	c.readRemaining -= uint64(n)
 	return
 }
 
