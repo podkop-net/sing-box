@@ -3,6 +3,7 @@ package group
 import (
 	"context"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,8 @@ type URLTest struct {
 	connection                   adapter.ConnectionManager
 	logger                       log.ContextLogger
 	tags                         []string
+	fallbackTags                 []string
+	all                          []string
 	link                         string
 	downloadLink                 string
 	interval                     time.Duration
@@ -48,13 +51,17 @@ type URLTest struct {
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
+	// a new slice: appending to the decoded options could write into their array
+	all := slices.Concat(options.Outbounds, options.Fallbacks)
 	outbound := &URLTest{
-		Adapter:                      outbound.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
+		Adapter:                      outbound.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, all),
 		ctx:                          ctx,
 		outbound:                     service.FromContext[adapter.OutboundManager](ctx),
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
+		fallbackTags:                 options.Fallbacks,
+		all:                          all,
 		link:                         options.URL,
 		interval:                     time.Duration(options.Interval),
 		tolerance:                    options.Tolerance,
@@ -63,6 +70,18 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 	}
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
+	}
+	if len(outbound.fallbackTags) > 0 {
+		listed := make(map[string]bool, len(all))
+		for _, member := range outbound.tags {
+			listed[member] = true
+		}
+		for _, member := range outbound.fallbackTags {
+			if listed[member] {
+				return nil, E.New("fallback ", member, " is already listed in outbounds or fallbacks")
+			}
+			listed[member] = true
+		}
 	}
 	var err error
 	outbound.downloadLink, err = groupDownloadLink(options.DownloadURL)
@@ -81,7 +100,15 @@ func (s *URLTest) Start() error {
 		}
 		outbounds = append(outbounds, detour)
 	}
-	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.downloadLink, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
+	fallbacks := make([]adapter.Outbound, 0, len(s.fallbackTags))
+	for i, tag := range s.fallbackTags {
+		detour, loaded := s.outbound.Outbound(tag)
+		if !loaded {
+			return E.New("fallback ", i, " not found: ", tag)
+		}
+		fallbacks = append(fallbacks, detour)
+	}
+	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, fallbacks, s.link, s.downloadLink, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
 	if err != nil {
 		return err
 	}
@@ -109,8 +136,9 @@ func (s *URLTest) Now() string {
 	return ""
 }
 
+// All lists the outbounds, then the fallbacks.
 func (s *URLTest) All() []string {
-	return s.tags
+	return s.all
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
@@ -228,6 +256,8 @@ type URLTestGroup struct {
 	pauseCallback                *list.Element[pause.Callback]
 	logger                       log.Logger
 	outbounds                    []adapter.Outbound
+	fallbacks                    []adapter.Outbound
+	members                      []adapter.Outbound // the outbounds, then the fallbacks: what a round tests
 	link                         string
 	interval                     time.Duration
 	tolerance                    uint16
@@ -256,7 +286,7 @@ type URLTestGroup struct {
 	responsesClosed              atomic.Bool
 }
 
-func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, downloadLink string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
+func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, fallbacks []adapter.Outbound, link string, downloadLink string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
 	if interval == 0 {
 		interval = C.DefaultURLTestInterval
 	}
@@ -282,6 +312,8 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		outbound:                     outboundManager,
 		logger:                       logger,
 		outbounds:                    outbounds,
+		fallbacks:                    fallbacks,
+		members:                      slices.Concat(outbounds, fallbacks),
 		link:                         link,
 		interval:                     interval,
 		tolerance:                    tolerance,
@@ -339,7 +371,9 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 	return g.selectAmong(network, nil)
 }
 
-// selectAmong is Select without the members that skip says to pass over.
+// selectAmong is Select without the members that skip says to pass over. The fastest of the
+// outbounds is chosen, by the tolerance; only when none of them is a candidate, the first
+// fallback that is, in the order of the list.
 func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history *adapter.URLTestHistory) bool) (adapter.Outbound, bool) {
 	var minDelay uint16
 	var minOutbound adapter.Outbound
@@ -350,7 +384,8 @@ func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history
 	case N.NetworkUDP:
 		selected = g.selectedOutboundUDP.Load()
 	}
-	if selected != nil {
+	// a fallback in use holds back no outbound: it is chosen only while none is a candidate
+	if selected != nil && !g.isFallback(selected) {
 		tag := RealTag(selected)
 		if history := g.history.LoadURLTestHistory(tag); history != nil && (skip == nil || !skip(tag, history)) {
 			minOutbound = selected
@@ -372,7 +407,19 @@ func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history
 		}
 	}
 	if minOutbound == nil {
-		for _, detour := range g.outbounds {
+		for _, detour := range g.fallbacks {
+			if !common.Contains(detour.Network(), network) {
+				continue
+			}
+			tag := RealTag(detour)
+			history := g.history.LoadURLTestHistory(tag)
+			if history == nil || (skip != nil && skip(tag, history)) {
+				continue
+			}
+			return detour, true
+		}
+		// the plain choice: the first outbound for the network, or, without one, fallback
+		for _, detour := range g.members {
 			if !common.Contains(detour.Network(), network) {
 				continue
 			}
@@ -381,6 +428,10 @@ func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history
 		return nil, false
 	}
 	return minOutbound, true
+}
+
+func (g *URLTestGroup) isFallback(detour adapter.Outbound) bool {
+	return len(g.fallbacks) > 0 && common.Contains(g.fallbacks, detour)
 }
 
 func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
@@ -442,7 +493,7 @@ func (g *URLTestGroup) urlTestRound(ctx context.Context, force bool) (map[string
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
 	checked := make(map[string]bool)
 	var resultAccess sync.Mutex
-	for _, detour := range g.outbounds {
+	for _, detour := range g.members {
 		tag := detour.Tag()
 		realTag := RealTag(detour)
 		if checked[realTag] {
@@ -503,7 +554,11 @@ func (g *URLTestGroup) updateSelection() {
 		if selected := g.selectedOutboundTCP.Load(); selected == nil || (exists && outbound != selected) {
 			if selected != nil {
 				updated = true
-				g.logger.Warn("switched from outbound ", selected.Tag(), " to ", outbound.Tag())
+				if g.isFallback(outbound) {
+					g.logger.Warn("switched from outbound ", selected.Tag(), " to fallback ", outbound.Tag())
+				} else {
+					g.logger.Warn("switched from outbound ", selected.Tag(), " to ", outbound.Tag())
+				}
 			}
 			g.selectedOutboundTCP.Store(outbound)
 		}

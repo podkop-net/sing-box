@@ -10,6 +10,7 @@ type SelectorOutboundOptions struct {
 
 type URLTestOutboundOptions struct {
 	Outbounds                 []string           `json:"outbounds"`
+	Fallbacks                 []string           `json:"fallbacks,omitempty"`
 	URL                       string             `json:"url,omitempty"`
 	DownloadURL               *string            `json:"download_url,omitempty"`
 	Interval                  badoption.Duration `json:"interval,omitempty"`
