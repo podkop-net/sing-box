@@ -166,4 +166,4 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
 
-replace github.com/sagernet/sing-vmess => github.com/FiyeroT/sing-vmess v0.2.8-pdk13.1
+replace github.com/sagernet/sing-vmess => github.com/FiyeroT/sing-vmess v0.2.8-pdk13.2
