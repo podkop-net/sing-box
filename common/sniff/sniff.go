@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -21,6 +23,24 @@ type (
 )
 
 var ErrNeedMoreData = E.New("need more data")
+
+// ErrSnifferPanicked is the failure of a sniffer that panicked. Sniffers parse what any
+// client sends: a panic, a bug on input the sniffer did not expect, costs the sniff of one
+// connection instead of the process.
+var ErrSnifferPanicked = E.New("sniffer panicked")
+
+// recovered runs a sniffer. On a panic it restores the metadata the sniffer may have set
+// and returns ErrSnifferPanicked with the panic and its stack.
+func recovered(metadata *adapter.InboundContext, sniff func() error) (err error) {
+	protocol, domain, client, sniffContext := metadata.Protocol, metadata.Domain, metadata.Client, metadata.SniffContext
+	defer func() {
+		if panicked := recover(); panicked != nil {
+			metadata.Protocol, metadata.Domain, metadata.Client, metadata.SniffContext = protocol, domain, client, sniffContext
+			err = fmt.Errorf("%w: %v\n%s", ErrSnifferPanicked, panicked, debug.Stack())
+		}
+	}()
+	return sniff()
+}
 
 func Skip(metadata *adapter.InboundContext) bool {
 	// skip server first protocols
@@ -62,7 +82,7 @@ func PeekStream(ctx context.Context, metadata *adapter.InboundContext, conn net.
 			reader := io.MultiReader(common.Map(append(buffers, buffer), func(it *buf.Buffer) io.Reader {
 				return bytes.NewReader(it.Bytes())
 			})...)
-			err = sniffer(ctx, metadata, reader)
+			err = recovered(metadata, func() error { return sniffer(ctx, metadata, reader) })
 			if err == nil {
 				return nil
 			}
@@ -78,7 +98,7 @@ func PeekStream(ctx context.Context, metadata *adapter.InboundContext, conn net.
 func PeekPacket(ctx context.Context, metadata *adapter.InboundContext, packet []byte, sniffers ...PacketSniffer) error {
 	var sniffError []error
 	for _, sniffer := range sniffers {
-		err := sniffer(ctx, metadata, packet)
+		err := recovered(metadata, func() error { return sniffer(ctx, metadata, packet) })
 		if err == nil {
 			return nil
 		}
