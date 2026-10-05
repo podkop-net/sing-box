@@ -446,3 +446,75 @@ func TestXHTTPDownloadLeg(t *testing.T) {
 		})
 	}
 }
+
+// Through the read waiter the download arrives whole and in order, whether it
+// comes after a pause (probe first) or in a stream, and a close ends the wait.
+func TestXHTTPReadWaiter(t *testing.T) {
+	for _, mode := range []string{modePacketUp, modeStreamOne} {
+		t.Run(mode, func(t *testing.T) {
+			client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: mode}, "h2", nil)
+			conn, err := client.DialContext(context.Background())
+			require.NoError(t, err)
+			waiter, created := conn.(N.ReadWaitCreator).CreateReadWaiter()
+			require.True(t, created)
+			waiter.InitializeReadWaiter(N.ReadWaitOptions{})
+			var sent bytes.Buffer
+			go func() {
+				for _, size := range []int{1, 100, 511, 512, 513, 4096, 200 * 1024, 7} {
+					data := randomBytes(size)
+					sent.Write(data)
+					conn.Write(data)
+					time.Sleep(30 * time.Millisecond)
+				}
+			}()
+			const total = 1 + 100 + 511 + 512 + 513 + 4096 + 200*1024 + 7
+			received := make([]byte, 0, total)
+			for len(received) < total {
+				buffer, err := waiter.WaitReadBuffer()
+				require.NoError(t, err)
+				received = append(received, buffer.Bytes()...)
+				buffer.Release()
+			}
+			require.True(t, bytes.Equal(sent.Bytes(), received))
+			done := make(chan error, 1)
+			go func() {
+				_, err := waiter.WaitReadBuffer()
+				done <- err
+			}()
+			time.Sleep(50 * time.Millisecond)
+			conn.Close()
+			require.ErrorIs(t, <-done, net.ErrClosed)
+		})
+	}
+}
+
+// A pooled connection no session uses is retired after the idle timeout, for
+// every HTTP version (HTTP/3 would otherwise stay open on its keep-alive).
+func TestXHTTPPoolIdleRetire(t *testing.T) {
+	saved := poolIdleTimeout
+	poolIdleTimeout = 300 * time.Millisecond
+	defer func() { poolIdleTimeout = saved }()
+	for _, version := range []string{"h1", "h2"} {
+		t.Run(version, func(t *testing.T) {
+			client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: modePacketUp}, version, nil)
+			baseline := settledGoroutines()
+			conn, err := client.DialContext(context.Background())
+			require.NoError(t, err)
+			echo(t, conn, 4096)
+			time.Sleep(500 * time.Millisecond)
+			client.upPool.access.Lock()
+			require.Len(t, client.upPool.clients, 1, "an open session keeps its connection")
+			client.upPool.access.Unlock()
+			conn.Close()
+			time.Sleep(700 * time.Millisecond)
+			client.upPool.access.Lock()
+			require.Empty(t, client.upPool.clients)
+			client.upPool.access.Unlock()
+			waitGoroutines(t, baseline)
+			conn, err = client.DialContext(context.Background())
+			require.NoError(t, err)
+			echo(t, conn, 4096)
+			conn.Close()
+		})
+	}
+}

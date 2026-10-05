@@ -258,7 +258,7 @@ func (c *Client) sessionClients(s *session) (*poolClient, *poolClient, error) {
 	}
 	s.hold(downClient)
 	if c.upPool == c.downPool {
-		downClient.running.Add(1)
+		downClient.acquire()
 		return downClient, downClient, nil
 	}
 	upClient, err := c.upPool.get()

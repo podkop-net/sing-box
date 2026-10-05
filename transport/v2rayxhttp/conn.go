@@ -11,9 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing-box/common/readwait"
 	"github.com/sagernet/sing/common/baderror"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // session is the net.Conn of one XHTTP session: a download (the body of a GET,
@@ -38,6 +40,14 @@ type session struct {
 	downloadReady chan struct{}
 	download      io.ReadCloser
 	downloadErr   error
+
+	// The read waiter waits for download data on a small probe instead of the
+	// copy buffer: what the probe read is delivered first. Both are used by
+	// the one reader of the session only.
+	probe      []byte
+	pending    []byte
+	pendingErr error
+	flowing    bool
 
 	// streamBody is the body of the request that streams the upload: closing it
 	// with an error is what releases a Write blocked on a failed request.
@@ -207,11 +217,49 @@ func (s *session) Read(b []byte) (int, error) {
 	if s.download == nil {
 		return 0, s.ioError(s.downloadErr)
 	}
+	if len(s.pending) > 0 {
+		n := copy(b, s.pending)
+		s.pending = s.pending[n:]
+		return n, nil
+	}
+	if s.pendingErr != nil {
+		err := s.pendingErr
+		s.pendingErr = nil
+		return 0, s.ioError(err)
+	}
 	n, err := s.download.Read(b)
+	s.flowing = n == len(b)
 	if err != nil {
 		err = s.ioError(err)
 	}
 	return n, err
+}
+
+// probeSize is what an idle session holds while it waits for the server.
+const probeSize = 512
+
+// CreateReadWaiter lets the copy loop of sing wait for download data without
+// its buffer: an idle session otherwise held a 32 KiB buffer for as long as
+// the server stayed silent. The response body of HTTP/2 and 3 can't be peeked,
+// so the waiter reads a small probe and hands it over before anything else;
+// while data keeps filling whole buffers it reads straight away.
+func (s *session) CreateReadWaiter() (N.ReadWaiter, bool) {
+	return readwait.NewPeekWaiter(s, s.waitData), true
+}
+
+func (s *session) waitData() error {
+	<-s.downloadReady
+	if s.download == nil || len(s.pending) > 0 || s.pendingErr != nil || s.flowing {
+		return nil
+	}
+	if s.probe == nil {
+		s.probe = make([]byte, probeSize)
+	}
+	n, err := s.download.Read(s.probe)
+	s.pending = s.probe[:n]
+	s.pendingErr = err
+	s.flowing = n == len(s.probe)
+	return nil
 }
 
 func (s *session) Write(b []byte) (int, error) {

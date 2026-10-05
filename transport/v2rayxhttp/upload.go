@@ -161,7 +161,7 @@ func (u *uploader) run() {
 // new one from the pool, which becomes current.
 func (u *uploader) nextClient() (*poolClient, error) {
 	if u.current != nil && u.current.usable() {
-		u.current.running.Add(1)
+		u.current.acquire()
 		return u.current, nil
 	}
 	client, err := u.client.upPool.get()
@@ -171,7 +171,7 @@ func (u *uploader) nextClient() (*poolClient, error) {
 	if u.current != nil {
 		u.current.release()
 	}
-	client.running.Add(1)
+	client.acquire()
 	u.current = client
 	return client, nil
 }

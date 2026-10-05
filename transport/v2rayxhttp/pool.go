@@ -49,6 +49,7 @@ type pooledConnection interface {
 type pool struct {
 	newConnection func() pooledConnection
 	config        xmuxConfig
+	idleTimeout   time.Duration
 	concurrency   int32
 	connections   int32
 
@@ -65,6 +66,7 @@ func newPool(config xmuxConfig, newConnection func() pooledConnection) *pool {
 	return &pool{
 		newConnection: newConnection,
 		config:        config,
+		idleTimeout:   poolIdleTimeout,
 		concurrency:   config.maxConcurrency.rand(),
 		connections:   config.maxConnections.rand(),
 	}
@@ -84,7 +86,15 @@ type poolClient struct {
 	broken       atomic.Bool
 	removed      atomic.Bool
 	closeOnce    sync.Once
+	// idleGeneration changes whenever the client is taken, so that a check
+	// scheduled when it went idle knows whether it stayed idle.
+	idleGeneration atomic.Uint64
 }
+
+// poolIdleTimeout retires a pooled connection no session has used for this
+// long. HTTP/3 needs it: the QUIC keep-alive keeps an idle connection open
+// for good (Xray keeps it until XMUX retires it, 30 to 50 minutes on).
+var poolIdleTimeout = connectionIdleTimeout
 
 // get returns a client for a new session (or for the next upload request of
 // one) and counts it as running; release gives it back.
@@ -132,8 +142,14 @@ func (p *pool) get() (*poolClient, error) {
 		}
 		client = p.newClient(now)
 	}
-	client.running.Add(1)
+	client.acquire()
 	return client, nil
+}
+
+// acquire counts one more user of the client; release ends it.
+func (c *poolClient) acquire() {
+	c.running.Add(1)
+	c.idleGeneration.Add(1)
 }
 
 func (p *pool) newClient(now time.Time) *poolClient {
@@ -205,9 +221,33 @@ func (p *pool) noteFailure(client *poolClient, err error) {
 }
 
 func (c *poolClient) release() {
-	if c.running.Add(-1) <= 0 {
-		c.closeIfIdle()
+	if c.running.Add(-1) > 0 {
+		return
 	}
+	if c.removed.Load() {
+		c.closeIfIdle()
+		return
+	}
+	generation := c.idleGeneration.Load()
+	time.AfterFunc(c.pool.idleTimeout, func() {
+		if c.running.Load() <= 0 && c.idleGeneration.Load() == generation {
+			c.pool.retire(c)
+		}
+	})
+}
+
+// retire takes an idle client out of the pool and closes it.
+func (p *pool) retire(client *poolClient) {
+	p.access.Lock()
+	for i, candidate := range p.clients {
+		if candidate == client {
+			p.clients = append(p.clients[:i], p.clients[i+1:]...)
+			break
+		}
+	}
+	p.access.Unlock()
+	client.removed.Store(true)
+	client.closeIfIdle()
 }
 
 func (c *poolClient) closeIfIdle() {
@@ -294,7 +334,11 @@ func newHTTP2Connection(tlsDialer tls.Dialer, serverAddr M.Socksaddr, keepAliveP
 	connection := &http2Connection{}
 	connection.transport = &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.STDConfig) (net.Conn, error) {
-			return connection.tracker.track(tlsDialer.DialTLSContext(ctx, serverAddr))
+			conn, err := tlsDialer.DialTLSContext(ctx, serverAddr)
+			if err != nil {
+				return nil, err
+			}
+			return connection.tracker.track(&frameSizeCapConn{Conn: conn}, nil)
 		},
 		ReadIdleTimeout: keepAlivePeriod,
 		IdleConnTimeout: connectionIdleTimeout,
