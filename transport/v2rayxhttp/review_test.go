@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -271,4 +272,64 @@ func TestXHTTPBackoffKeepsWorkingConnections(t *testing.T) {
 	clients = len(client.upPool.clients)
 	client.upPool.access.Unlock()
 	require.Equal(t, 1, clients, "no new connection during the backoff")
+}
+
+// A pooled connection is not given new sessions past h_max_reusable_secs; the
+// sessions it has go on.
+func TestXHTTPRotationByTime(t *testing.T) {
+	for _, mode := range []string{modePacketUp, modeStreamUp, modeStreamOne} {
+		t.Run(mode, func(t *testing.T) {
+			options := option.V2RayXHTTPOptions{Mode: mode}
+			options.Xmux = &option.V2RayXHTTPXmuxOptions{MaxConnections: xrange(1, 1), HMaxReusableSecs: xrange(1, 1)}
+			client, server := newTestPair(t, options, "h2", nil)
+			held, err := client.DialContext(context.Background())
+			require.NoError(t, err)
+			defer held.Close()
+			echo(t, held, 1000)
+			second, err := client.DialContext(context.Background())
+			require.NoError(t, err)
+			echo(t, second, 1000)
+			second.Close()
+			require.Equal(t, 1, server.connections(), "one connection while it may be reused")
+			time.Sleep(1200 * time.Millisecond)
+			third, err := client.DialContext(context.Background())
+			require.NoError(t, err)
+			defer third.Close()
+			echo(t, third, 1000)
+			require.Equal(t, 2, server.connections(), "a new connection after the time is up")
+			// the session opened before goes on, uploads included
+			echo(t, held, 100000)
+			echo(t, third, 100000)
+		})
+	}
+}
+
+// Deadlines are not supported, and say so: sing-box then arranges for its own
+// (a deadline that silently did nothing would leave reads without one).
+func TestXHTTPDeadlines(t *testing.T) {
+	client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: modePacketUp}, "h2", nil)
+	conn, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+	require.ErrorIs(t, conn.SetDeadline(time.Now().Add(time.Second)), os.ErrInvalid)
+	require.ErrorIs(t, conn.SetReadDeadline(time.Now().Add(time.Second)), os.ErrInvalid)
+	require.ErrorIs(t, conn.SetWriteDeadline(time.Now().Add(time.Second)), os.ErrInvalid)
+	require.True(t, conn.(*session).NeedAdditionalReadDeadline())
+	echo(t, conn, 1000)
+}
+
+// A range of post intervals that starts at zero means no waiting, as with Xray.
+func TestXHTTPPostIntervalFromZero(t *testing.T) {
+	options := option.V2RayXHTTPOptions{Mode: modePacketUp}
+	options.ScMinPostsIntervalMs = xrange(0, 400)
+	client, server := newTestPair(t, options, "h2", nil)
+	conn, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		echo(t, conn, 10)
+	}
+	require.Less(t, time.Since(start), time.Second, "ten posts, none waited for")
+	require.GreaterOrEqual(t, server.requestCount("packet"), 10)
 }

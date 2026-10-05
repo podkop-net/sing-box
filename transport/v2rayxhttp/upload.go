@@ -178,7 +178,8 @@ func (u *uploader) run() {
 			continue
 		}
 		notify(u.writable)
-		if interval := u.client.up.minPostsIntervalMs.rand(); interval > 0 {
+		// As with Xray, a range that starts at zero means no waiting at all.
+		if interval := u.client.up.minPostsIntervalMs.rand(); interval > 0 && u.client.up.minPostsIntervalMs.from > 0 {
 			wait := time.Duration(interval)*time.Millisecond - time.Since(lastPost)
 			if wait > 0 {
 				timer := time.NewTimer(wait)

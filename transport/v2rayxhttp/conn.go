@@ -198,6 +198,10 @@ func (s *session) startDownload(client *poolClient, request *http.Request) {
 
 // startStreamUpload sends the request whose body streams the upload
 // (stream-up). Its response carries only the server's keep-alive padding.
+//
+// Unlike Xray's client, which does not look at the answer to this request, a
+// failure or an error status ends the session: without its upload it could
+// only wait.
 func (s *session) startStreamUpload(client *poolClient, request *http.Request) {
 	go func() {
 		// the server ends its answer once it has read the upload to its end
