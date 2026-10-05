@@ -143,3 +143,46 @@ func TestXHTTPCloseReachesRetiredClients(t *testing.T) {
 	second.Close()
 	first.Close()
 }
+
+// An upload whose headers are larger than the server takes fails its own
+// session, with the setting named, and nothing else: the connection stays in
+// service and other sessions of the outbound are not made to wait.
+func TestXHTTPHeadersTooLarge(t *testing.T) {
+	size := option.V2RayXHTTPRange{From: 16384, To: 16384}
+	options := option.V2RayXHTTPOptions{Mode: modePacketUp, V2RayXHTTPBaseOptions: option.V2RayXHTTPBaseOptions{
+		UplinkDataPlacement: placementHeader,
+		ScMaxEachPostBytes:  &size,
+	}}
+	for name, test := range map[string]struct {
+		version   string
+		configure func(*testServer)
+	}{
+		// the HTTP/2 client refuses to send the request
+		"advertised limit": {"h2-8k", nil},
+		// a proxy that does not announce its limit answers
+		"status 431": {"h2", func(s *testServer) { s.maxPacket = 6000 }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, server := newTestPair(t, options, test.version, test.configure)
+			for round := 0; round < 3; round++ {
+				conn, err := client.DialContext(context.Background())
+				require.NoError(t, err, "round %d", round)
+				_, err = conn.Write(randomBytes(16384))
+				if err == nil {
+					_, err = conn.Read(make([]byte, 1))
+				}
+				require.ErrorContains(t, err, "sc_max_each_post_bytes")
+				conn.Close()
+			}
+			// small uploads of other sessions pass at once, through the same connection
+			connections := server.connections()
+			for i := 0; i < 5; i++ {
+				conn, err := client.DialContext(context.Background())
+				require.NoError(t, err)
+				echo(t, conn, 1000)
+				conn.Close()
+			}
+			require.Equal(t, connections, server.connections())
+		})
+	}
+}

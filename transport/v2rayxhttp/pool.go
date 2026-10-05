@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -232,11 +233,20 @@ func (c *poolClient) roundTrip(request *http.Request) (*http.Response, error) {
 	return response, err
 }
 
-// fail takes the client out of service after a failed request, as Xray does.
-// A request we cancelled ourselves (a session closed, a dial given up) says
-// nothing about the server.
+// headersTooLarge tells the error of a request the HTTP/2 client did not send:
+// its headers are larger than the server said it takes. (The error value is
+// not exported by golang.org/x/net/http2.)
+func headersTooLarge(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "request header list larger than peer's advertised limit")
+}
+
+// fail takes the client out of service after a failed request, as Xray does
+// after a failed download or packet. A request we cancelled ourselves (a
+// session closed, a dial given up) says nothing about the server, and neither
+// does one that was never sent for the size of its headers: the connection is
+// as good as it was, and other sessions go on using it.
 func (c *poolClient) fail(ctx context.Context, err error) {
-	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) || headersTooLarge(err) {
 		return
 	}
 	if c.broken.Swap(true) {

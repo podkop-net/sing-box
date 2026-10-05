@@ -29,6 +29,9 @@ type testServer struct {
 	// endlessErrorBody makes the body of an error answer never end.
 	endlessErrorBody bool
 	uploadStatus     int
+	// maxPacket makes the server refuse larger packets as a proxy with a
+	// limit on request headers does, with status 431.
+	maxPacket int
 	// abortUploads resets every upload request (RST_STREAM on HTTP/2).
 	abortUploads bool
 
@@ -57,6 +60,11 @@ func newTestServer(t *testing.T, config *requestConfig, mode string) *testServer
 	s.server = httptest.NewUnstartedServer(http.HandlerFunc(s.serveHTTP))
 	switch mode {
 	case "h2":
+		s.server.EnableHTTP2 = true
+		s.server.StartTLS()
+	case "h2-8k":
+		// the header limit of an Xray server with its defaults
+		s.server.Config.MaxHeaderBytes = 8192
 		s.server.EnableHTTP2 = true
 		s.server.StartTLS()
 	case "h1-tls":
@@ -268,6 +276,10 @@ func (s *testServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		data, err := s.packetData(r)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if s.maxPacket > 0 && len(data) > s.maxPacket {
+			w.WriteHeader(http.StatusRequestHeaderFieldsTooLarge)
 			return
 		}
 		s.session(sessionID).pushPacket(number, data)

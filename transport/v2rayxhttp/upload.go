@@ -207,11 +207,24 @@ func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan 
 	request := u.client.up.newPacketRequest(ctx, u.client.upScheme, u.sessionID, seq, data)
 	response, err := client.roundTrip(request)
 	if err != nil {
+		if headersTooLarge(err) {
+			err = E.Cause(err, tooLargeHint)
+		}
 		u.session.fail(E.Cause(err, "xhttp: upload"))
 		return
 	}
 	discardBody(response.Body)
-	if response.StatusCode != http.StatusOK {
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusRequestHeaderFieldsTooLarge, http.StatusRequestEntityTooLarge:
+		u.session.fail(E.New("xhttp: upload: ", tooLargeHint, ": unexpected status ", response.Status))
+	default:
 		u.session.fail(E.New("xhttp: upload: unexpected status ", response.Status))
 	}
 }
+
+// tooLargeHint names the setting behind a request the server (or a proxy in
+// front of it) refused for its size. With the data in headers or cookies the
+// limit is that of the request headers: 8 KiB with Xray's defaults, which
+// about 4 KiB of data fit in.
+const tooLargeHint = "the request is larger than the server takes, lower sc_max_each_post_bytes"
