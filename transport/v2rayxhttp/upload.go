@@ -18,7 +18,8 @@ import (
 // on a router a megabyte per uploading connection adds up.
 const maxUploadBacklog = 1024 * 1024
 
-// uploadTimeout bounds one packet-up upload request.
+// uploadTimeout bounds one packet-up upload request on a connection that
+// does not check on its server by itself.
 const uploadTimeout = 60 * time.Second
 
 // uploader sends the writes of a packet-up session as numbered requests. Writes
@@ -249,12 +250,22 @@ func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan 
 	// a connection back to its pool before it delivers a response without a
 	// body, and a request cancelled in between closes that connection under the
 	// next request, which then fails with "context canceled" (HTTP/1.1: 1 to 3
-	// uploads in 4000 when sessions closed at once). The timeout bounds an
-	// upload to a server that went silent.
-	// It allows for writing the data at 64 kbit/s on top of the wait.
-	timeout := uploadTimeout + time.Duration(len(data))*time.Second/(8*1024)
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(u.session.ctx), timeout)
-	defer cancel()
+	// uploads in 4000 when sessions closed at once).
+	//
+	// The server answers an upload once it has queued the data, and with its
+	// queue full that is once the destination has read some: an answer may
+	// take as long as the destination stays busy, and a time limit on it cut
+	// off a slow upload that a TCP connection, and Xray, carry through (lab:
+	// a destination idle for four minutes got 4 of 60 MB). So there is none
+	// where the connection itself notices a server that went silent. Where
+	// nothing does (HTTP/1.1, HTTP/2 with its pings turned off) the limit
+	// stays: the wait, and the data written at 64 kbit/s.
+	ctx := context.WithoutCancel(u.session.ctx)
+	if !u.client.upPool.watched {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, uploadTimeout+time.Duration(len(data))*time.Second/(8*1024))
+		defer cancel()
+	}
 	ctx = context.WithValue(ctx, packetRequestKey{}, true)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		WroteRequest: func(httptrace.WroteRequestInfo) { written() },

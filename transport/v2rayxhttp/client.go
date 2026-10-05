@@ -162,7 +162,9 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 		if err != nil {
 			return "", nil, err
 		}
-		return "https", newPool(config.xmux, newConnection), nil
+		pool := newPool(config.xmux, newConnection)
+		pool.watched = true
+		return "https", pool, nil
 	case "1.1":
 		scheme := "http"
 		var tlsDialer tls.Dialer
@@ -192,7 +194,9 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 		newConnection = func() pooledConnection {
 			return newHTTP2Connection(tlsDialer, serverAddr, keepAlivePeriod)
 		}
-		return "https", newPool(config.xmux, newConnection), nil
+		pool := newPool(config.xmux, newConnection)
+		pool.watched = keepAlivePeriod > 0
+		return "https", pool, nil
 	}
 }
 

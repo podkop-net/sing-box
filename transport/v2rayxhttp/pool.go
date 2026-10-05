@@ -49,10 +49,14 @@ type pooledConnection interface {
 
 type pool struct {
 	newConnection func() pooledConnection
-	config        xmuxConfig
-	idleTimeout   time.Duration
-	concurrency   int32
-	connections   int32
+	// watched: the connections notice a server that went silent by themselves
+	// (HTTP/2 pings, the idle timeout and keep-alive of QUIC) and fail the
+	// requests on them.
+	watched     bool
+	config      xmuxConfig
+	idleTimeout time.Duration
+	concurrency int32
+	connections int32
 
 	access  sync.Mutex
 	clients []*poolClient
