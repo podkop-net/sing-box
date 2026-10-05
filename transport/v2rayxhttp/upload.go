@@ -2,10 +2,12 @@ package v2rayxhttp
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -36,6 +38,14 @@ type uploader struct {
 	writable chan struct{}
 	done     chan struct{}
 	doneOnce sync.Once
+	// closing is closed by finish: the session is closed, what is pending is
+	// still sent. posts counts the requests on their way; finished is closed
+	// when the last of them is over.
+	closing     chan struct{}
+	closingOnce sync.Once
+	posts       sync.WaitGroup
+	inFlight    atomic.Int32
+	finished    chan struct{}
 
 	// current is the client the uploads go through until it runs out of its
 	// request budget; the uploader holds it (one running count).
@@ -53,6 +63,8 @@ func newUploader(s *session, client *Client, sessionID string, current *poolClie
 		readable:  make(chan struct{}, 1),
 		writable:  make(chan struct{}, 1),
 		done:      make(chan struct{}),
+		closing:   make(chan struct{}),
+		finished:  make(chan struct{}),
 		current:   current,
 	}
 }
@@ -86,10 +98,32 @@ func (u *uploader) write(b []byte) (int, error) {
 		u.access.Unlock()
 		select {
 		case <-u.writable:
+		case <-u.closing:
 		case <-u.done:
 		}
 	}
 	return n, nil
+}
+
+// idle tells that nothing written is waiting to be sent or to be answered.
+func (u *uploader) idle() bool {
+	u.access.Lock()
+	defer u.access.Unlock()
+	return len(u.pending) == 0 && u.inFlight.Load() == 0
+}
+
+// finish ends the uploader after a Close of its session: writes fail from then
+// on, and the returned channel is closed once the data taken before has been
+// sent and answered.
+func (u *uploader) finish() <-chan struct{} {
+	u.access.Lock()
+	if u.err == nil {
+		u.err = net.ErrClosed
+	}
+	u.access.Unlock()
+	u.closingOnce.Do(func() { close(u.closing) })
+	notify(u.writable)
+	return u.finished
 }
 
 // interrupt stops the uploader: writes fail with err from then on.
@@ -108,24 +142,39 @@ func (u *uploader) run() {
 		if u.current != nil {
 			u.current.release()
 		}
+		u.posts.Wait()
+		close(u.finished)
 	}()
 	var (
 		seq      int64
 		lastPost time.Time
+		closing  bool
 	)
 	for {
-		select {
-		case <-u.readable:
-		case <-u.done:
-			return
+		if !closing {
+			select {
+			case <-u.readable:
+			case <-u.closing:
+				closing = true
+			case <-u.done:
+				return
+			}
 		}
 		u.access.Lock()
 		// The backlog never exceeds the request size, so all of it fits in one
 		// request and is handed over without a copy.
 		data := u.pending
 		u.pending = nil
+		if len(data) > 0 {
+			// counted from here on, under the lock: idle must not see the gap
+			// between the backlog and the request
+			u.inFlight.Add(1)
+		}
 		u.access.Unlock()
 		if len(data) == 0 {
+			if closing {
+				return
+			}
 			continue
 		}
 		notify(u.writable)
@@ -137,6 +186,7 @@ func (u *uploader) run() {
 				case <-timer.C:
 				case <-u.done:
 					timer.Stop()
+					u.inFlight.Add(-1)
 					return
 				}
 			}
@@ -144,10 +194,12 @@ func (u *uploader) run() {
 		lastPost = time.Now()
 		client, err := u.nextClient()
 		if err != nil {
+			u.inFlight.Add(-1)
 			u.session.fail(E.Cause(err, "xhttp: upload"))
 			return
 		}
 		wrote := make(chan struct{})
+		u.posts.Add(1)
 		go u.post(client, strconv.FormatInt(seq, 10), data, wrote)
 		seq++
 		// The next request goes once this one is written, not answered.
@@ -186,6 +238,8 @@ func (u *uploader) nextClient() (*poolClient, error) {
 }
 
 func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan struct{}) {
+	defer u.posts.Done()
+	defer u.inFlight.Add(-1)
 	defer client.release()
 	var once sync.Once
 	written := func() { once.Do(func() { close(wrote) }) }

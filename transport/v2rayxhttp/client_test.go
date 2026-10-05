@@ -502,14 +502,16 @@ func TestXHTTPPoolIdleRetire(t *testing.T) {
 			require.NoError(t, err)
 			echo(t, conn, 4096)
 			time.Sleep(500 * time.Millisecond)
-			client.upPool.access.Lock()
-			require.Len(t, client.upPool.clients, 1, "an open session keeps its connection")
-			client.upPool.access.Unlock()
+			pooled := func() int {
+				client.upPool.access.Lock()
+				defer client.upPool.access.Unlock()
+				return len(client.upPool.clients)
+			}
+			require.Equal(t, 1, pooled(), "an open session keeps its connection")
 			conn.Close()
-			time.Sleep(700 * time.Millisecond)
-			client.upPool.access.Lock()
-			require.Empty(t, client.upPool.clients)
-			client.upPool.access.Unlock()
+			// the session stays for closeGrace after its last write, then the
+			// connection idles out
+			require.Eventually(t, func() bool { return pooled() == 0 }, 3*time.Second, 20*time.Millisecond)
 			waitGoroutines(t, baseline)
 			conn, err = client.DialContext(context.Background())
 			require.NoError(t, err)

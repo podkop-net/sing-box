@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -34,6 +35,8 @@ type testServer struct {
 	maxPacket int
 	// abortUploads resets every upload request (RST_STREAM on HTTP/2).
 	abortUploads bool
+	// received counts the upload bytes of all sessions.
+	received atomic.Int64
 
 	access   sync.Mutex
 	sessions map[string]*testSession
@@ -282,6 +285,7 @@ func (s *testServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusRequestHeaderFieldsTooLarge)
 			return
 		}
+		s.received.Add(int64(len(data)))
 		s.session(sessionID).pushPacket(number, data)
 		w.WriteHeader(http.StatusOK)
 	default:
@@ -301,6 +305,7 @@ func (s *testServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := r.Body.Read(buffer)
 			if n > 0 {
+				s.received.Add(int64(n))
 				session.push(append([]byte(nil), buffer[:n]...))
 			}
 			if err != nil {
@@ -352,13 +357,20 @@ func (s *testServer) serveStreamOne(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.(http.Flusher).Flush()
 	buffer := make([]byte, 32*1024)
+	// As with Xray, the upload is read to its end whatever becomes of the
+	// download: a client that is done reading may still be sending.
+	var downloadOver bool
 	for {
 		n, err := r.Body.Read(buffer)
 		if n > 0 {
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				return
+			s.received.Add(int64(n))
+			if !downloadOver {
+				if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+					downloadOver = true
+				} else {
+					w.(http.Flusher).Flush()
+				}
 			}
-			w.(http.Flusher).Flush()
 		}
 		if err != nil {
 			return

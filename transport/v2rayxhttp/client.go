@@ -230,8 +230,9 @@ func (c *Client) dialStreamOne(s *session) error {
 	}
 	s.hold(client)
 	s.count(client)
+	s.single = true
 	s.streamBody, s.streamUpload = io.Pipe()
-	s.startDownload(client, c.up.newStreamRequest(s.ctx, c.upScheme, "", s.streamBody))
+	s.startDownload(client, c.up.newStreamRequest(s.withUploadTrace(s.ctx), c.upScheme, "", s.streamBody))
 	return nil
 }
 

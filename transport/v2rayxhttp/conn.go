@@ -24,12 +24,15 @@ import (
 //
 // Every request of the session runs on the session's own context, not on the
 // context of the dial: a dial context is done once the dial returns, and the
-// session must outlive it. Close cancels the session context, which aborts
-// every request in flight.
+// session must outlive it. Cancelling the session context aborts every request
+// in flight; Close does it once what was written has been sent.
 type session struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	closed atomic.Bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	closed   atomic.Bool
+	tearOnce sync.Once
+	// unanswered: data was written and no download data has been read since.
+	unanswered atomic.Bool
 
 	failure atomic.Pointer[failureBox]
 
@@ -55,6 +58,14 @@ type session struct {
 	streamBody   *io.PipeReader
 	streamUpload *io.PipeWriter
 	packetUpload *uploader
+	// single: the download is the response to the request that streams the
+	// upload (stream-one).
+	single bool
+	// uploadWritten is closed when the upload stream is over: the request
+	// written to its end (stream-one), answered to its end (stream-up), or
+	// failed.
+	uploadWritten chan struct{}
+	writtenOnce   sync.Once
 
 	connected  chan struct{}
 	localAddr  net.Addr
@@ -84,7 +95,25 @@ func newSession(depth int) *session {
 		cancel:        cancel,
 		downloadReady: make(chan struct{}),
 		connected:     make(chan struct{}),
+		uploadWritten: make(chan struct{}),
 	}
+}
+
+// closeLinger bounds how long a closed session stays to send what was written
+// to it before the Close; closeGrace is how long it stays after that when the
+// server has not answered the data, for the server to forward it.
+const (
+	closeLinger = 5 * time.Second
+	closeGrace  = time.Second
+)
+
+// withUploadTrace reports the end of the request that streams the upload.
+func (s *session) withUploadTrace(ctx context.Context) context.Context {
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			s.writtenOnce.Do(func() { close(s.uploadWritten) })
+		},
+	})
 }
 
 // hold makes the session keep a client (counted as running by get) until it
@@ -171,6 +200,8 @@ func (s *session) startDownload(client *poolClient, request *http.Request) {
 // (stream-up). Its response carries only the server's keep-alive padding.
 func (s *session) startStreamUpload(client *poolClient, request *http.Request) {
 	go func() {
+		// the server ends its answer once it has read the upload to its end
+		defer s.writtenOnce.Do(func() { close(s.uploadWritten) })
 		response, err := client.roundTrip(request)
 		if err != nil {
 			s.fail(E.Cause(err, "xhttp: upload"))
@@ -255,6 +286,9 @@ func (s *session) Read(b []byte) (int, error) {
 		return 0, s.ioError(err)
 	}
 	n, err := s.download.Read(b)
+	if n > 0 && s.unanswered.Load() {
+		s.unanswered.Store(false)
+	}
 	s.flowing = n == len(b)
 	if err != nil {
 		err = s.ioError(err)
@@ -283,6 +317,9 @@ func (s *session) waitData() error {
 		s.probe = make([]byte, probeSize)
 	}
 	n, err := s.download.Read(s.probe)
+	if n > 0 && s.unanswered.Load() {
+		s.unanswered.Store(false)
+	}
 	s.pending = s.probe[:n]
 	s.pendingErr = err
 	s.flowing = n == len(s.probe)
@@ -300,6 +337,9 @@ func (s *session) Write(b []byte) (int, error) {
 		n   int
 		err error
 	)
+	if !s.unanswered.Load() {
+		s.unanswered.Store(true)
+	}
 	if s.packetUpload != nil {
 		n, err = s.packetUpload.write(b)
 	} else {
@@ -311,14 +351,90 @@ func (s *session) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Close ends the session for its user at once, and the session itself once
+// the data written before has left: sing-box closes a connection as soon as
+// its source is done, and a request, a message or the last part of an upload
+// written just before that must still reach the server, as it does with Xray,
+// whose packet-up uploader and request bodies run to their end after a close.
 func (s *session) Close() error {
 	if s.closed.Swap(true) {
 		return nil
 	}
-	s.cancel()
+	// What the server has not answered since it was written may still be on
+	// its way to the destination: the server takes the end of the download
+	// for the end of the session. Such a session stays a moment after its
+	// upload is sent, as an outbound of Xray does after the end of an upload
+	// (a second, by Xray's default policy). A session whose last write was
+	// answered, the usual end of an exchange, has nothing to wait for.
+	unanswered := s.unanswered.Load()
+	var sent <-chan struct{}
+	switch {
+	case s.failure.Load() != nil:
+	case s.packetUpload != nil:
+		if !s.packetUpload.idle() {
+			sent = s.packetUpload.finish()
+		} else if unanswered {
+			sent = closedChannel
+		}
+	case s.streamUpload != nil:
+		// the end of the request body: the HTTP client writes what it holds
+		s.streamUpload.Close()
+		sent = s.uploadWritten
+	}
+	if sent == nil {
+		s.teardown()
+		return nil
+	}
+	if !unanswered {
+		select {
+		case <-sent:
+			s.teardown()
+			return nil
+		default:
+		}
+	}
+	go func() {
+		defer s.teardown()
+		timer := time.NewTimer(closeLinger)
+		defer timer.Stop()
+		select {
+		case <-sent:
+		case <-s.ctx.Done():
+			return
+		case <-timer.C:
+			return
+		}
+		if unanswered {
+			timer.Reset(closeGrace)
+			select {
+			case <-timer.C:
+			case <-s.ctx.Done():
+			}
+		}
+	}()
+	return nil
+}
+
+var closedChannel = func() chan struct{} {
+	channel := make(chan struct{})
+	close(channel)
+	return channel
+}()
+
+// teardown aborts the requests of the session and lets go of its connections.
+func (s *session) teardown() {
+	s.tearOnce.Do(s.doTeardown)
+}
+
+func (s *session) closeDownload() {
 	if !s.setDownload(nil, net.ErrClosed) && s.download != nil {
 		s.download.Close()
 	}
+}
+
+func (s *session) doTeardown() {
+	s.cancel()
+	s.closeDownload()
 	if s.streamBody != nil {
 		s.streamBody.CloseWithError(net.ErrClosed)
 	}
@@ -335,7 +451,6 @@ func (s *session) Close() error {
 	for _, client := range clients {
 		client.release()
 	}
-	return nil
 }
 
 func (s *session) LocalAddr() net.Addr {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	F "github.com/sagernet/sing/common/format"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 
@@ -70,11 +71,17 @@ func TestXHTTPConcurrencyCountsSessions(t *testing.T) {
 			for _, conn := range conns {
 				conn.Close()
 			}
-			client.upPool.access.Lock()
-			for _, pooled := range client.upPool.clients {
-				require.Zero(t, pooled.sessions.Load())
-			}
-			client.upPool.access.Unlock()
+			// a closed session is gone once its upload has been sent to the end
+			require.Eventually(t, func() bool {
+				client.upPool.access.Lock()
+				defer client.upPool.access.Unlock()
+				for _, pooled := range client.upPool.clients {
+					if pooled.sessions.Load() != 0 {
+						return false
+					}
+				}
+				return true
+			}, 2*time.Second, 5*time.Millisecond)
 		})
 	}
 }
@@ -185,4 +192,52 @@ func TestXHTTPHeadersTooLarge(t *testing.T) {
 			require.Equal(t, connections, server.connections())
 		})
 	}
+}
+
+// What was written before a Close reaches the server: sing-box closes the
+// connection as soon as its source is done.
+func TestXHTTPWriteThenClose(t *testing.T) {
+	for _, version := range []string{"h2", "h1-tls"} {
+		for _, mode := range []string{modePacketUp, modeStreamUp, modeStreamOne} {
+			if mode == modeStreamOne && version != "h2" {
+				continue
+			}
+			for _, size := range []int{100, 5000, 300000} {
+				t.Run(F.ToString(version, "/", mode, "/", size), func(t *testing.T) {
+					client, server := newTestPair(t, option.V2RayXHTTPOptions{Mode: mode}, version, nil)
+					baseline := settledGoroutines()
+					const sessions = 10
+					for i := 0; i < sessions; i++ {
+						conn, err := client.DialContext(context.Background())
+						require.NoError(t, err)
+						_, err = conn.Write(randomBytes(size))
+						require.NoError(t, err)
+						require.NoError(t, conn.Close())
+						_, err = conn.Write([]byte{0})
+						require.ErrorIs(t, err, net.ErrClosed)
+					}
+					require.Eventually(t, func() bool { return server.received.Load() == int64(sessions*size) },
+						5*time.Second, 10*time.Millisecond, "the server got %d of %d bytes", server.received.Load(), sessions*size)
+					// and the closed sessions leave nothing behind, once the
+					// connections of the pool are closed too
+					client.Close()
+					waitGoroutines(t, baseline)
+				})
+			}
+		}
+	}
+}
+
+// A closed session whose data cannot be sent is gone after the linger at most,
+// and at once when it has failed.
+func TestXHTTPCloseDoesNotWaitForAFailedSession(t *testing.T) {
+	client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: modePacketUp}, "h2", func(s *testServer) { s.abortUploads = true })
+	baseline := settledGoroutines()
+	conn, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	_, err = conn.Write(randomBytes(1000))
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	client.Close()
+	waitGoroutines(t, baseline)
 }
