@@ -32,6 +32,7 @@ type testServer struct {
 	access   sync.Mutex
 	sessions map[string]*testSession
 	requests map[string]int
+	remotes  map[string]struct{}
 }
 
 type testSession struct {
@@ -83,6 +84,13 @@ func (s *testServer) count(kind string) {
 	s.access.Lock()
 	s.requests[kind]++
 	s.access.Unlock()
+}
+
+// connections is the number of client connections requests came on.
+func (s *testServer) connections() int {
+	s.access.Lock()
+	defer s.access.Unlock()
+	return len(s.remotes)
 }
 
 func (s *testServer) requestCount(kind string) int {
@@ -215,6 +223,12 @@ func (s *testServer) packetData(r *http.Request) ([]byte, error) {
 }
 
 func (s *testServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	s.access.Lock()
+	if s.remotes == nil {
+		s.remotes = make(map[string]struct{})
+	}
+	s.remotes[r.RemoteAddr] = struct{}{}
+	s.access.Unlock()
 	if !strings.HasPrefix(r.URL.Path, s.config.normalizedPath()) {
 		s.count("not-found")
 		w.WriteHeader(http.StatusNotFound)

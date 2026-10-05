@@ -518,3 +518,27 @@ func TestXHTTPPoolIdleRetire(t *testing.T) {
 		})
 	}
 }
+
+// A server (or a CDN) that resets every upload must not be redialled as fast
+// as the client reconnects: each young connection that fails delays the next
+// (sing-box-lx SPEC 076 saw both cores of a router spin on this).
+func TestXHTTPResetStorm(t *testing.T) {
+	client, server := newTestPair(t, option.V2RayXHTTPOptions{Mode: modeStreamUp}, "h2", func(s *testServer) {
+		s.abortUploads = true
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	var dials, refused int
+	for time.Now().Before(deadline) {
+		dials++
+		conn, err := client.DialContext(context.Background())
+		if err != nil {
+			refused++
+			continue
+		}
+		conn.Write([]byte("x"))
+		conn.Read(make([]byte, 1))
+		conn.Close()
+	}
+	t.Logf("%d dials in 3 s, %d refused during the backoff, %d connections to the server", dials, refused, server.connections())
+	require.LessOrEqual(t, server.connections(), 10)
+}
