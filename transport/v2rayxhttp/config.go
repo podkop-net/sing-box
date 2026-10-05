@@ -31,6 +31,7 @@ const (
 
 	maxPaddingBytes    = 64 * 1024
 	maxSessionIDLength = 1024
+	headerUploadSize   = 4096
 )
 
 // valueRange is an inclusive range a value is drawn from at random; the zero
@@ -248,6 +249,13 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 	c.maxEachPostBytes = newValueRange(options.ScMaxEachPostBytes)
 	if c.maxEachPostBytes.to == 0 {
 		c.maxEachPostBytes = valueRange{1000000, 1000000}
+		if c.uplinkDataPlacement == placementHeader || c.uplinkDataPlacement == placementCookie {
+			// Unlike Xray: its megabyte per request, carried in headers or
+			// cookies, is far over the 8 KiB of headers servers accept, so a
+			// bulk upload failed. 4 KiB fits with the default padding (lab:
+			// 4 KiB passed, 6 KiB did not).
+			c.maxEachPostBytes = valueRange{headerUploadSize, headerUploadSize}
+		}
 	} else if c.maxEachPostBytes.from <= 0 {
 		// Xray panics at the dial on this value.
 		return nil, E.New("sc_max_each_post_bytes must be greater than 0")

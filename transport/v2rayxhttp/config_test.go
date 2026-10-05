@@ -85,6 +85,14 @@ func TestXHTTPConfigDefaults(t *testing.T) {
 	require.Equal(t, valueRange{30, 30}, config.minPostsIntervalMs)
 	require.Equal(t, xmuxConfig{maxConnections: valueRange{3, 3}, hMaxRequestTimes: valueRange{600, 900}, hMaxReusableSecs: valueRange{1800, 3000}}, config.xmux)
 	require.Equal(t, "/", config.normalizedPath())
+	for _, placement := range []string{placementHeader, placementCookie} {
+		config, err = newRequestConfig(option.V2RayXHTTPBaseOptions{UplinkDataPlacement: placement}, modePacketUp)
+		require.NoError(t, err)
+		require.Equal(t, valueRange{4096, 4096}, config.maxEachPostBytes, placement)
+		config, err = newRequestConfig(option.V2RayXHTTPBaseOptions{UplinkDataPlacement: placement, ScMaxEachPostBytes: xrange(2048, 2048)}, modePacketUp)
+		require.NoError(t, err)
+		require.Equal(t, valueRange{2048, 2048}, config.maxEachPostBytes, placement)
+	}
 	// Setting any XMUX field drops all its defaults, as with Xray.
 	config, err = newRequestConfig(option.V2RayXHTTPBaseOptions{Xmux: &option.V2RayXHTTPXmuxOptions{HKeepAlivePeriod: 30}}, modeAuto)
 	require.NoError(t, err)
