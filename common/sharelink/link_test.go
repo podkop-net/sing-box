@@ -287,3 +287,63 @@ func FuzzDecode(f *testing.F) {
 		}
 	})
 }
+
+// The forms found in links in the wild: other cases and names of the
+// parameters, links copied out of HTML, settings of XHTTP outside of "extra".
+func TestFoundInTheWild(t *testing.T) {
+	t.Parallel()
+	base := "vless://" + testUUID + "@example.org:443?"
+	for name, test := range map[string]struct{ link, want string }{
+		"case and other names": {
+			base + "security=tls&allowinsecure=1&servername=s.example.org&packet-encoding=xudp&type=Tcp&headertype=none",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","packet_encoding":"xudp","tls":{"enabled":true,"server_name":"s.example.org","insecure":true}}`,
+		},
+		"clash names": {
+			base + "security=tls&allow_insecure=1&peer=p.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"p.example.org","insecure":true}}`,
+		},
+		"copied out of HTML": {
+			base + "security=tls&amp;type=ws&amp;path=%2Fw&amp;Host=h.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true},"transport":{"type":"ws","path":"/w","headers":{"Host":"h.example.org"}}}`,
+		},
+		"password with a slash": {
+			"trojan://Km/pIG4A+j5==@example.org:443/?type=ws&path=/w&ed=2048&eh=X-Early",
+			`{"type":"trojan","server":"example.org","server_port":443,"password":"Km/pIG4A+j5==","tls":{"enabled":true},
+			"transport":{"type":"ws","path":"/w","max_early_data":2048,"early_data_header_name":"X-Early"}}`,
+		},
+		"flat xhttp settings": {
+			base + "type=xhttp&path=%2Fx&xPaddingBytes=5-9&noGRPCHeader=true&scMaxBufferedPosts=7&sessionIDKey=k&uplinkHTTPMethod=PUT",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"xhttp","path":"/x",
+			"x_padding_bytes":"5-9","no_grpc_header":true,"sc_max_buffered_posts":7,"session_key":"k","uplink_http_method":"PUT"}}`,
+		},
+		"extra before flat settings": {
+			base + "type=xhttp&xPaddingBytes=5-9&scMaxEachPostBytes=100&extra=" + url.QueryEscape(`{"xPaddingBytes":"1-2"}`),
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"xhttp","x_padding_bytes":"1-2","sc_max_each_post_bytes":"100"}}`,
+		},
+		"mode of v2rayA": {
+			base + "type=xhttp&xhttpMode=stream-up",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"xhttp","mode":"stream-up"}}`,
+		},
+		"extra escaped twice, a number with a fraction": {
+			base + "type=xhttp&extra=" + url.QueryEscape(uriComponent(`{"scMinPostsIntervalMs":30.0,"xmux":{"maxConnections":2.0}}`)),
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"xhttp","sc_min_posts_interval_ms":"30","xmux":{"max_connections":"2"}}}`,
+		},
+	} {
+		content, warnings := decodeJSON(t, test.link)
+		require.Empty(t, warnings, name)
+		require.JSONEq(t, test.want, content, name)
+	}
+
+	_, warnings := decodeJSON(t, base+"type=xhttp&mux=1&pinSHA256=x&spx=%2F&extra="+url.QueryEscape(`{"xmux":{"cMaxLifetimeMs":5,"maxConnections":1}}`))
+	require.Equal(t, []string{"extra.xmux: cMaxLifetimeMs is not supported and is ignored", "mux is not supported and is ignored", "pinsha256 is not supported and is ignored"}, warnings)
+
+	for name, link := range map[string]string{
+		"flat range":      base + "type=xhttp&xPaddingBytes=a-b",
+		"flat number":     base + "type=xhttp&scMaxBufferedPosts=many",
+		"fraction":        base + "type=xhttp&extra=" + url.QueryEscape(`{"scMinPostsIntervalMs":30.5}`),
+		"xmux not object": base + "type=xhttp&extra=" + url.QueryEscape(`{"xmux":[1]}`),
+	} {
+		_, _, err := Decode(link)
+		require.Error(t, err, name)
+	}
+}

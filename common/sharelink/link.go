@@ -9,6 +9,7 @@ package sharelink
 
 import (
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -76,6 +77,16 @@ func Decode(link string) (*Outbound, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	var unknown []string
+	for key := range query {
+		if !knownKeys[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	sort.Strings(unknown)
+	for _, key := range unknown {
+		d.warn(key, " is not supported and is ignored")
+	}
 	return &Outbound{Type: scheme, Tag: strings.TrimSpace(tag), Options: options}, d.warnings, nil
 }
 
@@ -91,6 +102,8 @@ func (d *decoder) warn(message ...any) {
 // parseQuery splits the query of a link. "+" is a space: the generators that
 // use form encoding (3x-ui, Marzban) write spaces that way, and those that
 // follow the proposal escape a real "+". The first of repeated keys wins.
+// The names are lowered, as the clients differ in their case ("allowInsecure",
+// "allowinsecure"), and lose the "amp;" of a link copied out of HTML.
 func parseQuery(rawQuery string) (map[string]string, error) {
 	values := make(map[string]string)
 	for _, pair := range strings.Split(rawQuery, "&") {
@@ -106,6 +119,7 @@ func parseQuery(rawQuery string) (map[string]string, error) {
 		if err != nil {
 			return nil, E.New("invalid escape in link parameter ", key)
 		}
+		key = strings.TrimPrefix(strings.ToLower(key), "amp;")
 		if _, exists := values[key]; !exists {
 			values[key] = value
 		}
@@ -113,11 +127,10 @@ func parseQuery(rawQuery string) (map[string]string, error) {
 	return values, nil
 }
 
-// parseServer reads "userinfo@host:port", with anything after the port ignored.
+// parseServer reads "userinfo@host:port", with anything after the port
+// ignored. The user is everything up to the last "@": a Trojan password is
+// often base64, with "/" and "=", and not always escaped.
 func parseServer(authority string) (string, option.ServerOptions, error) {
-	if index := strings.IndexByte(authority, '/'); index >= 0 {
-		authority = authority[:index]
-	}
 	index := strings.LastIndexByte(authority, '@')
 	if index < 0 {
 		return "", option.ServerOptions{}, E.New("missing user in the link")
@@ -130,6 +143,9 @@ func parseServer(authority string) (string, option.ServerOptions, error) {
 		return "", option.ServerOptions{}, E.New("missing user in the link")
 	}
 	hostPort := authority[index+1:]
+	if slash := strings.IndexByte(hostPort, '/'); slash >= 0 {
+		hostPort = hostPort[:slash]
+	}
 	var host, port string
 	if strings.HasPrefix(hostPort, "[") {
 		end := strings.IndexByte(hostPort, ']')
@@ -168,7 +184,7 @@ func (d *decoder) vless(authority string) (any, error) {
 		UUID:          uuid,
 		Flow:          d.query["flow"],
 	}
-	if packetEncoding, exists := d.query["packetEncoding"]; exists && packetEncoding != "" {
+	if packetEncoding := d.first("packetencoding", "packet-encoding"); packetEncoding != "" {
 		if packetEncoding == "none" {
 			packetEncoding = ""
 		}
@@ -205,6 +221,30 @@ func (d *decoder) trojan(authority string) (any, error) {
 	return options, nil
 }
 
+// first returns the first of the link parameters that is set.
+func (d *decoder) first(keys ...string) string {
+	for _, key := range keys {
+		if value := d.query[key]; value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// The parameters read somewhere; any other gets a warning. The settings of
+// XHTTP a link may carry outside of "extra" are added by init.
+var knownKeys = map[string]bool{
+	"type": true, "security": true, "encryption": true, "flow": true, "packetencoding": true, "packet-encoding": true,
+	"sni": true, "servername": true, "peer": true, "alpn": true, "fp": true, "pbk": true, "sid": true,
+	"allowinsecure": true, "allow_insecure": true, "insecure": true,
+	"host": true, "path": true, "mode": true, "xhttpmode": true, "extra": true, "x_padding_bytes": true,
+	"headertype": true, "servicename": true, "authority": true, "ed": true, "eh": true,
+	// have warnings of their own
+	"pqv": true, "ech": true, "pcs": true, "vcn": true, "cs": true, "fm": true,
+	// REALITY's spiderX: the path the client of Xray crawls the cover site from
+	"spx": true, "spiderx": true,
+}
+
 func isTrue(value string) bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
@@ -233,8 +273,8 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 	}
 	tlsOptions := &option.OutboundTLSOptions{
 		Enabled:    true,
-		ServerName: d.query["sni"],
-		Insecure:   isTrue(d.query["allowInsecure"]) || isTrue(d.query["insecure"]),
+		ServerName: d.first("sni", "servername", "peer"),
+		Insecure:   isTrue(d.first("allowinsecure", "allow_insecure", "insecure")),
 		ALPN:       splitList(d.query["alpn"]),
 	}
 	fingerprint := d.query["fp"]
@@ -270,10 +310,10 @@ func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
 	if d.query["fm"] != "" {
 		d.warn("fm (finalmask) is not supported, the connection may not work")
 	}
-	network := d.query["type"]
+	network := strings.ToLower(d.query["type"])
 	switch network {
 	case "", "tcp", "raw":
-		if headerType := d.query["headerType"]; headerType != "" && headerType != "none" {
+		if headerType := d.query["headertype"]; headerType != "" && headerType != "none" {
 			return nil, E.New("unsupported header type of the TCP transport: ", headerType)
 		}
 		return nil, nil
@@ -284,8 +324,11 @@ func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
 		}
 		options := option.V2RayWebsocketOptions{Path: path, MaxEarlyData: earlyData}
 		if earlyData > 0 {
-			// the only form Xray speaks
+			// the only form Xray speaks, unless the link names another ("eh")
 			options.EarlyDataHeaderName = "Sec-WebSocket-Protocol"
+			if header := d.query["eh"]; header != "" {
+				options.EarlyDataHeaderName = header
+			}
 		}
 		if host := d.query["host"]; host != "" {
 			options.Headers = badoption.HTTPHeader{"Host": {host}}
@@ -300,7 +343,7 @@ func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
 		}
 		return &option.V2RayTransportOptions{
 			Type:        C.V2RayTransportTypeGRPC,
-			GRPCOptions: option.V2RayGRPCOptions{ServiceName: d.query["serviceName"]},
+			GRPCOptions: option.V2RayGRPCOptions{ServiceName: d.query["servicename"]},
 		}, nil
 	case "http", "h2":
 		return &option.V2RayTransportOptions{

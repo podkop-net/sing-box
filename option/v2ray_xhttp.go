@@ -106,7 +106,13 @@ func (r *V2RayXHTTPRange) UnmarshalJSON(content []byte) error {
 		err = json.UnmarshalDisallowUnknownFields(content, &value)
 		from, to = value.From, value.To
 	default:
-		err = json.Unmarshal(content, &from)
+		// some generators write whole numbers with a fraction ("30.0")
+		var number float64
+		err = json.Unmarshal(content, &number)
+		if err == nil && (number != math.Trunc(number) || math.Abs(number) > math.MaxInt32) {
+			err = E.New("not a whole number in range: ", string(content))
+		}
+		from = int64(number)
 		to = from
 	}
 	if err != nil {

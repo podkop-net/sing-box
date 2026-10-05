@@ -1,8 +1,10 @@
 package sharelink
 
 import (
+	"net/url"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sagernet/sing-box/option"
@@ -41,7 +43,7 @@ type xraySplitHTTP struct {
 	ScMaxBufferedPosts   int64                   `json:"scMaxBufferedPosts"`
 	ScStreamUpServerSecs *option.V2RayXHTTPRange `json:"scStreamUpServerSecs"`
 	ServerMaxHeaderBytes int32                   `json:"serverMaxHeaderBytes"`
-	Xmux                 *xrayXmux               `json:"xmux"`
+	Xmux                 json.RawMessage         `json:"xmux"`
 	DownloadSettings     json.RawMessage         `json:"downloadSettings"`
 	Extra                json.RawMessage         `json:"extra"`
 
@@ -141,24 +143,38 @@ func (d *decoder) readObject(name string, content []byte, target any) error {
 func (d *decoder) xhttp() (*option.V2RayXHTTPOptions, error) {
 	settings := new(xraySplitHTTP)
 	if extra := strings.TrimSpace(d.query["extra"]); extra != "" {
+		// escaped twice by some panels and clients
+		if strings.HasPrefix(extra, "%7B") || strings.HasPrefix(extra, "%7b") {
+			if decoded, err := url.QueryUnescape(extra); err == nil {
+				extra = decoded
+			}
+		}
 		err := d.readObject("extra", []byte(extra), settings)
 		if err != nil {
 			return nil, err
 		}
 	}
 	// As in Xray, these three always come from the link itself, also when the
-	// link leaves them empty and "extra" has them.
-	settings.Host, settings.Path, settings.Mode = d.query["host"], d.query["path"], d.query["mode"]
+	// link leaves them empty and "extra" has them. v2rayA names the mode its
+	// own way.
+	settings.Host, settings.Path, settings.Mode = d.query["host"], d.query["path"], d.first("mode", "xhttpmode")
 	// 3x-ui repeats the padding outside of "extra" under this name
 	if settings.XPaddingBytes == nil && d.query["x_padding_bytes"] != "" {
 		settings.XPaddingBytes = new(option.V2RayXHTTPRange)
-		err := settings.XPaddingBytes.UnmarshalJSON([]byte(`"` + d.query["x_padding_bytes"] + `"`))
+		err := settings.XPaddingBytes.UnmarshalJSON([]byte(strconv.Quote(d.query["x_padding_bytes"])))
 		if err != nil {
 			return nil, E.Cause(err, "read x_padding_bytes")
 		}
 	}
+	err := d.flatSettings(settings)
+	if err != nil {
+		return nil, err
+	}
 	options := &option.V2RayXHTTPOptions{Mode: settings.Mode}
-	options.V2RayXHTTPBaseOptions = d.xhttpBase("extra", settings)
+	options.V2RayXHTTPBaseOptions, err = d.xhttpBase("extra", settings)
+	if err != nil {
+		return nil, err
+	}
 	if len(settings.DownloadSettings) > 0 && string(settings.DownloadSettings) != "null" {
 		download, err := d.xhttpDownload(settings.DownloadSettings)
 		if err != nil {
@@ -177,7 +193,61 @@ func nonZero(value *option.V2RayXHTTPRange) *option.V2RayXHTTPRange {
 	return value
 }
 
-func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) option.V2RayXHTTPBaseOptions {
+// flatKeys are the settings of XHTTP some generators (3x-ui's panel among
+// them) also write as parameters of the link, under Xray's names: the plain
+// values, not the objects.
+var flatKeys = func() map[string]int {
+	keys := make(map[string]int)
+	settingsType := reflect.TypeOf(xraySplitHTTP{})
+	for i := 0; i < settingsType.NumField(); i++ {
+		field := settingsType.Field(i)
+		switch field.Name {
+		case "Host", "Path", "Mode", "Extra", "ScMaxConcurrentPosts", "KeepAlivePeriod":
+			continue
+		}
+		switch field.Type.Kind() {
+		case reflect.String, reflect.Bool, reflect.Int32, reflect.Int64, reflect.Pointer:
+			key := strings.ToLower(field.Tag.Get("json"))
+			keys[key] = i
+			knownKeys[key] = true
+		}
+	}
+	return keys
+}()
+
+// flatSettings fills what "extra" has left unset from the parameters of the link.
+func (d *decoder) flatSettings(settings *xraySplitHTTP) error {
+	value := reflect.ValueOf(settings).Elem()
+	for key, index := range flatKeys {
+		text := d.query[key]
+		field := value.Field(index)
+		if text == "" || !field.IsZero() {
+			continue
+		}
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString(text)
+		case reflect.Bool:
+			field.SetBool(isTrue(text))
+		case reflect.Int32, reflect.Int64:
+			number, err := strconv.ParseInt(text, 10, 32)
+			if err != nil {
+				return E.New("invalid ", key, ": ", text)
+			}
+			field.SetInt(number)
+		case reflect.Pointer:
+			valueRange := new(option.V2RayXHTTPRange)
+			err := valueRange.UnmarshalJSON([]byte(strconv.Quote(text)))
+			if err != nil {
+				return E.Cause(err, "read ", key)
+			}
+			field.Set(reflect.ValueOf(valueRange))
+		}
+	}
+	return nil
+}
+
+func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) (option.V2RayXHTTPBaseOptions, error) {
 	options := option.V2RayXHTTPBaseOptions{
 		Host:                 settings.Host,
 		Path:                 settings.Path,
@@ -230,7 +300,12 @@ func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) option.V2RayXH
 			options.Headers = headers
 		}
 	}
-	if xmux := settings.Xmux; xmux != nil {
+	if len(settings.Xmux) > 0 && string(settings.Xmux) != "null" {
+		xmux := new(xrayXmux)
+		err := d.readObject(name+".xmux", settings.Xmux, xmux)
+		if err != nil {
+			return options, err
+		}
 		xmuxOptions := option.V2RayXHTTPXmuxOptions{
 			MaxConcurrency:   nonZero(xmux.MaxConcurrency),
 			MaxConnections:   nonZero(xmux.MaxConnections),
@@ -243,7 +318,7 @@ func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) option.V2RayXH
 			options.Xmux = &xmuxOptions
 		}
 	}
-	return options
+	return options, nil
 }
 
 // xhttpDownload reads "downloadSettings": a whole stream configuration of
@@ -344,6 +419,9 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 	if len(settings.DownloadSettings) > 0 && string(settings.DownloadSettings) != "null" {
 		d.warn(name, ": nested downloadSettings are ignored")
 	}
-	options.V2RayXHTTPBaseOptions = d.xhttpBase(name+".xhttpSettings", settings)
+	options.V2RayXHTTPBaseOptions, err = d.xhttpBase(name+".xhttpSettings", settings)
+	if err != nil {
+		return nil, err
+	}
 	return options, nil
 }
