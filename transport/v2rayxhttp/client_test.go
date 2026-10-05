@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
@@ -83,6 +84,21 @@ func echo(t *testing.T, conn net.Conn, size int) {
 	require.NoError(t, err)
 	require.NoError(t, <-writeErr)
 	require.True(t, bytes.Equal(data, received), "echoed data differs")
+}
+
+// settledGoroutines is the goroutine count once servers started in the
+// background have finished starting theirs.
+func settledGoroutines() int {
+	count := runtime.NumGoroutine()
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		next := runtime.NumGoroutine()
+		if next == count {
+			return count
+		}
+		count = next
+	}
+	return count
 }
 
 // waitGoroutines waits for the goroutines to come back to the count before a
@@ -389,6 +405,44 @@ func TestXHTTPSessionsLeaveNothing(t *testing.T) {
 			}
 			wg.Wait()
 			waitGoroutines(t, baseline)
+		})
+	}
+}
+
+// download sends the download half to another server (the same test server
+// here, on a second listener), its own TLS and pool.
+func TestXHTTPDownloadLeg(t *testing.T) {
+	for _, mode := range []string{modePacketUp, modeStreamUp} {
+		t.Run(mode, func(t *testing.T) {
+			options := option.V2RayXHTTPOptions{Mode: mode}
+			options.Path = "/x"
+			serverConfig, err := newRequestConfig(options.V2RayXHTTPBaseOptions, mode)
+			require.NoError(t, err)
+			server := newTestServer(t, serverConfig, "h2")
+			second := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				server.count("on-second")
+				server.serveHTTP(w, r)
+			}))
+			second.EnableHTTP2 = true
+			second.StartTLS()
+			t.Cleanup(second.Close)
+			secondAddr := M.ParseSocksaddr(second.Listener.Addr().String())
+			options.Download = &option.V2RayXHTTPDownloadOptions{
+				ServerOptions:               option.ServerOptions{Server: secondAddr.AddrString(), ServerPort: secondAddr.Port},
+				OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{TLS: &option.OutboundTLSOptions{Enabled: true, Insecure: true, ServerName: "cdn.example.com"}},
+			}
+			options.Download.Path = "/x"
+			tlsConfig, err := tls.NewClient(context.Background(), log.StdLogger(), "example.com", option.OutboundTLSOptions{Enabled: true, Insecure: true, ServerName: "example.com"})
+			require.NoError(t, err)
+			transport, err := NewClient(context.Background(), N.SystemDialer, M.ParseSocksaddr(server.server.Listener.Addr().String()), options, tlsConfig)
+			require.NoError(t, err)
+			defer transport.Close()
+			conn, err := transport.DialContext(context.Background())
+			require.NoError(t, err)
+			echo(t, conn, 128*1024)
+			conn.Close()
+			require.Equal(t, 1, server.requestCount("on-second"), "only the download goes to the second server")
+			require.Equal(t, 1, server.requestCount("download"))
 		})
 	}
 }

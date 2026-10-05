@@ -103,7 +103,7 @@ func (r *V2RayXHTTPRange) UnmarshalJSON(content []byte) error {
 			From int64 `json:"from"`
 			To   int64 `json:"to"`
 		}
-		err = json.Unmarshal(content, &value)
+		err = json.UnmarshalDisallowUnknownFields(content, &value)
 		from, to = value.From, value.To
 	default:
 		err = json.Unmarshal(content, &from)

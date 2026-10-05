@@ -69,6 +69,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		}
 		outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
 	}
+	if options.Flow != "" && common.PtrValueOrDefault(options.Transport).Type == C.V2RayTransportTypeXHTTP {
+		// Vision needs the TLS connection itself; over XHTTP Xray has it only
+		// with VLESS Encryption, which sing-box does not have (podkop-engine).
+		return nil, E.New("flow ", options.Flow, " is not supported over the xhttp transport")
+	}
 	if options.Transport != nil {
 		outbound.transport, err = v2ray.NewClientTransport(ctx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
 		if err != nil {
