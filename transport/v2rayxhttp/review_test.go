@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -240,4 +241,34 @@ func TestXHTTPCloseDoesNotWaitForAFailedSession(t *testing.T) {
 	require.NoError(t, conn.Close())
 	client.Close()
 	waitGoroutines(t, baseline)
+}
+
+// The backoff holds back new connections, not the sessions a working
+// connection can take: one user's request that makes a proxy drop connections
+// must not cut the outbound off for everyone.
+func TestXHTTPBackoffKeepsWorkingConnections(t *testing.T) {
+	client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: modePacketUp}, "h2", nil)
+	// a working connection, held by an open session
+	held, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	defer held.Close()
+	echo(t, held, 100)
+	// the pool in backoff, as after two young connections failed
+	client.upPool.access.Lock()
+	client.upPool.failures = 2
+	client.upPool.lastErr = E.New("test")
+	client.upPool.retryAt = time.Now().Add(time.Minute)
+	clients := len(client.upPool.clients)
+	client.upPool.access.Unlock()
+	require.Equal(t, 1, clients)
+	for i := 0; i < 5; i++ {
+		conn, err := client.DialContext(context.Background())
+		require.NoError(t, err)
+		echo(t, conn, 100)
+		conn.Close()
+	}
+	client.upPool.access.Lock()
+	clients = len(client.upPool.clients)
+	client.upPool.access.Unlock()
+	require.Equal(t, 1, clients, "no new connection during the backoff")
 }

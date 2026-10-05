@@ -136,10 +136,8 @@ func (p *pool) take(session bool) (*poolClient, []*poolClient, error) {
 			i++
 		}
 	}
-	var client *poolClient
-	switch {
-	case len(p.clients) == 0, p.connections > 0 && len(p.clients) < int(p.connections):
-	default:
+	// pick takes one of the pooled clients that has room for a session.
+	pick := func() *poolClient {
 		candidates := p.clients
 		if p.concurrency > 0 {
 			candidates = make([]*poolClient, 0, len(p.clients))
@@ -149,18 +147,32 @@ func (p *pool) take(session bool) (*poolClient, []*poolClient, error) {
 				}
 			}
 		}
-		if len(candidates) > 0 {
-			client = candidates[rand.IntN(len(candidates))]
-			if client.leftUsage > 0 {
-				client.leftUsage--
-			}
+		if len(candidates) == 0 {
+			return nil
 		}
+		picked := candidates[rand.IntN(len(candidates))]
+		if picked.leftUsage > 0 {
+			picked.leftUsage--
+		}
+		return picked
+	}
+	var client *poolClient
+	wantMore := len(p.clients) == 0 || (p.connections > 0 && len(p.clients) < int(p.connections))
+	if !wantMore {
+		client = pick()
 	}
 	if client == nil {
 		if now.Before(p.retryAt) {
-			return nil, removed, E.Cause(p.lastErr, "xhttp: server failed ", p.failures, " connections in a row, next try in ", p.retryAt.Sub(now).Round(time.Millisecond))
+			// No new connection for now. The backoff is about connecting: a
+			// connection that works goes on serving, also when the pool would
+			// rather have opened one more.
+			client = pick()
+			if client == nil {
+				return nil, removed, E.Cause(p.lastErr, "xhttp: server failed ", p.failures, " connections in a row, next try in ", p.retryAt.Sub(now).Round(time.Millisecond))
+			}
+		} else {
+			client = p.newClient(now)
 		}
-		client = p.newClient(now)
 	}
 	client.acquire()
 	if session {
