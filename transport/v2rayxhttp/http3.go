@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go"
+	"github.com/sagernet/quic-go/congestion"
 	"github.com/sagernet/quic-go/http3"
 	"github.com/sagernet/sing-box/common/tls"
+	congestion_meta1 "github.com/sagernet/sing-quic/congestion_meta1"
+	congestion_meta2 "github.com/sagernet/sing-quic/congestion_meta2"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -65,6 +68,12 @@ func newHTTP3Connections(dialer N.Dialer, serverAddr M.Socksaddr, tlsConfig tls.
 				context.AfterFunc(quicConn.Context(), func() {
 					conn.Close()
 				})
+				// BBR, as Xray's HTTP/3 uses.
+				quicConn.SetCongestionControl(congestion_meta2.NewBbrSender(
+					congestion_meta2.DefaultClock{TimeFunc: time.Now},
+					congestion.ByteCount(quicConn.Config().InitialPacketSize),
+					congestion.ByteCount(congestion_meta1.InitialCongestionWindow),
+				))
 				return quicConn, nil
 			},
 		}}
