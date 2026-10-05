@@ -35,6 +35,7 @@ type session struct {
 
 	clientAccess sync.Mutex
 	clients      []*poolClient
+	counted      []*poolClient
 
 	downloadOnce  sync.Once
 	downloadReady chan struct{}
@@ -64,8 +65,20 @@ type failureBox struct {
 	err error
 }
 
-func newSession() *session {
-	ctx, cancel := context.WithCancel(context.Background())
+// dialDepthKey counts, in the context of a session's requests, the sessions
+// that context has passed through: a download detour that leads back to its
+// own outbound would otherwise dial itself without end.
+type dialDepthKey struct{}
+
+const maxDialDepth = 4
+
+func dialDepth(ctx context.Context) int {
+	depth, _ := ctx.Value(dialDepthKey{}).(int)
+	return depth
+}
+
+func newSession(depth int) *session {
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), dialDepthKey{}, depth+1))
 	return &session{
 		ctx:           ctx,
 		cancel:        cancel,
@@ -84,6 +97,18 @@ func (s *session) hold(client *poolClient) {
 		return
 	}
 	s.clients = append(s.clients, client)
+}
+
+// count makes the session end, when it closes, the session count get(true)
+// started on a client.
+func (s *session) count(client *poolClient) {
+	s.clientAccess.Lock()
+	defer s.clientAccess.Unlock()
+	if s.closed.Load() {
+		client.endSession()
+		return
+	}
+	s.counted = append(s.counted, client)
 }
 
 // withConnectTrace reports the first connection a request of the session got:
@@ -130,7 +155,9 @@ func (s *session) startDownload(client *poolClient, request *http.Request) {
 			return
 		}
 		if response.StatusCode != http.StatusOK {
-			discardBody(response.Body)
+			// Not read to its end first: the body of an error may never end,
+			// and a read of the session would wait for it.
+			response.Body.Close()
 			s.fail(E.New("xhttp: download: unexpected status ", response.Status))
 			return
 		}
@@ -150,7 +177,7 @@ func (s *session) startStreamUpload(client *poolClient, request *http.Request) {
 			return
 		}
 		if response.StatusCode != http.StatusOK {
-			discardBody(response.Body)
+			response.Body.Close()
 			s.fail(E.New("xhttp: upload: unexpected status ", response.Status))
 			return
 		}
@@ -299,9 +326,12 @@ func (s *session) Close() error {
 		s.packetUpload.interrupt(net.ErrClosed)
 	}
 	s.clientAccess.Lock()
-	clients := s.clients
-	s.clients = nil
+	clients, counted := s.clients, s.counted
+	s.clients, s.counted = nil, nil
 	s.clientAccess.Unlock()
+	for _, client := range counted {
+		client.endSession()
+	}
 	for _, client := range clients {
 		client.release()
 	}

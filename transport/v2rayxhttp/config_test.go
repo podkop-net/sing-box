@@ -48,6 +48,15 @@ func TestXHTTPConfigErrors(t *testing.T) {
 		"connections and concurrency": func(o *option.V2RayXHTTPOptions) {
 			o.Xmux = &option.V2RayXHTTPXmuxOptions{MaxConnections: xrange(2, 2), MaxConcurrency: xrange(4, 4)}
 		},
+		"header name":    func(o *option.V2RayXHTTPOptions) { o.Headers = badoption.HTTPHeader{"X Foo": {"a"}} },
+		"header value":   func(o *option.V2RayXHTTPOptions) { o.Headers = badoption.HTTPHeader{"X-Foo": {"a\nb"}} },
+		"upgrade header": func(o *option.V2RayXHTTPOptions) { o.Headers = badoption.HTTPHeader{"Upgrade": {"websocket"}} },
+		"session key":    func(o *option.V2RayXHTTPOptions) { o.SessionPlacement, o.SessionKey = placementHeader, "X Session" },
+		"cookie key":     func(o *option.V2RayXHTTPOptions) { o.SessionPlacement, o.SessionKey = placementCookie, "a=b; c" },
+		"padding header": func(o *option.V2RayXHTTPOptions) { o.XPaddingHeader = "X:Pad" },
+		"session table with a slash": func(o *option.V2RayXHTTPOptions) {
+			o.SessionIDTable, o.SessionIDLength = "ABCDEFGHIJKLMNOP+/", xrange(16, 16)
+		},
 		"download padding": func(o *option.V2RayXHTTPOptions) {
 			o.Download = &option.V2RayXHTTPDownloadOptions{ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}
 			o.Download.XPaddingBytes = xrange(0, 10)

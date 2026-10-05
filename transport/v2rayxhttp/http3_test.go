@@ -22,13 +22,27 @@ import (
 
 // tls.alpn ["h3"] selects HTTP/3, every mode over QUIC streams.
 func TestXHTTPHTTP3(t *testing.T) {
-	for _, mode := range []string{modePacketUp, modeStreamUp, modeStreamOne} {
+	testHTTP3(t, false)
+}
+
+// A request the server resets must not leave its QUIC connection behind:
+// http3.Transport forgets such a connection without closing it.
+func TestXHTTPHTTP3ResetLeavesNothing(t *testing.T) {
+	testHTTP3(t, true)
+}
+
+func testHTTP3(t *testing.T, abortUploads bool) {
+	modes := []string{modePacketUp, modeStreamUp, modeStreamOne}
+	if abortUploads {
+		modes = []string{modePacketUp, modeStreamUp}
+	}
+	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			options := option.V2RayXHTTPOptions{Mode: mode}
 			options.Path = "/h3"
 			serverConfig, err := newRequestConfig(options.V2RayXHTTPBaseOptions, mode)
 			require.NoError(t, err)
-			handler := &testServer{t: t, config: serverConfig, sessions: make(map[string]*testSession), requests: make(map[string]int)}
+			handler := &testServer{t: t, config: serverConfig, sessions: make(map[string]*testSession), requests: make(map[string]int), abortUploads: abortUploads}
 			// httptest only provides the certificate here.
 			certificateServer := httptest.NewUnstartedServer(nil)
 			certificateServer.StartTLS()
@@ -52,8 +66,17 @@ func TestXHTTPHTTP3(t *testing.T) {
 			baseline := settledGoroutines()
 			for i := 0; i < 3; i++ {
 				conn, err := transport.DialContext(context.Background())
+				if abortUploads && err != nil {
+					// the pool backs off after the resets
+					continue
+				}
 				require.NoError(t, err)
-				echo(t, conn, 128*1024)
+				if abortUploads {
+					conn.Write([]byte("x"))
+					conn.Read(make([]byte, 1))
+				} else {
+					echo(t, conn, 128*1024)
+				}
 				conn.Close()
 			}
 			transport.Close()

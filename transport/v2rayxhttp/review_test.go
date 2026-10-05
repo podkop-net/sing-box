@@ -1,0 +1,145 @@
+package v2rayxhttp
+
+import (
+	"context"
+	"math"
+	"net"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+
+	"github.com/stretchr/testify/require"
+)
+
+// A range as wide as int32 used to panic in rand: `sing-box check` for the
+// XMUX pool sizes, the running process for the rest.
+func TestXHTTPWideRanges(t *testing.T) {
+	for _, r := range []valueRange{{0, math.MaxInt32}, {-1, math.MaxInt32}, {math.MinInt32, math.MaxInt32}, {math.MinInt32, 0}, {5, 5}, {7, 3}} {
+		for i := 0; i < 100; i++ {
+			value := r.rand()
+			if r.to > r.from {
+				require.True(t, value >= r.from && value <= r.to, "%v gave %d", r, value)
+			}
+		}
+	}
+	wide := xrange(0, math.MaxInt32)
+	options := option.V2RayXHTTPOptions{Mode: modePacketUp}
+	options.ScMinPostsIntervalMs = xrange(-1, -1)
+	options.Xmux = &option.V2RayXHTTPXmuxOptions{MaxConnections: wide, CMaxReuseTimes: wide, HMaxRequestTimes: wide, HMaxReusableSecs: wide}
+	client, _ := newTestPair(t, options, "h2", nil)
+	conn, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	echo(t, conn, 4096)
+	conn.Close()
+}
+
+func TestXHTTPIPv6Host(t *testing.T) {
+	transport, err := NewClient(context.Background(), N.SystemDialer, M.ParseSocksaddr("[2001:db8::5]:443"), option.V2RayXHTTPOptions{}, nil)
+	require.NoError(t, err)
+	defer transport.Close()
+	client := transport.(*Client)
+	require.Equal(t, "[2001:db8::5]", client.up.host)
+	request := client.up.newStreamRequest(context.Background(), "http", "id", nil)
+	require.Equal(t, "[2001:db8::5]", request.Host)
+	require.Contains(t, request.Header.Get("Referer"), "http://[2001:db8::5]/?x_padding=")
+}
+
+// max_concurrency counts sessions, once each, as Xray does: not the requests
+// a session has in flight.
+func TestXHTTPConcurrencyCountsSessions(t *testing.T) {
+	for _, mode := range []string{modePacketUp, modeStreamUp, modeStreamOne} {
+		t.Run(mode, func(t *testing.T) {
+			options := option.V2RayXHTTPOptions{Mode: mode}
+			options.Xmux = &option.V2RayXHTTPXmuxOptions{MaxConcurrency: xrange(2, 2)}
+			client, _ := newTestPair(t, options, "h2", nil)
+			var conns []net.Conn
+			for i := 0; i < 4; i++ {
+				conn, err := client.DialContext(context.Background())
+				require.NoError(t, err)
+				echo(t, conn, 1024)
+				conns = append(conns, conn)
+			}
+			client.upPool.access.Lock()
+			clients := len(client.upPool.clients)
+			client.upPool.access.Unlock()
+			require.Equal(t, 2, clients, "four sessions, two to a connection")
+			for _, conn := range conns {
+				conn.Close()
+			}
+			client.upPool.access.Lock()
+			for _, pooled := range client.upPool.clients {
+				require.Zero(t, pooled.sessions.Load())
+			}
+			client.upPool.access.Unlock()
+		})
+	}
+}
+
+// The body of an error answer may never end: the session fails at once.
+func TestXHTTPErrorStatusWithEndlessBody(t *testing.T) {
+	client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: modePacketUp}, "h2", func(s *testServer) {
+		s.downloadStatus, s.endlessErrorBody = http.StatusForbidden, true
+	})
+	conn, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Read(make([]byte, 1))
+		done <- err
+	}()
+	select {
+	case err = <-done:
+		require.ErrorContains(t, err, "403")
+	case <-time.After(3 * time.Second):
+		t.Fatal("read still waits for the body of the error answer")
+	}
+}
+
+// A download detour that leads back to its own outbound must not dial itself
+// without end.
+func TestXHTTPDialDepth(t *testing.T) {
+	client, _ := newTestPair(t, option.V2RayXHTTPOptions{Mode: modePacketUp}, "h2", nil)
+	ctx := context.Background()
+	for i := 0; i < maxDialDepth; i++ {
+		s := newSession(dialDepth(ctx))
+		ctx = s.ctx
+		defer s.Close()
+	}
+	_, err := client.DialContext(ctx)
+	require.ErrorContains(t, err, "leads back")
+}
+
+// Closing the transport closes the connections retired from the pool that a
+// session still holds.
+func TestXHTTPCloseReachesRetiredClients(t *testing.T) {
+	options := option.V2RayXHTTPOptions{Mode: modeStreamOne}
+	options.Xmux = &option.V2RayXHTTPXmuxOptions{MaxConnections: xrange(1, 1), HMaxRequestTimes: xrange(1, 1)}
+	client, _ := newTestPair(t, options, "h2", nil)
+	first, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	echo(t, first, 1024)
+	second, err := client.DialContext(context.Background())
+	require.NoError(t, err)
+	echo(t, second, 1024)
+	client.Close()
+	first.SetDeadline(time.Time{})
+	done := make(chan error, 1)
+	go func() {
+		first.Write([]byte("x"))
+		_, err := first.Read(make([]byte, 1))
+		done <- err
+	}()
+	select {
+	case err = <-done:
+		require.Error(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("a session on a retired connection outlived the transport")
+	}
+	second.Close()
+	first.Close()
+}

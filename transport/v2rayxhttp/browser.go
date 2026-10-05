@@ -97,16 +97,18 @@ func greasedBrandList(majorVersion int, brand string) string {
 	return strings.Join(shuffled, ", ")
 }
 
+// Declared, and so drawn from the generator, in Xray's order: curl, Firefox,
+// Safari, Chrome. The same seed then gives the same versions as Xray.
 var (
+	curlUA             = "curl/" + curlVersion()
+	firefoxVersionText = strconv.Itoa(firefoxVersion())
+	firefoxUA          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:" + firefoxVersionText + ".0) Gecko/20100101 Firefox/" + firefoxVersionText + ".0"
+	safariUA           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" + safariVersion() + " Safari/605.1.15"
 	chromeMajorVersion = chromeVersion()
 	chromeUA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + strconv.Itoa(chromeMajorVersion) + ".0.0.0 Safari/537.36"
 	chromeUACH         = greasedBrandList(chromeMajorVersion, "Google Chrome")
 	edgeUA             = chromeUA + "Edg/" + strconv.Itoa(chromeMajorVersion) + ".0.0.0"
 	edgeUACH           = greasedBrandList(chromeMajorVersion, "Microsoft Edge")
-	firefoxVersionText = strconv.Itoa(firefoxVersion())
-	firefoxUA          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:" + firefoxVersionText + ".0) Gecko/20100101 Firefox/" + firefoxVersionText + ".0"
-	safariUA           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" + safariVersion() + " Safari/605.1.15"
-	curlUA             = "curl/" + curlVersion()
 )
 
 // applyDefaultHeaders makes the headers of an XHTTP request look like a fetch

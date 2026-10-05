@@ -12,6 +12,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -89,6 +90,10 @@ func NewClient(ctx context.Context, outboundDialer N.Dialer, serverAddr M.Socksa
 		if err != nil {
 			return nil, E.Cause(err, "download")
 		}
+	} else if M.IsDomainName(download.Server) && !serverAddr.IsFqdn() {
+		// The dialer of an outbound whose server is an address does not
+		// resolve names.
+		downDialer = dialer.NewResolveDialer(ctx, outboundDialer, false, "", adapter.DNSQueryOptions{}, 0)
 	}
 	var downTLS tls.Config
 	if download.TLS != nil && download.TLS.Enabled {
@@ -142,6 +147,11 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 		} else {
 			config.host = serverAddr.AddrString()
 		}
+		// An IPv6 literal goes in brackets, as Xray writes it: without them Go
+		// (1.26 on) does not parse the padding Referer and Xray answers 400.
+		if address, err := netip.ParseAddr(config.host); err == nil && address.Is6() {
+			config.host = "[" + config.host + "]"
+		}
 	}
 	keepAlivePeriod := time.Duration(config.xmux.hKeepAlivePeriod) * time.Second
 	var newConnection func() pooledConnection
@@ -187,7 +197,11 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	s := newSession()
+	depth := dialDepth(ctx)
+	if depth >= maxDialDepth {
+		return nil, E.New("xhttp: download detour leads back to its own outbound")
+	}
+	s := newSession(depth)
 	var err error
 	switch c.mode {
 	case modeStreamOne:
@@ -210,11 +224,12 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 // dialStreamOne sends one request: its body is the upload, its response body
 // the download. It carries no session ID.
 func (c *Client) dialStreamOne(s *session) error {
-	client, err := c.upPool.get()
+	client, err := c.upPool.get(true)
 	if err != nil {
 		return err
 	}
 	s.hold(client)
+	s.count(client)
 	s.streamBody, s.streamUpload = io.Pipe()
 	s.startDownload(client, c.up.newStreamRequest(s.ctx, c.upScheme, "", s.streamBody))
 	return nil
@@ -252,19 +267,21 @@ func (c *Client) dialPacketUp(s *session) error {
 // the first client of the upload, which is the same one when both legs share
 // the pool (as with Xray), with a running count of its own for the upload.
 func (c *Client) sessionClients(s *session) (*poolClient, *poolClient, error) {
-	downClient, err := c.downPool.get()
+	downClient, err := c.downPool.get(true)
 	if err != nil {
 		return nil, nil, err
 	}
 	s.hold(downClient)
+	s.count(downClient)
 	if c.upPool == c.downPool {
 		downClient.acquire()
 		return downClient, downClient, nil
 	}
-	upClient, err := c.upPool.get()
+	upClient, err := c.upPool.get(true)
 	if err != nil {
 		return nil, nil, err
 	}
+	s.count(upClient)
 	return downClient, upClient, nil
 }
 

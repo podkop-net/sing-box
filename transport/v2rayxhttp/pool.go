@@ -53,8 +53,11 @@ type pool struct {
 	concurrency   int32
 	connections   int32
 
-	access   sync.Mutex
-	clients  []*poolClient
+	access  sync.Mutex
+	clients []*poolClient
+	// retired holds the clients taken out of the pool that sessions still use,
+	// for close to reach them.
+	retired  map[*poolClient]struct{}
 	closed   bool
 	failures int
 	lastFail time.Time
@@ -76,10 +79,13 @@ func newPool(config xmuxConfig, newConnection func() pooledConnection) *pool {
 // sessions and upload requests using it: a client taken out of the pool is
 // closed once the last of them is done.
 type poolClient struct {
-	pool         *pool
-	connection   pooledConnection
-	createdAt    time.Time
-	running      atomic.Int32
+	pool       *pool
+	connection pooledConnection
+	createdAt  time.Time
+	running    atomic.Int32
+	// sessions counts the sessions on the client, what max_concurrency limits
+	// (Xray counts a session once, whatever requests it has in flight).
+	sessions     atomic.Int32
 	leftUsage    int32 // under pool.access; -1 is no limit
 	leftRequests atomic.Int32
 	unreusableAt time.Time
@@ -89,6 +95,8 @@ type poolClient struct {
 	// idleGeneration changes whenever the client is taken, so that a check
 	// scheduled when it went idle knows whether it stayed idle.
 	idleGeneration atomic.Uint64
+	timerAccess    sync.Mutex
+	idleTimer      *time.Timer
 }
 
 // poolIdleTimeout retires a pooled connection no session has used for this
@@ -96,21 +104,32 @@ type poolClient struct {
 // for good (Xray keeps it until XMUX retires it, 30 to 50 minutes on).
 var poolIdleTimeout = connectionIdleTimeout
 
-// get returns a client for a new session (or for the next upload request of
-// one) and counts it as running; release gives it back.
-func (p *pool) get() (*poolClient, error) {
+// get returns a client for a new session (session is true: it then counts
+// against max_concurrency until endSession) or for the next upload request of
+// one, and counts it as running; release gives it back.
+func (p *pool) get(session bool) (*poolClient, error) {
+	client, removed, err := p.take(session)
+	// Closed outside the lock: closing a TLS connection may wait on its peer.
+	for _, old := range removed {
+		old.closeIfIdle()
+	}
+	return client, err
+}
+
+func (p *pool) take(session bool) (*poolClient, []*poolClient, error) {
 	p.access.Lock()
 	defer p.access.Unlock()
 	if p.closed {
-		return nil, net.ErrClosed
+		return nil, nil, net.ErrClosed
 	}
 	now := time.Now()
+	var removed []*poolClient
 	for i := 0; i < len(p.clients); {
 		client := p.clients[i]
 		if client.broken.Load() || client.leftUsage == 0 || client.leftRequests.Load() <= 0 ||
 			(!client.unreusableAt.IsZero() && now.After(client.unreusableAt)) {
-			client.removed.Store(true)
-			client.closeIfIdle()
+			p.retireLocked(client)
+			removed = append(removed, client)
 			p.clients = append(p.clients[:i], p.clients[i+1:]...)
 		} else {
 			i++
@@ -124,7 +143,7 @@ func (p *pool) get() (*poolClient, error) {
 		if p.concurrency > 0 {
 			candidates = make([]*poolClient, 0, len(p.clients))
 			for _, candidate := range p.clients {
-				if candidate.running.Load() < p.concurrency {
+				if candidate.sessions.Load() < p.concurrency {
 					candidates = append(candidates, candidate)
 				}
 			}
@@ -138,18 +157,42 @@ func (p *pool) get() (*poolClient, error) {
 	}
 	if client == nil {
 		if now.Before(p.retryAt) {
-			return nil, E.Cause(p.lastErr, "xhttp: server failed ", p.failures, " connections in a row, next try in ", p.retryAt.Sub(now).Round(time.Millisecond))
+			return nil, removed, E.Cause(p.lastErr, "xhttp: server failed ", p.failures, " connections in a row, next try in ", p.retryAt.Sub(now).Round(time.Millisecond))
 		}
 		client = p.newClient(now)
 	}
 	client.acquire()
-	return client, nil
+	if session {
+		client.sessions.Add(1)
+	}
+	return client, removed, nil
+}
+
+// retireLocked marks a client as out of the pool; the caller removes it from
+// clients and calls closeIfIdle after unlocking.
+func (p *pool) retireLocked(client *poolClient) {
+	client.removed.Store(true)
+	if p.retired == nil {
+		p.retired = make(map[*poolClient]struct{})
+	}
+	p.retired[client] = struct{}{}
 }
 
 // acquire counts one more user of the client; release ends it.
 func (c *poolClient) acquire() {
 	c.running.Add(1)
 	c.idleGeneration.Add(1)
+	c.timerAccess.Lock()
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+		c.idleTimer = nil
+	}
+	c.timerAccess.Unlock()
+}
+
+// endSession ends the count get(true) started.
+func (c *poolClient) endSession() {
+	c.sessions.Add(-1)
 }
 
 func (p *pool) newClient(now time.Time) *poolClient {
@@ -193,7 +236,7 @@ func (c *poolClient) roundTrip(request *http.Request) (*http.Response, error) {
 // A request we cancelled ourselves (a session closed, a dial given up) says
 // nothing about the server.
 func (c *poolClient) fail(ctx context.Context, err error) {
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 		return
 	}
 	if c.broken.Swap(true) {
@@ -213,7 +256,7 @@ func (p *pool) noteFailure(client *poolClient, err error) {
 		p.failures++
 	}
 	p.lastFail = now
-	p.lastErr = err
+	p.lastErr = hideHTTPError(err)
 	if p.failures >= 2 {
 		backoff := firstBackoff << min(p.failures-2, 5)
 		p.retryAt = now.Add(min(backoff, maxBackoff))
@@ -229,11 +272,16 @@ func (c *poolClient) release() {
 		return
 	}
 	generation := c.idleGeneration.Load()
-	time.AfterFunc(c.pool.idleTimeout, func() {
+	c.timerAccess.Lock()
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+	}
+	c.idleTimer = time.AfterFunc(c.pool.idleTimeout, func() {
 		if c.running.Load() <= 0 && c.idleGeneration.Load() == generation {
 			c.pool.retire(c)
 		}
 	})
+	c.timerAccess.Unlock()
 }
 
 // retire takes an idle client out of the pool and closes it.
@@ -245,6 +293,9 @@ func (p *pool) retire(client *poolClient) {
 			break
 		}
 	}
+	if !p.closed {
+		p.retireLocked(client)
+	}
 	p.access.Unlock()
 	client.removed.Store(true)
 	client.closeIfIdle()
@@ -252,19 +303,38 @@ func (p *pool) retire(client *poolClient) {
 
 func (c *poolClient) closeIfIdle() {
 	if c.removed.Load() && c.running.Load() <= 0 {
-		c.closeOnce.Do(c.connection.close)
+		c.shutdown()
+		c.pool.access.Lock()
+		delete(c.pool.retired, c)
+		c.pool.access.Unlock()
 	}
 }
 
+func (c *poolClient) shutdown() {
+	c.timerAccess.Lock()
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+		c.idleTimer = nil
+	}
+	c.timerAccess.Unlock()
+	c.closeOnce.Do(c.connection.close)
+}
+
+// close closes every client, those in the pool and those retired from it that
+// sessions still hold.
 func (p *pool) close() {
 	p.access.Lock()
 	clients := p.clients
+	for client := range p.retired {
+		clients = append(clients, client)
+	}
 	p.clients = nil
+	p.retired = nil
 	p.closed = true
 	p.access.Unlock()
 	for _, client := range clients {
 		client.removed.Store(true)
-		client.closeOnce.Do(client.connection.close)
+		client.shutdown()
 	}
 }
 
@@ -384,7 +454,9 @@ func newHTTP1Connection(dialer N.Dialer, tlsDialer tls.Dialer, serverAddr M.Sock
 		DialContext:         dial,
 		DialTLSContext:      dial,
 		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     connectionIdleTimeout,
+		// Xray writes these requests itself, without Accept-Encoding.
+		DisableCompression: true,
+		IdleConnTimeout:    connectionIdleTimeout,
 	}
 	return connection
 }

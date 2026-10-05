@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // testServer is an XHTTP server for the tests, after Xray's hub.go: it reads the
@@ -25,7 +26,9 @@ type testServer struct {
 	// as an Xray server behind a CDN effectively does.
 	holdDownload   bool
 	downloadStatus int
-	uploadStatus   int
+	// endlessErrorBody makes the body of an error answer never end.
+	endlessErrorBody bool
+	uploadStatus     int
 	// abortUploads resets every upload request (RST_STREAM on HTTP/2).
 	abortUploads bool
 
@@ -305,6 +308,11 @@ func (s *testServer) serveDownload(w http.ResponseWriter, r *http.Request, sessi
 	}
 	if s.downloadStatus != 0 {
 		w.WriteHeader(s.downloadStatus)
+		for s.endlessErrorBody && r.Context().Err() == nil {
+			w.Write([]byte("error page "))
+			w.(http.Flusher).Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

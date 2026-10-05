@@ -10,6 +10,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 
 	"github.com/gofrs/uuid/v5"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -55,7 +56,8 @@ func (r valueRange) rand() int32 {
 	if r.to <= r.from {
 		return r.from
 	}
-	return r.from + rand.Int32N(r.to-r.from+1)
+	// In int64: the width of a range may not fit int32 ("0-2147483647").
+	return int32(int64(r.from) + rand.Int64N(int64(r.to)-int64(r.from)+1))
 }
 
 // Session ID alphabets Xray knows by name.
@@ -126,8 +128,19 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 	}
 	header := make(http.Header)
 	for key, values := range options.Headers.Build() {
-		if strings.EqualFold(key, "host") {
+		switch strings.ToLower(key) {
+		case "host":
 			return nil, E.New("headers can't contain host, set host instead")
+		case "upgrade", "transfer-encoding", "connection", "content-length":
+			return nil, E.New("headers can't contain ", key)
+		}
+		if !httpguts.ValidHeaderFieldName(key) {
+			return nil, E.New("invalid header name: ", key)
+		}
+		for _, value := range values {
+			if !httpguts.ValidHeaderFieldValue(value) {
+				return nil, E.New("invalid value of header ", key)
+			}
 		}
 		header[key] = values
 	}
@@ -169,6 +182,12 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 	default:
 		return nil, E.New("unsupported x_padding_placement: ", options.XPaddingPlacement)
 	}
+	if !httpguts.ValidHeaderFieldName(c.paddingHeader) {
+		return nil, E.New("invalid x_padding_header: ", c.paddingHeader)
+	}
+	if !httpguts.ValidHeaderFieldName(c.paddingKey) {
+		return nil, E.New("invalid x_padding_key: ", c.paddingKey)
+	}
 	switch options.XPaddingMethod {
 	case "":
 		c.paddingMethod = paddingMethodRepeatX
@@ -201,6 +220,9 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 		}
 	}
 
+	if c.uplinkDataKey != "" && !httpguts.ValidHeaderFieldName(c.uplinkDataKey) {
+		return nil, E.New("invalid uplink_data_key: ", c.uplinkDataKey)
+	}
 	c.uplinkHTTPMethod = strings.ToUpper(options.UplinkHTTPMethod)
 	if c.uplinkHTTPMethod == "" {
 		c.uplinkHTTPMethod = http.MethodPost
@@ -220,6 +242,13 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 	}
 	c.sessionKey = defaultKey(options.SessionKey, c.sessionPlacement, "x_session", "X-Session")
 	c.seqKey = defaultKey(options.SeqKey, c.seqPlacement, "x_seq", "X-Seq")
+	// A key names a header, a cookie or a query parameter: a token in each.
+	if c.sessionPlacement != placementPath && !httpguts.ValidHeaderFieldName(c.sessionKey) {
+		return nil, E.New("invalid session_key: ", c.sessionKey)
+	}
+	if c.seqPlacement != placementPath && !httpguts.ValidHeaderFieldName(c.seqKey) {
+		return nil, E.New("invalid seq_key: ", c.seqKey)
+	}
 
 	c.sessionIDLength = newValueRange(options.SessionIDLength)
 	if options.SessionIDTable != "" {
@@ -230,6 +259,12 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 		for i := 0; i < len(table); i++ {
 			if table[i] >= 0x80 {
 				return nil, E.New("session_id_table must contain only ASCII characters")
+			}
+			// The ID travels in a path, a query, a header or a cookie: a "/"
+			// would split it in the path, and Xray's server would read the
+			// rest as the sequence number.
+			if !isUnreserved(table[i]) {
+				return nil, E.New("session_id_table can contain only letters, digits and -._~")
 			}
 		}
 		if c.sessionIDLength.from <= 0 {
@@ -285,6 +320,10 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 		c.xmux.hMaxReusableSecs = valueRange{1800, 3000}
 	}
 	return c, nil
+}
+
+func isUnreserved(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~'
 }
 
 func checkPlacement(name string, placement string) (string, error) {

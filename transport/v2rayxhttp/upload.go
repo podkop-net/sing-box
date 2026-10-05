@@ -167,8 +167,14 @@ func (u *uploader) nextClient() (*poolClient, error) {
 		u.current.acquire()
 		return u.current, nil
 	}
-	client, err := u.client.upPool.get()
+	client, err := u.client.upPool.get(false)
 	if err != nil {
+		// No new connection now (the pool backs off): a current one that is
+		// only out of its budget still works.
+		if u.current != nil && !u.current.broken.Load() {
+			u.current.acquire()
+			return u.current, nil
+		}
 		return nil, err
 	}
 	if u.current != nil {
@@ -190,7 +196,9 @@ func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan 
 	// next request, which then fails with "context canceled" (HTTP/1.1: 1 to 3
 	// uploads in 4000 when sessions closed at once). The timeout bounds an
 	// upload to a server that went silent.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(u.session.ctx), uploadTimeout)
+	// It allows for writing the data at 64 kbit/s on top of the wait.
+	timeout := uploadTimeout + time.Duration(len(data))*time.Second/(8*1024)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(u.session.ctx), timeout)
 	defer cancel()
 	ctx = context.WithValue(ctx, packetRequestKey{}, true)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
