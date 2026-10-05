@@ -264,7 +264,23 @@ func (c *poolClient) fail(ctx context.Context, err error) {
 	if c.broken.Swap(true) {
 		return
 	}
+	if gracefulGoAway(err) {
+		// The server retires the connection in good order, as a proxy does
+		// after so many requests: a new one is due, with nothing to hold
+		// against the server.
+		return
+	}
 	c.pool.noteFailure(c, err)
+}
+
+// gracefulGoAway tells the error of a request that met the GOAWAY of a server
+// closing a connection without an error.
+func gracefulGoAway(err error) bool {
+	var goAway http2.GoAwayError
+	if errors.As(err, &goAway) {
+		return goAway.ErrCode == http2.ErrCodeNo
+	}
+	return err != nil && strings.Contains(err.Error(), "graceful shutdown GOAWAY")
 }
 
 func (p *pool) noteFailure(client *poolClient, err error) {
