@@ -16,6 +16,9 @@ import (
 // on a router a megabyte per uploading connection adds up.
 const maxUploadBacklog = 1024 * 1024
 
+// uploadTimeout bounds one packet-up upload request.
+const uploadTimeout = 60 * time.Second
+
 // uploader sends the writes of a packet-up session as numbered requests. Writes
 // are batched while a request is on its way, so that each request carries what
 // accumulated meanwhile, up to the request size drawn for the session.
@@ -181,7 +184,15 @@ func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan 
 	var once sync.Once
 	written := func() { once.Do(func() { close(wrote) }) }
 	defer written()
-	ctx := context.WithValue(u.session.ctx, packetRequestKey{}, true)
+	// An upload is not cancelled with its session, as with Xray: net/http hands
+	// a connection back to its pool before it delivers a response without a
+	// body, and a request cancelled in between closes that connection under the
+	// next request, which then fails with "context canceled" (HTTP/1.1: 1 to 3
+	// uploads in 4000 when sessions closed at once). The timeout bounds an
+	// upload to a server that went silent.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(u.session.ctx), uploadTimeout)
+	defer cancel()
+	ctx = context.WithValue(ctx, packetRequestKey{}, true)
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		WroteRequest: func(httptrace.WroteRequestInfo) { written() },
 	})
