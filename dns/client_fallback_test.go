@@ -190,7 +190,7 @@ func TestFallbackLogs(t *testing.T) {
 		readAt:  time.Now(),
 	}}
 	for i := 0; i < fallbackDownAfter; i++ {
-		state.failure(context.Background(), logger, "dns-server", E.New("timeout"))
+		state.failure(context.Background(), logger, "dns-server", time.Now(), E.New("timeout"))
 	}
 	state.providerFailed(context.Background(), logger, "dns-server", errNoProviders) // silent
 	for i := 0; i < fallbackProviderAfter; i++ {

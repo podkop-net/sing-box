@@ -455,3 +455,70 @@ func TestExchangeTransportFallback(t *testing.T) {
 		t.Errorf("server asked %d times, want 1", asked)
 	}
 }
+
+// One event that fails many queries at once, as a closed connection they shared does, is
+// one failure of the server; a query that starts after it and fails is the second.
+func TestFallbackCountsBatchOnce(t *testing.T) {
+	t.Parallel()
+	const batch = 20
+	transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+	var waiting sync.WaitGroup
+	waiting.Add(batch)
+	reset := make(chan struct{})
+	transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+		waiting.Done()
+		<-reset
+		return nil, errFallbackTestServer
+	})
+	answers := make(chan string, batch)
+	for i := 0; i < batch; i++ {
+		go func() {
+			got, _ := fallbackTestExchange(transport, state)
+			answers <- got
+		}()
+	}
+	waiting.Wait()
+	close(reset)
+	for i := 0; i < batch; i++ {
+		if got := <-answers; got != "provider" {
+			t.Errorf("answered by %q, want the provider", got)
+		}
+	}
+	if got := state.testState(); got.failures != 1 || got.down {
+		t.Fatalf("state %+v after %d queries failed at once, want one failure", got, batch)
+	}
+	transport.serve(fallbackTestFails)
+	if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+		t.Fatalf("answered by %q (%v), want the provider", got, err)
+	}
+	if got := state.testState(); !got.down {
+		t.Errorf("state %+v after a later failure, want the server set aside", got)
+	}
+}
+
+// A failure counts against the server only when the provider resolved the name: a name
+// that the provider cannot resolve either says nothing about the server.
+func TestFallbackCountsResolvedOnly(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		provider int
+		answer   string
+		down     bool
+	}{
+		{mDNS.RcodeSuccess, "provider", true},
+		{mDNS.RcodeNameError, "NXDOMAIN", true},
+		{mDNS.RcodeServerFailure, "SERVFAIL", false},
+		{mDNS.RcodeNotImplemented, "NOTIMP", false},
+	} {
+		transport, state, _ := newFallbackTest(testResolver(t, test.provider))
+		transport.serve(fallbackTestFails)
+		for i := 0; i < 3; i++ {
+			if got, err := fallbackTestExchange(transport, state); got != test.answer || err != nil {
+				t.Fatalf("provider answers %s: got %q (%v)", test.answer, got, err)
+			}
+		}
+		if got := state.testState(); got.down != test.down || (!test.down && got.failures != 0) {
+			t.Errorf("provider answers %s: state %+v, want down %v", test.answer, got, test.down)
+		}
+	}
+}

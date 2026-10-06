@@ -40,7 +40,10 @@ import (
 // After two failures in a row answered by the provider, the server is set aside: queries
 // go straight to the provider, and a copy of one query is sent to the server in the
 // background, every 30 s at first and up to every 5 minutes; the first normal answer
-// brings it back. A SERVFAIL is retried through the provider as well but does not count
+// brings it back. A failure counts when the provider resolved the name (NOERROR or
+// NXDOMAIN): a name that neither resolves says nothing about the server. Queries that
+// fail together are one failure: the second is a query that started after the first was
+// counted. A SERVFAIL is retried through the provider as well but does not count
 // against the server: it is usually about one domain. When the provider fails to answer
 // twice in a row, the fallback is off for that server for a minute.
 var fallbackEnabled = os.Getenv("SING_BOX_DNS_FALLBACK") != ""
@@ -71,6 +74,7 @@ type fallbackServer struct {
 
 	access        sync.Mutex
 	failures      int
+	countedAt     time.Time // the last failure counted
 	providerFails int
 	down          bool
 	probeAt       time.Time
@@ -119,6 +123,7 @@ func exchangeWithFallback(ctx context.Context, baseCtx context.Context, logger l
 		return transport.Exchange(ctx, message)
 	}
 	usable := state.usable(baseCtx, logger)
+	startAt := time.Now()
 	primaryCtx, cancel := ctx, context.CancelFunc(func() {})
 	if usable {
 		primaryCtx, cancel = context.WithTimeout(ctx, fallbackPrimaryTimeout)
@@ -147,7 +152,9 @@ func exchangeWithFallback(ctx context.Context, baseCtx context.Context, logger l
 		}
 		return nil, err
 	}
-	state.failure(ctx, logger, tag, err)
+	if alternative.Rcode == mDNS.RcodeSuccess || alternative.Rcode == mDNS.RcodeNameError {
+		state.failure(ctx, logger, tag, startAt, err)
+	}
 	return alternative, nil
 }
 
@@ -329,9 +336,16 @@ func (s *fallbackServer) success() {
 	s.access.Unlock()
 }
 
-// failure counts a failure of the server answered by the provider.
-func (s *fallbackServer) failure(ctx context.Context, logger logger.ContextLogger, tag string, cause error) {
+// failure counts a failure of the server answered by the provider, for a query sent at
+// startAt. Queries that were on their way when the last failure was counted are part of
+// the same event, such as a closed connection they shared, and are not counted again.
+func (s *fallbackServer) failure(ctx context.Context, logger logger.ContextLogger, tag string, startAt time.Time, cause error) {
 	s.access.Lock()
+	if startAt.Before(s.countedAt) {
+		s.access.Unlock()
+		return
+	}
+	s.countedAt = time.Now()
 	s.failures++
 	if s.down || s.failures < fallbackDownAfter {
 		s.access.Unlock()
