@@ -48,6 +48,9 @@ type pooledConnection interface {
 }
 
 type pool struct {
+	// ctx is the context the transport was created with: once it is done the
+	// pool opens no connections (see Client.Close).
+	ctx           context.Context
 	newConnection func() pooledConnection
 	// watched: the connections notice a server that went silent by themselves
 	// (HTTP/2 pings, the idle timeout and keep-alive of QUIC) and fail the
@@ -62,16 +65,19 @@ type pool struct {
 	clients []*poolClient
 	// retired holds the clients taken out of the pool that sessions still use,
 	// for close to reach them.
-	retired  map[*poolClient]struct{}
-	closed   bool
-	failures int
-	lastFail time.Time
-	retryAt  time.Time
-	lastErr  error
+	retired map[*poolClient]struct{}
+	// generation counts the resets (close). A client of an earlier generation
+	// was closed by one: it belongs to the network as it was before.
+	generation uint64
+	failures   int
+	lastFail   time.Time
+	retryAt    time.Time
+	lastErr    error
 }
 
-func newPool(config xmuxConfig, newConnection func() pooledConnection) *pool {
+func newPool(ctx context.Context, config xmuxConfig, newConnection func() pooledConnection) *pool {
 	return &pool{
+		ctx:           ctx,
 		newConnection: newConnection,
 		config:        config,
 		idleTimeout:   poolIdleTimeout,
@@ -87,6 +93,8 @@ type poolClient struct {
 	pool       *pool
 	connection pooledConnection
 	createdAt  time.Time
+	// generation is that of the pool when the client was made.
+	generation uint64
 	running    atomic.Int32
 	// sessions counts the sessions on the client, what max_concurrency limits
 	// (Xray counts a session once, whatever requests it has in flight).
@@ -96,7 +104,10 @@ type poolClient struct {
 	unreusableAt time.Time
 	broken       atomic.Bool
 	removed      atomic.Bool
-	closeOnce    sync.Once
+	// closed is set once the connection is shut down: a request a session
+	// sends afterwards is refused here, before the HTTP client dials for it.
+	closed    atomic.Bool
+	closeOnce sync.Once
 	// idleGeneration changes whenever the client is taken, so that a check
 	// scheduled when it went idle knows whether it stayed idle.
 	idleGeneration atomic.Uint64
@@ -124,7 +135,7 @@ func (p *pool) get(session bool) (*poolClient, error) {
 func (p *pool) take(session bool) (*poolClient, []*poolClient, error) {
 	p.access.Lock()
 	defer p.access.Unlock()
-	if p.closed {
+	if p.ctx.Err() != nil {
 		return nil, nil, net.ErrClosed
 	}
 	now := time.Now()
@@ -217,6 +228,7 @@ func (p *pool) newClient(now time.Time) *poolClient {
 		pool:       p,
 		connection: p.newConnection(),
 		createdAt:  now,
+		generation: p.generation,
 		leftUsage:  -1,
 	}
 	if usage := p.config.cMaxReuseTimes.rand(); usage > 0 {
@@ -241,6 +253,11 @@ func (c *poolClient) usable() bool {
 }
 
 func (c *poolClient) roundTrip(request *http.Request) (*http.Response, error) {
+	if c.closed.Load() {
+		// The HTTP clients would open a connection for the request, to have
+		// it closed at once: a handshake the server sees, for nothing.
+		return nil, net.ErrClosed
+	}
 	c.leftRequests.Add(-1)
 	response, err := c.connection.roundTrip(request)
 	if err != nil {
@@ -290,6 +307,12 @@ func gracefulGoAway(err error) bool {
 func (p *pool) noteFailure(client *poolClient, err error) {
 	p.access.Lock()
 	defer p.access.Unlock()
+	if client.generation != p.generation {
+		// A connection a reset closed fails every request it had in flight.
+		// That is the doing of the reset, not of the server, and must not
+		// hold back the connections opened since.
+		return
+	}
 	now := time.Now()
 	if now.Sub(client.createdAt) >= youngConnection || now.Sub(p.lastFail) >= failureMemory {
 		p.failures = 0
@@ -309,12 +332,16 @@ func (c *poolClient) release() {
 	if c.running.Add(-1) > 0 {
 		return
 	}
+	generation := c.idleGeneration.Load()
+	c.timerAccess.Lock()
+	// Looked at under the lock of the timer: whoever takes the client out of
+	// the pool marks it first and stops the timer after, so that no timer is
+	// started behind its back.
 	if c.removed.Load() {
+		c.timerAccess.Unlock()
 		c.closeIfIdle()
 		return
 	}
-	generation := c.idleGeneration.Load()
-	c.timerAccess.Lock()
 	if c.idleTimer != nil {
 		c.idleTimer.Stop()
 	}
@@ -335,7 +362,8 @@ func (p *pool) retire(client *poolClient) {
 			break
 		}
 	}
-	if !p.closed {
+	// a client a reset closed meanwhile is not listed again
+	if client.generation == p.generation {
 		p.retireLocked(client)
 	}
 	p.access.Unlock()
@@ -359,11 +387,14 @@ func (c *poolClient) shutdown() {
 		c.idleTimer = nil
 	}
 	c.timerAccess.Unlock()
+	c.closed.Store(true)
 	c.closeOnce.Do(c.connection.close)
 }
 
 // close closes every client, those in the pool and those retired from it that
-// sessions still hold.
+// sessions still hold, and forgets what it held against the server: the pool
+// starts anew, with the next get opening a connection. The sessions on the
+// closed clients fail through them and let go of them as they end.
 func (p *pool) close() {
 	p.access.Lock()
 	clients := p.clients
@@ -372,7 +403,11 @@ func (p *pool) close() {
 	}
 	p.clients = nil
 	p.retired = nil
-	p.closed = true
+	p.generation++
+	p.failures = 0
+	p.lastFail = time.Time{}
+	p.retryAt = time.Time{}
+	p.lastErr = nil
 	p.access.Unlock()
 	for _, client := range clients {
 		client.removed.Store(true)

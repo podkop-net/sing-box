@@ -99,7 +99,7 @@ func NewClient(ctx context.Context, outboundDialer N.Dialer, serverAddr M.Socksa
 			}
 		}
 	}
-	client.upScheme, client.upPool, err = newLeg(outboundDialer, serverAddr, up, tlsConfig)
+	client.upScheme, client.upPool, err = newLeg(ctx, outboundDialer, serverAddr, up, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +133,7 @@ func NewClient(ctx context.Context, outboundDialer N.Dialer, serverAddr M.Socksa
 			return nil, E.Cause(err, "download")
 		}
 	}
-	client.downScheme, client.downPool, err = newLeg(downDialer, download.ServerOptions.Build(), client.down, downTLS)
+	client.downScheme, client.downPool, err = newLeg(ctx, downDialer, download.ServerOptions.Build(), client.down, downTLS)
 	if err != nil {
 		return nil, E.Cause(err, "download")
 	}
@@ -165,8 +165,8 @@ func decideHTTPVersion(tlsConfig tls.Config, reality bool) string {
 }
 
 // newLeg sets up the requests of one leg: the scheme, the Host it addresses
-// and the pool of connections to its server.
-func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, tlsConfig tls.Config) (string, *pool, error) {
+// and the pool of connections to its server. ctx is that of the transport.
+func newLeg(ctx context.Context, legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, tlsConfig tls.Config) (string, *pool, error) {
 	if !serverAddr.IsValid() {
 		return "", nil, E.New("invalid server address: ", serverAddr)
 	}
@@ -193,7 +193,7 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 		if err != nil {
 			return "", nil, err
 		}
-		pool := newPool(config.xmux, newConnection)
+		pool := newPool(ctx, config.xmux, newConnection)
 		pool.watched = true
 		return "https", pool, nil
 	case "1.1":
@@ -206,7 +206,7 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 		newConnection = func() pooledConnection {
 			return newHTTP1Connection(legDialer, tlsDialer, serverAddr)
 		}
-		return scheme, newPool(config.xmux, newConnection), nil
+		return scheme, newPool(ctx, config.xmux, newConnection), nil
 	default:
 		tlsConfig = tlsConfig.Clone()
 		// Xray's TLS goes through a Chrome fingerprint by default, whose
@@ -225,7 +225,7 @@ func newLeg(legDialer N.Dialer, serverAddr M.Socksaddr, config *requestConfig, t
 		newConnection = func() pooledConnection {
 			return newHTTP2Connection(tlsDialer, serverAddr, keepAlivePeriod)
 		}
-		pool := newPool(config.xmux, newConnection)
+		pool := newPool(ctx, config.xmux, newConnection)
 		pool.watched = keepAlivePeriod > 0
 		return "https", pool, nil
 	}
@@ -321,6 +321,19 @@ func (c *Client) sessionClients(s *session) (*poolClient, *poolClient, error) {
 	return downClient, upClient, nil
 }
 
+// Close is a reset, as with the other V2Ray transports: the outbounds call it
+// whenever the network changed (InterfaceUpdated) and go on dialing through
+// the same client. It closes every pooled connection, and with them the
+// sessions open on them, and forgets the failures of the server so far; the
+// next dial opens a new connection. A dial under way during a reset fails with
+// the connection it was given, which the reset closed.
+//
+// The outbound calls the same Close when it shuts down. What ends the client
+// for good is the context it was created with: once that is done no connection
+// is opened, so a Close after it leaves nothing behind, whatever dials race
+// with it. (sing-box cancels the context before it closes the outbounds.)
+// Closed while the context lives, the client holds nothing but the idle
+// timers of the connections dialed afterwards.
 func (c *Client) Close() error {
 	c.upPool.close()
 	if c.downPool != c.upPool {
