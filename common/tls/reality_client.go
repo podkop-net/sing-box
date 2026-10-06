@@ -48,11 +48,47 @@ type RealityClientConfig struct {
 	uClient   *UTLSClientConfig
 	publicKey []byte
 	shortID   [8]byte
+	// the name of a uTLS fingerprint without an X25519MLKEM768 key share, otherwise empty
+	classicFingerprint string
+}
+
+// REALITY servers since Xray-core v26.9.8 (XTLS/REALITY@8cdf7bf) take a Client Hello
+// without an X25519MLKEM768 key share for a stranger and pass it on to the target, whose
+// certificate then fails the verification. Older servers accept such a Client Hello, so
+// the fingerprints that carry only X25519 are not refused, but the cause is named.
+const realityHybridKeyShareNote = "REALITY servers since Xray-core v26.9.8 reject a Client Hello without an X25519MLKEM768 key share, use chrome, firefox, safari, random or randomized"
+
+// checkRealityFingerprint refuses the uTLS fingerprints REALITY cannot work with and
+// reports whether the named one lacks the X25519MLKEM768 key share.
+func checkRealityFingerprint(name string) (classic bool, err error) {
+	switch name {
+	case "android", "360":
+		// Client Hellos of TLS 1.2: no key share to derive the authentication key from
+		return false, E.New("uTLS fingerprint ", name, " is unsupported in reality: a TLS 1.2 Client Hello without a key share, use chrome, firefox, safari, random or randomized")
+	case "edge", "ios", "qq":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// verificationFailed is the text of a failed verification; it names the fingerprint that
+// may be the cause.
+func (e *RealityClientConfig) verificationFailed() string {
+	if e.classicFingerprint == "" {
+		return "reality verification failed"
+	}
+	return "reality verification failed, possibly because of the uTLS fingerprint " + e.classicFingerprint + ": " + realityHybridKeyShareNote
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
 	if options.UTLS == nil || !options.UTLS.Enabled {
 		return nil, E.New("uTLS is required by reality client")
+	}
+
+	classicFingerprint, err := checkRealityFingerprint(options.UTLS.Fingerprint)
+	if err != nil {
+		return nil, err
 	}
 
 	uClient, err := NewUTLSClient(ctx, logger, serverAddress, options)
@@ -76,7 +112,14 @@ func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("invalid short_id")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
+	realityConfig := &RealityClientConfig{ctx: ctx, uClient: uClient.(*UTLSClientConfig), publicKey: publicKey, shortID: shortID}
+	if classicFingerprint {
+		realityConfig.classicFingerprint = options.UTLS.Fingerprint
+		if logger != nil {
+			logger.Warn("uTLS fingerprint ", options.UTLS.Fingerprint, " carries no X25519MLKEM768 key share: ", realityHybridKeyShareNote)
+		}
+	}
+	var config Config = realityConfig
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -207,6 +250,11 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 
 	err = uConn.HandshakeContext(ctx)
 	if err != nil {
+		if verifier.rejected && e.classicFingerprint != "" {
+			// the server passed the connection on to its target, and the certificate of
+			// the target is not valid here: the cause is the same as below
+			return nil, E.Cause(err, e.verificationFailed())
+		}
 		return nil, err
 	}
 
@@ -216,7 +264,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 
 	if !verifier.verified {
 		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
-		return nil, E.New("reality verification failed")
+		return nil, E.New(e.verificationFailed())
 	}
 
 	releaseHandshakeState(uConn)
@@ -253,6 +301,7 @@ func (e *RealityClientConfig) Clone() Config {
 		e.uClient.Clone().(*UTLSClientConfig),
 		e.publicKey,
 		e.shortID,
+		e.classicFingerprint,
 	}
 }
 
@@ -261,6 +310,8 @@ type realityVerifier struct {
 	serverName string
 	authKey    []byte
 	verified   bool
+	// the certificate is not the server's and did not pass the system verification
+	rejected bool
 }
 
 func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -282,6 +333,7 @@ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChain
 		opts.Intermediates.AddCert(cert)
 	}
 	if _, err := certs[0].Verify(opts); err != nil {
+		c.rejected = true
 		return err
 	}
 	return nil
