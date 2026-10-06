@@ -2,11 +2,14 @@ package group
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -338,6 +341,94 @@ func TestURLTestDownloadURLOption(t *testing.T) {
 			urlTest := created.(*URLTest)
 			require.NoError(t, urlTest.Start())
 			require.Equal(t, testCase.link, urlTest.group.downloadLink)
+		})
+	}
+}
+
+type warnLog struct {
+	access sync.Mutex
+	lines  []string
+}
+
+func (l *warnLog) WriteMessage(level log.Level, message string) {
+	if level != log.LevelWarn {
+		return
+	}
+	l.access.Lock()
+	defer l.access.Unlock()
+	l.lines = append(l.lines, message)
+}
+
+func (l *warnLog) take() []string {
+	l.access.Lock()
+	defer l.access.Unlock()
+	lines := l.lines
+	l.lines = nil
+	return lines
+}
+
+// A download test URL from the environment that the test could not use does not stop the
+// start, as a download_url does: the group warns once, when it is created, and works
+// without the download test.
+func TestURLTestDownloadURLEnvironmentUnusable(t *testing.T) {
+	environment := downloadTestLink
+	t.Cleanup(func() { downloadTestLink = environment })
+	for _, testCase := range []struct {
+		name string
+		link string
+		warn bool
+	}{
+		{"usable", "/full", false}, // on the test server
+		{"unset", "", false},
+		{"no scheme", "environment.test/64k", true},
+		{"not http", "ftp://environment.test/64k", true},
+		{"no host", "https:///64k", true},
+		{"unparsable", "://environment.test", true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			writer := &warnLog{}
+			factory := log.NewDefaultFactory(context.Background(), log.Formatter{BaseTime: time.Now()}, io.Discard, "", writer, false)
+			factory.SetLevel(log.LevelDebug)
+			require.NoError(t, factory.Start())
+			defer factory.Close()
+
+			working := newDownloadServer(t, "full")
+			link := testCase.link
+			if strings.HasPrefix(link, "/") {
+				link = working.URL + link
+			}
+			downloadTestLink = link
+			a := newTestMember(C.TypeVLESS, "a", dialTo(working))
+			b := newTestMember(C.TypeVLESS, "b", dialTo(working))
+			history := urltest.NewHistoryStorage()
+			history.StoreURLTestHistory("a", &adapter.URLTestHistory{Time: time.Now(), Delay: 10})
+			history.StoreURLTestHistory("b", &adapter.URLTestHistory{Time: time.Now(), Delay: 110})
+			ctx := service.ContextWithPtr(context.Background(), history)
+			manager := &testOutboundManager{members: map[string]adapter.Outbound{"a": a, "b": b}}
+			ctx = service.ContextWith[adapter.OutboundManager](ctx, manager)
+			created, err := NewURLTest(ctx, nil, factory.NewLogger("urltest"), "auto", option.URLTestOutboundOptions{
+				Outbounds: []string{"a", "b"},
+				URL:       working.URL,
+			})
+			require.NoError(t, err)
+			urlTest := created.(*URLTest)
+			require.NoError(t, urlTest.Start())
+			lines := writer.take()
+			if !testCase.warn {
+				require.Empty(t, lines)
+				require.Equal(t, link, urlTest.group.downloadLink)
+				return
+			}
+			require.Len(t, lines, 1)
+			require.Contains(t, lines[0], "SING_BOX_URLTEST_DOWNLOAD_URL")
+			require.Contains(t, lines[0], "download test is off")
+			require.Empty(t, urlTest.group.downloadLink)
+
+			// the group selects a member without a download and says nothing more of the URL
+			urlTest.group.performUpdateCheck()
+			require.Equal(t, "a", urlTest.group.selectedOutboundTCP.Load().Tag())
+			require.Empty(t, writer.take())
+			require.Equal(t, int32(0), working.gets.Load())
 		})
 	}
 }

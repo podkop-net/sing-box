@@ -88,6 +88,13 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
+	if options.DownloadURL == nil && outbound.downloadLink != "" {
+		err = checkDownloadLink("SING_BOX_URLTEST_DOWNLOAD_URL", outbound.downloadLink)
+		if err != nil {
+			logger.Warn("download test is off: ", err)
+			outbound.downloadLink = ""
+		}
+	}
 	return outbound, nil
 }
 

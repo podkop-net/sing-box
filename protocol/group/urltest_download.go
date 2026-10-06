@@ -31,6 +31,8 @@ import (
 // The test URL is the group's download_url; a group without the option takes
 // SING_BOX_URLTEST_DOWNLOAD_URL (the init script sets it from /etc/config/sing-box), and an
 // empty download_url turns the test off for the group. Without either nothing changes.
+// An environment value the test could not use is no reason to refuse the start: the
+// group warns once and goes without the test.
 
 var (
 	downloadTestLink    = os.Getenv("SING_BOX_URLTEST_DOWNLOAD_URL")
@@ -48,14 +50,24 @@ func groupDownloadLink(downloadURL *string) (string, error) {
 	if link == "" {
 		return "", nil
 	}
-	linkURL, err := url.Parse(link)
+	err := checkDownloadLink("download_url", link)
 	if err != nil {
-		return "", E.Cause(err, "parse download_url")
-	}
-	if (linkURL.Scheme != "http" && linkURL.Scheme != "https") || linkURL.Hostname() == "" {
-		return "", E.New("download_url: an http or https URL with a host expected: ", link)
+		return "", err
 	}
 	return link, nil
+}
+
+// checkDownloadLink tells whether the download test can use link, the value of the
+// setting name.
+func checkDownloadLink(name string, link string) error {
+	linkURL, err := url.Parse(link)
+	if err != nil {
+		return E.Cause(err, "parse ", name)
+	}
+	if (linkURL.Scheme != "http" && linkURL.Scheme != "https") || linkURL.Hostname() == "" {
+		return E.New(name, ": an http or https URL with a host expected: ", link)
+	}
+	return nil
 }
 
 // selectTested chooses the TCP member as Select does, except that a member the group would
