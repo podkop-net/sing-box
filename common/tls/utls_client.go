@@ -127,6 +127,11 @@ type utlsALPNWrapper struct {
 }
 
 func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
+	if c.UConn.HandshakeState.Hello == nil {
+		// the handshake is done and its state released (releaseHandshakeState): there is
+		// no Client Hello to rebuild, the connection only reports that it is complete
+		return c.UConn.HandshakeContext(ctx)
+	}
 	if len(c.nextProtocols) > 0 {
 		err := c.BuildHandshakeState()
 		if err != nil {

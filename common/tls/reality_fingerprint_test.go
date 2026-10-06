@@ -345,3 +345,41 @@ func TestRealityRejectedCertificateNamesFingerprint(t *testing.T) {
 		})
 	}
 }
+
+// The handshake state is released once the handshake is done. A second HandshakeContext
+// on a connection with ALPN has no Client Hello to rebuild and reports the finished
+// handshake instead.
+func TestUTLSALPNHandshakeAgainAfterRelease(t *testing.T) {
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "example.org"},
+		DNSNames:     []string{"example.org"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &rootKey.PublicKey, rootKey)
+	require.NoError(t, err)
+
+	options := realityOptionsForTest("chrome", false)
+	options.Insecure = true
+	options.ALPN = []string{"h2", "http/1.1"}
+	config, err := NewClient(context.Background(), nil, "example.org", options)
+	require.NoError(t, err)
+	client, server := net.Pipe()
+	defer client.Close()
+	plainTLSServer(t, server, tls.Certificate{Certificate: [][]byte{der}, PrivateKey: rootKey})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := config.Client(client)
+	require.NoError(t, err)
+	require.IsType(t, &utlsALPNWrapper{}, conn)
+	require.NoError(t, conn.HandshakeContext(ctx))
+	require.Nil(t, conn.(*utlsALPNWrapper).HandshakeState.Hello)
+	require.NotPanics(t, func() {
+		require.NoError(t, conn.HandshakeContext(ctx))
+	})
+	require.True(t, conn.ConnectionState().HandshakeComplete)
+}
