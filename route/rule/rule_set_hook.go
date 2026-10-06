@@ -17,7 +17,7 @@ import (
 const RuleSetRecoveredHookEnv = "SING_BOX_RULESET_RECOVERED_HOOK"
 
 // Rule-sets recovering close together are reported by a single run.
-const ruleSetRecoveredHookDelay = 5 * time.Second
+var ruleSetRecoveredHookDelay = 5 * time.Second
 
 var ruleSetRecovered struct {
 	access sync.Mutex
@@ -44,12 +44,22 @@ func notifyRuleSetRecovered(logger logger.ContextLogger, tag string) {
 		ruleSetRecovered.access.Unlock()
 		cmd := exec.Command("/bin/sh", "-c", command)
 		cmd.Env = append(os.Environ(), "SING_BOX_RULESET_TAGS="+tags)
+		// The output of the command is not taken: the command may outlive this process
+		// (a list update that restarts the service), and a pipe whose reader is gone
+		// would end it at its next write. How it ended is in its exit status.
 		err := cmd.Start()
 		if err != nil {
 			logger.Error("run rule-set recovered hook: ", err)
 			return
 		}
 		logger.Info("rule-set recovered hook started for ", tags)
-		go cmd.Wait()
+		go func() {
+			err := cmd.Wait()
+			if err != nil {
+				logger.Error("rule-set recovered hook for ", tags, ": ", err)
+			} else {
+				logger.Debug("rule-set recovered hook for ", tags, " finished")
+			}
+		}()
 	})
 }
