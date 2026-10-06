@@ -46,46 +46,49 @@ type Client struct {
 // with nothing dialed: for tools that build the options, such as the decoder
 // of share links.
 func CheckOptions(options option.V2RayXHTTPOptions) error {
-	mode := options.Mode
+	_, _, _, err := checkOptions(options)
+	return err
+}
+
+// checkOptions is the one check of the options, for CheckOptions and
+// NewClient: the configured mode ("auto" for none) and the request shape of
+// the upload leg and, when download is set, of the download leg.
+func checkOptions(options option.V2RayXHTTPOptions) (mode string, up *requestConfig, down *requestConfig, err error) {
+	mode = options.Mode
 	switch mode {
 	case "":
 		mode = modeAuto
 	case modeAuto, modePacketUp, modeStreamUp, modeStreamOne:
 	default:
-		return E.New("unsupported mode: ", mode)
+		return "", nil, nil, E.New("unsupported mode: ", mode)
 	}
 	if options.Download != nil && mode == modeStreamOne {
-		return E.New("download can't be used in stream-one mode")
+		return "", nil, nil, E.New("download can't be used in stream-one mode")
 	}
-	_, err := newRequestConfig(options.V2RayXHTTPBaseOptions, mode)
+	up, err = newRequestConfig(options.V2RayXHTTPBaseOptions, mode)
 	if err != nil {
-		return err
+		return "", nil, nil, err
 	}
-	if options.Download != nil {
-		if options.Download.Server == "" {
-			return E.New("download: missing server")
-		}
-		_, err = newRequestConfig(options.Download.V2RayXHTTPBaseOptions, mode)
-		if err != nil {
-			return E.Cause(err, "download")
-		}
+	if options.Download == nil {
+		return mode, up, nil, nil
 	}
-	return nil
+	if options.Download.Server == "" {
+		return "", nil, nil, E.New("download: missing server")
+	}
+	// Without a port the address still counts as valid, and every dial of the
+	// download would fail instead.
+	if options.Download.ServerPort == 0 {
+		return "", nil, nil, E.New("download: missing server_port")
+	}
+	down, err = newRequestConfig(options.Download.V2RayXHTTPBaseOptions, mode)
+	if err != nil {
+		return "", nil, nil, E.Cause(err, "download")
+	}
+	return mode, up, down, nil
 }
 
 func NewClient(ctx context.Context, outboundDialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
-	mode := options.Mode
-	switch mode {
-	case "":
-		mode = modeAuto
-	case modeAuto, modePacketUp, modeStreamUp, modeStreamOne:
-	default:
-		return nil, E.New("unsupported mode: ", mode)
-	}
-	if options.Download != nil && mode == modeStreamOne {
-		return nil, E.New("download can't be used in stream-one mode")
-	}
-	up, err := newRequestConfig(options.V2RayXHTTPBaseOptions, mode)
+	mode, up, down, err := checkOptions(options)
 	if err != nil {
 		return nil, err
 	}
@@ -108,13 +111,7 @@ func NewClient(ctx context.Context, outboundDialer N.Dialer, serverAddr M.Socksa
 		return client, nil
 	}
 	download := options.Download
-	if download.Server == "" {
-		return nil, E.New("download: missing server")
-	}
-	client.down, err = newRequestConfig(download.V2RayXHTTPBaseOptions, mode)
-	if err != nil {
-		return nil, E.Cause(err, "download")
-	}
+	client.down = down
 	downDialer := outboundDialer
 	if download.Detour != "" {
 		downDialer, err = dialer.New(ctx, option.DialerOptions{Detour: download.Detour}, M.IsDomainName(download.Server))

@@ -61,6 +61,9 @@ func TestXHTTPConfigErrors(t *testing.T) {
 			o.Download = &option.V2RayXHTTPDownloadOptions{ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}
 			o.Download.XPaddingBytes = xrange(0, 10)
 		},
+		"download without port": func(o *option.V2RayXHTTPOptions) {
+			o.Download = &option.V2RayXHTTPDownloadOptions{ServerOptions: option.ServerOptions{Server: "127.0.0.1"}}
+		},
 		"method with a space":   func(o *option.V2RayXHTTPOptions) { o.Mode, o.UplinkHTTPMethod = modePacketUp, "P OST" },
 		"method with a newline": func(o *option.V2RayXHTTPOptions) { o.UplinkHTTPMethod = "POST\r\nX: y" },
 		"method not ASCII":      func(o *option.V2RayXHTTPOptions) { o.UplinkHTTPMethod = "ПОСТ" },
@@ -74,6 +77,8 @@ func TestXHTTPConfigErrors(t *testing.T) {
 		configure(&options)
 		_, err := NewClient(context.Background(), N.SystemDialer, M.ParseSocksaddr("127.0.0.1:443"), options, nil)
 		require.Error(t, err, name)
+		// the check without a client refuses the same options, in the same words
+		require.EqualError(t, CheckOptions(options), err.Error(), name)
 	}
 }
 
@@ -84,6 +89,9 @@ func TestXHTTPConfigDefaults(t *testing.T) {
 		"negative interval":         func(o *option.V2RayXHTTPOptions) { o.ScMinPostsIntervalMs = xrange(-1, -1) },
 		"GET upload in packet-up":   func(o *option.V2RayXHTTPOptions) { o.Mode, o.UplinkHTTPMethod = modePacketUp, "GET" },
 		"method in lower case":      func(o *option.V2RayXHTTPOptions) { o.UplinkHTTPMethod = "put" },
+		"download": func(o *option.V2RayXHTTPOptions) {
+			o.Download = &option.V2RayXHTTPDownloadOptions{ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 8443}}
+		},
 		"server-side settings": func(o *option.V2RayXHTTPOptions) {
 			o.NoSSEHeader, o.ScMaxBufferedPosts, o.ScStreamUpServerSecs, o.ServerMaxHeaderBytes = true, 30, xrange(20, 80), 8192
 		},
@@ -94,6 +102,7 @@ func TestXHTTPConfigDefaults(t *testing.T) {
 		transport, err := NewClient(context.Background(), N.SystemDialer, M.ParseSocksaddr("127.0.0.1:443"), options, nil)
 		require.NoError(t, err, name)
 		transport.Close()
+		require.NoError(t, CheckOptions(options), name)
 	}
 	config, err := newRequestConfig(option.V2RayXHTTPBaseOptions{}, modeAuto)
 	require.NoError(t, err)
