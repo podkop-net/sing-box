@@ -28,15 +28,16 @@ import (
 // with DNS set by hand and a backup modem are other devices and are left out. The list is
 // read at the first fallback, and again when sing-box resets the network after its
 // default interface changed (the DNS router calls ResetFallbackProviders): another uplink,
-// the WAN down and up, a new PPPoE session. It is also read again after all its servers
-// missed an answer, and 30 s after ubus could not be asked.
+// the WAN down and up, a new PPPoE session. It is also read again after none of its
+// servers answered and 30 s after ubus could not be asked, in both cases not sooner than
+// 30 s after the last read: each read runs ubus.
 //
 // The servers are chosen by their answers, as dnsmasq does: the first fallback query goes
 // to all of them at once, the first to answer gets the next queries alone, and all of them
 // are asked again every 20 s or 50 queries, and as soon as it misses one.
 
 const (
-	providerRetryAfter  = 30 * time.Second // after ubus could not be asked
+	providerRetryAfter  = 30 * time.Second // between reads after ubus could not be asked or no server answered
 	providerMax         = 4                // servers asked at once
 	providerRoundEvery  = 20 * time.Second
 	providerRoundAfter  = 50 // queries
@@ -63,6 +64,7 @@ type providerSet struct {
 	device  string // the output device the list is for
 	readAt  time.Time
 	readErr bool        // ubus could not be asked
+	stale   bool        // no server answered: the list may have changed
 	best    M.Socksaddr // the server that answered last, invalid when none
 	uses    int         // queries sent to best alone since all were asked
 	roundAt time.Time   // when all were asked
@@ -115,7 +117,7 @@ func (p *providerSet) known(ctx context.Context, logger logger.ContextLogger) bo
 }
 
 func (p *providerSet) rereadDue() bool {
-	return p.readAt.IsZero() || (p.readErr && time.Since(p.readAt) >= providerRetryAfter)
+	return p.readAt.IsZero() || ((p.readErr || p.stale) && time.Since(p.readAt) >= providerRetryAfter)
 }
 
 // list returns the provider's servers, reading them again when it is due. While another
@@ -147,7 +149,7 @@ func (p *providerSet) refresh(logger logger.ContextLogger, device string) []M.So
 	defer p.access.Unlock()
 	p.reading = false
 	changed := p.readAt.IsZero() || device != p.device || !sameServers(servers, p.servers)
-	p.servers, p.device, p.readAt, p.readErr = servers, device, time.Now(), err != nil
+	p.servers, p.device, p.readAt, p.readErr, p.stale = servers, device, time.Now(), err != nil, false
 	if changed {
 		p.best = M.Socksaddr{}
 		if logger != nil {
@@ -174,6 +176,16 @@ func ResetFallbackProviders() {
 func (p *providerSet) forget() {
 	p.access.Lock()
 	p.readAt = time.Time{}
+	p.best = M.Socksaddr{}
+	p.access.Unlock()
+}
+
+// noneAnswered makes a later use read the servers again: they may have changed without a
+// network reset, as when DHCP hands out other ones. Unlike forget it keeps the time of
+// the last read, so that servers that keep refusing do not run ubus at every query.
+func (p *providerSet) noneAnswered() {
+	p.access.Lock()
+	p.stale = true
 	p.best = M.Socksaddr{}
 	p.access.Unlock()
 }
@@ -329,7 +341,7 @@ func (s *fallbackServer) exchangeProvider(ctx context.Context, baseCtx context.C
 	}
 	response, err := s.exchangeAll(ctx, servers, message)
 	if err != nil && ctx.Err() == nil {
-		s.providers.forget() // none answered: the servers may have changed
+		s.providers.noneAnswered()
 	}
 	return response, err
 }

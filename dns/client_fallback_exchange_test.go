@@ -96,15 +96,6 @@ func newFallbackTest(providers ...M.Socksaddr) (*fallbackTestTransport, *fallbac
 	return transport, state, reads
 }
 
-// keepProviders keeps the list as it is: an answer of none of the provider's servers
-// makes the fallback read it again, and a read cannot return the resolvers of a test
-// (loopback addresses are left out). A read that never ends stops the others.
-func keepProviders(state *fallbackServer) {
-	state.providers.access.Lock()
-	state.providers.reading = true
-	state.providers.access.Unlock()
-}
-
 func fallbackTestExchange(transport *fallbackTestTransport, state *fallbackServer) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -290,7 +281,6 @@ func TestExchangeWithFallback(t *testing.T) {
 		{"a SERVFAIL of the server stays when the provider has no better answer", func(t *testing.T) {
 			for _, provider := range []int{mDNS.RcodeServerFailure, mDNS.RcodeRefused} {
 				transport, state, _ := newFallbackTest(testResolver(t, provider))
-				keepProviders(state)
 				transport.serve(fallbackTestServfail)
 				expect(t, transport, state, "SERVFAIL", nil)
 				transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
@@ -304,7 +294,6 @@ func TestExchangeWithFallback(t *testing.T) {
 		}},
 		{"the provider failing twice in a row switches the fallback off", func(t *testing.T) {
 			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeRefused))
-			keepProviders(state)
 			transport.serve(fallbackTestFails)
 			expect(t, transport, state, "", errFallbackTestServer)
 			if got := state.testState(); got.providerFails != 1 || got.unusable {
@@ -325,7 +314,6 @@ func TestExchangeWithFallback(t *testing.T) {
 		{"an answer of the provider clears its failure count", func(t *testing.T) {
 			refused, good := testResolver(t, mDNS.RcodeRefused), testResolver(t, mDNS.RcodeSuccess)
 			transport, state, _ := newFallbackTest(refused)
-			keepProviders(state)
 			transport.serve(fallbackTestFails)
 			setProviders := func(server M.Socksaddr) {
 				state.providers.access.Lock()
@@ -345,7 +333,6 @@ func TestExchangeWithFallback(t *testing.T) {
 		}},
 		{"a server set aside is asked when the provider fails too", func(t *testing.T) {
 			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeRefused))
-			keepProviders(state)
 			state.access.Lock()
 			state.down, state.probeEvery, state.probeAt = true, fallbackProbeFirst, time.Now().Add(fallbackProbeFirst)
 			state.access.Unlock()
@@ -583,4 +570,36 @@ func TestFallbackNetworkReset(t *testing.T) {
 			t.Errorf("state %+v, want no failure counted on the new network yet", got)
 		}
 	})
+}
+
+// When none of the provider's servers answers, the list is read again, since it may have
+// changed without a network reset, but not at every such query: not sooner than
+// providerRetryAfter after the last read. A network reset reads it at the next use.
+func TestProviderListRereadAfterMiss(t *testing.T) {
+	t.Parallel()
+	_, state, reads := newFallbackTest(testResolver(t, mDNS.RcodeRefused))
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := state.exchangeProvider(ctx, context.Background(), nil, freshTestQuery())
+		cancel()
+		if err == nil || err == errNoProviders {
+			t.Fatalf("query %d: got %v, want the refusal of the provider", i, err)
+		}
+	}
+	if reads.Load() != 0 {
+		t.Fatalf("the list was read %d times right after it was read", reads.Load())
+	}
+	state.providers.access.Lock()
+	state.providers.readAt = time.Now().Add(-providerRetryAfter - time.Second)
+	state.providers.access.Unlock()
+	state.providers.list(context.Background(), nil)
+	state.providers.list(context.Background(), nil)
+	if reads.Load() != 1 {
+		t.Fatalf("the list was read %d times %v after the last read, want 1", reads.Load(), providerRetryAfter)
+	}
+	state.providers.forget()
+	state.providers.list(context.Background(), nil)
+	if reads.Load() != 2 {
+		t.Errorf("the list was read %d times, want 2: a reset reads it at the next use", reads.Load())
+	}
 }
