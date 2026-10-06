@@ -522,3 +522,65 @@ func TestFallbackCountsResolvedOnly(t *testing.T) {
 		}
 	}
 }
+
+// A network reset forgives what the fallback learned on the old network.
+func TestFallbackNetworkReset(t *testing.T) {
+	t.Parallel()
+	newRouter := func(transport adapter.DNSTransport) *Router {
+		// the reset clears the cache of the client as well
+		return &Router{client: &Client{}, transport: &TransportManager{transports: []adapter.DNSTransport{transport}}}
+	}
+	t.Run("the provider is usable again", func(t *testing.T) {
+		t.Parallel()
+		transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+		for i := 0; i < fallbackProviderAfter+1; i++ {
+			state.providerFailed(context.Background(), nil, "dns-server", E.New("timeout"))
+		}
+		if got := state.testState(); !got.unusable || got.providerFails != 1 {
+			t.Fatalf("state %+v before the reset", got)
+		}
+		newRouter(transport).ResetNetwork()
+		if got := state.testState(); got.unusable || got.providerFails != 0 {
+			t.Errorf("state %+v after the reset, want the provider usable", got)
+		}
+		transport.serve(fallbackTestFails)
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Errorf("answered by %q (%v), want the provider", got, err)
+		}
+	})
+	t.Run("a server set aside is probed at once", func(t *testing.T) {
+		t.Parallel()
+		transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+		state.access.Lock()
+		state.down, state.probeEvery, state.probeAt = true, fallbackProbeMax, time.Now().Add(fallbackProbeMax)
+		state.access.Unlock()
+		newRouter(transport).ResetNetwork()
+		if got := state.testState(); !got.down || got.probeIn > 0 || got.probeEvery != fallbackProbeFirst {
+			t.Fatalf("state %+v after the reset, want down and a probe due, the next in %v", got, fallbackProbeFirst)
+		}
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Errorf("answered by %q (%v), want the provider", got, err)
+		}
+		waitFallbackTest(t, "the server is back", func() bool { return !state.isDown() })
+	})
+	t.Run("failures around the reset do not add up", func(t *testing.T) {
+		t.Parallel()
+		transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+		router := newRouter(transport)
+		transport.serve(fallbackTestFails)
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Fatalf("answered by %q (%v), want the provider", got, err)
+		}
+		// a query on its way when the network is reset fails with the connections
+		transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+			router.ResetNetwork()
+			return nil, errFallbackTestServer
+		})
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Fatalf("answered by %q (%v), want the provider", got, err)
+		}
+		if got := state.testState(); got.failures != 0 || got.down {
+			t.Errorf("state %+v, want no failure counted on the new network yet", got)
+		}
+	})
+}

@@ -459,6 +459,9 @@ func (r *Router) ResetNetwork() {
 	r.ClearCache()
 	for _, transport := range r.transport.Transports() {
 		transport.Reset()
+		if state := fallbackFor(transport); state != nil {
+			state.reset()
+		}
 	}
 	ResetFallbackProviders() // the output device may have changed
 }

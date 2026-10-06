@@ -45,7 +45,9 @@ import (
 // fail together are one failure: the second is a query that started after the first was
 // counted. A SERVFAIL is retried through the provider as well but does not count
 // against the server: it is usually about one domain. When the provider fails to answer
-// twice in a row, the fallback is off for that server for a minute.
+// twice in a row, the fallback is off for that server for a minute. A network reset
+// starts the counts over and makes the provider usable again; a server that is set aside
+// stays so but is probed with the next query, see reset.
 var fallbackEnabled = os.Getenv("SING_BOX_DNS_FALLBACK") != ""
 
 const (
@@ -74,7 +76,7 @@ type fallbackServer struct {
 
 	access        sync.Mutex
 	failures      int
-	countedAt     time.Time // the last failure counted
+	countedAt     time.Time // the last failure counted or the last network reset
 	providerFails int
 	down          bool
 	probeAt       time.Time
@@ -359,6 +361,25 @@ func (s *fallbackServer) failure(ctx context.Context, logger logger.ContextLogge
 		// the logger formats only strings, numbers, errors and Stringers
 		logger.WarnContext(ctx, "server ", tag, " failed ", fallbackDownAfter, " times in a row (", cause, "), answering from provider DNS ", s.providers.names(), " until it is back")
 	}
+}
+
+// reset forgets what was learned on the network that sing-box has just left: the DNS
+// router calls it when sing-box resets the network. The provider is usable again and the
+// failure counts start over; queries on their way fail with the connections that the
+// reset closes and count nothing. A server that is set aside stays so, since asking a
+// dead server first would cost the next queries its timeout, but it is probed with the
+// next query.
+func (s *fallbackServer) reset() {
+	s.access.Lock()
+	s.failures = 0
+	s.countedAt = time.Now()
+	s.providerFails = 0
+	s.unusableUntil = time.Time{}
+	if s.down {
+		s.probeAt = s.countedAt
+		s.probeEvery = fallbackProbeFirst
+	}
+	s.access.Unlock()
 }
 
 // providerFailed stops using the provider: for a while when it fails to answer twice in a
