@@ -42,6 +42,37 @@ type Client struct {
 	downPool   *pool
 }
 
+// CheckOptions reports what NewClient would refuse in the options themselves,
+// with nothing dialed: for tools that build the options, such as the decoder
+// of share links.
+func CheckOptions(options option.V2RayXHTTPOptions) error {
+	mode := options.Mode
+	switch mode {
+	case "":
+		mode = modeAuto
+	case modeAuto, modePacketUp, modeStreamUp, modeStreamOne:
+	default:
+		return E.New("unsupported mode: ", mode)
+	}
+	if options.Download != nil && mode == modeStreamOne {
+		return E.New("download can't be used in stream-one mode")
+	}
+	_, err := newRequestConfig(options.V2RayXHTTPBaseOptions, mode)
+	if err != nil {
+		return err
+	}
+	if options.Download != nil {
+		if options.Download.Server == "" {
+			return E.New("download: missing server")
+		}
+		_, err = newRequestConfig(options.Download.V2RayXHTTPBaseOptions, mode)
+		if err != nil {
+			return E.Cause(err, "download")
+		}
+	}
+	return nil
+}
+
 func NewClient(ctx context.Context, outboundDialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
 	mode := options.Mode
 	switch mode {
@@ -219,7 +250,8 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		err = s.waitConnected(ctx)
 	}
 	if err != nil {
-		s.Close()
+		// not Close: there is nothing written to wait for
+		s.abandon()
 		return nil, err
 	}
 	return s, nil
@@ -234,7 +266,6 @@ func (c *Client) dialStreamOne(s *session) error {
 	}
 	s.hold(client)
 	s.count(client)
-	s.single = true
 	s.streamBody, s.streamUpload = io.Pipe()
 	s.startDownload(client, c.up.newStreamRequest(s.withUploadTrace(s.ctx), c.upScheme, "", s.streamBody))
 	return nil

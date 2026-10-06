@@ -18,6 +18,18 @@ import (
 // on a router a megabyte per uploading connection adds up.
 const maxUploadBacklog = 1024 * 1024
 
+// A session has at most so many upload requests waiting for their answers, by
+// count and by bytes (one request at the least): past that its writes wait.
+// The server answers once it has queued the data, so with a destination that
+// has stopped reading the answers stop too, while the requests would go on
+// leaving, a megabyte each (lab: 52 unanswered requests, 73 MiB of heap, for
+// one stalled upload). The count is for small requests, which are spaced
+// sc_min_posts_interval_ms apart and so need many of them over a slow path.
+const (
+	maxUnansweredPosts = 32
+	maxUnansweredBytes = 4 * 1024 * 1024
+)
+
 // uploadTimeout bounds one packet-up upload request on a connection that
 // does not check on its server by itself.
 const uploadTimeout = 60 * time.Second
@@ -42,11 +54,18 @@ type uploader struct {
 	// closing is closed by finish: the session is closed, what is pending is
 	// still sent. posts counts the requests on their way; finished is closed
 	// when the last of them is over.
-	closing     chan struct{}
-	closingOnce sync.Once
-	posts       sync.WaitGroup
-	inFlight    atomic.Int32
-	finished    chan struct{}
+	closing      chan struct{}
+	closingOnce  sync.Once
+	posts        sync.WaitGroup
+	inFlight     atomic.Int32
+	inFlightSize atomic.Int64
+	// answered is notified when a request is over.
+	answered chan struct{}
+	finished chan struct{}
+	// postContext is the context of the requests: not that of the session,
+	// see post. abortPosts cancels it.
+	postContext context.Context
+	abortPosts  context.CancelFunc
 
 	// current is the client the uploads go through until it runs out of its
 	// request budget; the uploader holds it (one running count).
@@ -55,18 +74,22 @@ type uploader struct {
 
 func newUploader(s *session, client *Client, sessionID string, current *poolClient) *uploader {
 	maxSize := int(client.up.maxEachPostBytes.rand())
+	postContext, abortPosts := context.WithCancel(context.WithoutCancel(s.ctx))
 	return &uploader{
-		session:   s,
-		client:    client,
-		sessionID: sessionID,
-		maxSize:   maxSize,
-		backlog:   min(maxSize, maxUploadBacklog),
-		readable:  make(chan struct{}, 1),
-		writable:  make(chan struct{}, 1),
-		done:      make(chan struct{}),
-		closing:   make(chan struct{}),
-		finished:  make(chan struct{}),
-		current:   current,
+		postContext: postContext,
+		abortPosts:  abortPosts,
+		answered:    make(chan struct{}, 1),
+		session:     s,
+		client:      client,
+		sessionID:   sessionID,
+		maxSize:     maxSize,
+		backlog:     min(maxSize, maxUploadBacklog),
+		readable:    make(chan struct{}, 1),
+		writable:    make(chan struct{}, 1),
+		done:        make(chan struct{}),
+		closing:     make(chan struct{}),
+		finished:    make(chan struct{}),
+		current:     current,
 	}
 }
 
@@ -136,6 +159,17 @@ func (u *uploader) interrupt(err error) {
 	u.pending = nil
 	u.access.Unlock()
 	u.doneOnce.Do(func() { close(u.done) })
+	// The session is over, failed or closed and past its linger: its requests
+	// still without an answer end with it, where that is safe (see post).
+	if u.client.upPool.watched {
+		u.abortPosts()
+	}
+}
+
+// overBudget tells that no more requests may leave before one is answered.
+func (u *uploader) overBudget() bool {
+	count := u.inFlight.Load()
+	return count > 0 && (count >= maxUnansweredPosts || u.inFlightSize.Load() >= maxUnansweredBytes)
 }
 
 func (u *uploader) run() {
@@ -161,6 +195,15 @@ func (u *uploader) run() {
 				return
 			}
 		}
+		// What is pending stays there, and fills, while too many requests wait
+		// for their answers: the writes of the session wait in turn.
+		for u.overBudget() {
+			select {
+			case <-u.answered:
+			case <-u.done:
+				return
+			}
+		}
 		u.access.Lock()
 		// The backlog never exceeds the request size, so all of it fits in one
 		// request and is handed over without a copy.
@@ -170,6 +213,7 @@ func (u *uploader) run() {
 			// counted from here on, under the lock: idle must not see the gap
 			// between the backlog and the request
 			u.inFlight.Add(1)
+			u.inFlightSize.Add(int64(len(data)))
 		}
 		u.access.Unlock()
 		if len(data) == 0 {
@@ -189,6 +233,7 @@ func (u *uploader) run() {
 				case <-u.done:
 					timer.Stop()
 					u.inFlight.Add(-1)
+					u.inFlightSize.Add(-int64(len(data)))
 					return
 				}
 			}
@@ -197,6 +242,7 @@ func (u *uploader) run() {
 		client, err := u.nextClient()
 		if err != nil {
 			u.inFlight.Add(-1)
+			u.inFlightSize.Add(-int64(len(data)))
 			u.session.fail(E.Cause(err, "xhttp: upload"))
 			return
 		}
@@ -241,7 +287,11 @@ func (u *uploader) nextClient() (*poolClient, error) {
 
 func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan struct{}) {
 	defer u.posts.Done()
-	defer u.inFlight.Add(-1)
+	defer func() {
+		u.inFlightSize.Add(-int64(len(data)))
+		u.inFlight.Add(-1)
+		notify(u.answered)
+	}()
 	defer client.release()
 	var once sync.Once
 	written := func() { once.Do(func() { close(wrote) }) }
@@ -260,7 +310,12 @@ func (u *uploader) post(client *poolClient, seq string, data []byte, wrote chan 
 	// where the connection itself notices a server that went silent. Where
 	// nothing does (HTTP/1.1, HTTP/2 with its pings turned off) the limit
 	// stays: the wait, and the data written at 64 kbit/s.
-	ctx := context.WithoutCancel(u.session.ctx)
+	//
+	// On the watched connections a request is a stream of its own, and ending
+	// it harms nothing else: there the requests of a session that is over
+	// (failed, or closed and past its linger) are cancelled, so that one the
+	// server never answers does not hold its data and its connection.
+	ctx := u.postContext
 	if !u.client.upPool.watched {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, uploadTimeout+time.Duration(len(data))*time.Second/(8*1024))

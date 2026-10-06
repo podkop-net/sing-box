@@ -58,9 +58,6 @@ type session struct {
 	streamBody   *io.PipeReader
 	streamUpload *io.PipeWriter
 	packetUpload *uploader
-	// single: the download is the response to the request that streams the
-	// upload (stream-one).
-	single bool
 	// uploadWritten is closed when the upload stream is over: the request
 	// written to its end (stream-one), answered to its end (stream-up), or
 	// failed.
@@ -424,6 +421,12 @@ var closedChannel = func() chan struct{} {
 	close(channel)
 	return channel
 }()
+
+// abandon ends a session nothing was written to, at once: a dial given up.
+func (s *session) abandon() {
+	s.closed.Store(true)
+	s.teardown()
+}
 
 // teardown aborts the requests of the session and lets go of its connections.
 func (s *session) teardown() {

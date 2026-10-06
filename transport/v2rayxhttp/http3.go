@@ -63,6 +63,9 @@ type http3Lane struct {
 	// its socket and its goroutines open.
 	conns  map[*quic.Conn]struct{}
 	closed bool
+	// ctx is done when the lane closes: a dial does not outlive it.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (l *http3Lane) track(conn *quic.Conn) bool {
@@ -87,6 +90,7 @@ func (l *http3Lane) track(conn *quic.Conn) bool {
 // close closes the lane; the caller has taken it out of the list and marked
 // it closed under the lock.
 func (l *http3Lane) close(conns map[*quic.Conn]struct{}) {
+	l.cancel()
 	l.transport.Close()
 	for conn := range conns {
 		conn.CloseWithError(0, "")
@@ -110,6 +114,7 @@ func (c *http3Connection) acquire() (*http3Lane, error) {
 	}
 	if lane == nil {
 		lane = &http3Lane{owner: c}
+		lane.ctx, lane.cancel = context.WithCancel(context.Background())
 		lane.transport = c.newTransport(lane)
 		c.lanes = append(c.lanes, lane)
 	}
@@ -190,8 +195,11 @@ func newHTTP3Connections(dialer N.Dialer, serverAddr M.Socksaddr, tlsConfig tls.
 					// The connection is shared: the session whose request started
 					// the dial must not take it down, by closing, for the sessions
 					// waiting for it.
+					// It ends with its lane: closing the HTTP/3 client waits for
+					// a dial in progress.
 					ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), C.TCPTimeout)
 					defer cancel()
+					defer context.AfterFunc(lane.ctx, cancel)()
 					// http3.Transport fills an empty server name from the request's
 					// host, which would undo disable_sni.
 					tlsConfig = tlsConfig.Clone()
