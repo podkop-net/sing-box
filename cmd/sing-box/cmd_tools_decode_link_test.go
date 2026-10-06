@@ -71,3 +71,15 @@ func TestDecodeLinkCommand(t *testing.T) {
 	status, _, _ := run("", link+"&extra=%7B%22xmux%22%3A%7B%22maxConnections%22%3A2%7D%7D")
 	require.Zero(t, status)
 }
+
+// Scripts read the features as whole names between commas.
+func TestVersionFeatures(t *testing.T) {
+	seen := make(map[string]bool)
+	for _, feature := range versionFeatures {
+		require.NotContains(t, feature, ",")
+		require.NotContains(t, feature, " ")
+		require.False(t, seen[feature], feature)
+		seen[feature] = true
+	}
+	require.True(t, seen["tools.decode-link"])
+}
