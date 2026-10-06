@@ -325,30 +325,91 @@ func TestReserveIsExtendedBeforeItIsUsedUp(t *testing.T) {
 	}
 }
 
+// While the storage fails, new names are answered from memory, past the saved reserve, and
+// everything reaches the storage with the first save that succeeds.
 func TestStorageFailure(t *testing.T) {
 	t.Parallel()
 	storage := newFakeStorage()
 	store := newTestStore(t, storage, "198.18.0.0/15", "")
 	known := mustCreate(t, store, "known.test")
-	storage.fail = true
-	// known domains keep answering, new ones while the saved reserve lasts
-	require.Equal(t, known, mustCreate(t, store, "known.test"))
-	var given int
-	for {
-		_, err := store.Create(fmt.Sprint("new-", given, ".test"), false)
-		if err != nil {
-			break
-		}
-		given++
-		require.Less(t, given, reserveStep+1, "nothing is given out past the saved reserve")
-	}
-	require.Greater(t, given, 0)
-	require.Error(t, store.save(saveRequest{}))
-	require.Equal(t, 0, storage.records())
-	storage.fail = false
-	mustCreate(t, store, "after.test")
 	require.NoError(t, store.save(saveRequest{}))
-	require.Equal(t, given+2, storage.records(), "what was given out during the failure is saved once the storage works")
+	storage.fail = true
+	require.Equal(t, known, mustCreate(t, store, "known.test"))
+	given := map[netip.Addr]bool{known: true}
+	for i := range 3 * reserveStep {
+		next := mustCreate(t, store, fmt.Sprint("new-", i, ".test"))
+		require.False(t, given[next], "an address is given out once")
+		given[next] = true
+	}
+	require.Error(t, store.save(saveRequest{}))
+	require.Equal(t, 1, storage.records())
+
+	storage.fail = false
+	require.NoError(t, store.save(saveRequest{}))
+	require.Equal(t, len(given), storage.records(), "what was given out during the failure is saved once the storage works")
+	last := storage.cursor.Inet4Current
+	for next := range given {
+		require.False(t, last.Less(next), "the saved position ", last, " is behind ", next)
+	}
+	// the reserve is back: allocation waits for it again
+	require.Equal(t, store.pool4.step, store.pool4.budget)
+	store.pool4.budget = 0
+	storage.fail = true
+	_, need, err := store.allocate(store.pool4, "waits.test")
+	require.NoError(t, err)
+	require.Equal(t, needReserve, need)
+	storage.fail = false
+	after := mustCreate(t, store, "waits.test")
+	require.False(t, storage.cursor.Inet4Current.Less(after))
+	given[after] = true
+	// a crash now: nothing given out so far is given out again
+	killed := newTestStore(t, storage.crash(), "198.18.0.0/15", "")
+	for i := range 3000 {
+		next := mustCreate(t, killed, fmt.Sprint("later-", i, ".test"))
+		require.False(t, given[next], next)
+	}
+}
+
+// A full range makes room in memory while the storage fails; the first save that succeeds
+// leaves in the storage what the memory holds.
+func TestFullRangeWhileStorageFails(t *testing.T) {
+	t.Parallel()
+	storage := newFakeStorage()
+	// 61 addresses
+	store := newTestStore(t, storage, "198.18.0.0/26", "")
+	hot := mustCreate(t, store, "hot.test")
+	for i := range 100 {
+		store.advance(1)
+		mustCreate(t, store, fmt.Sprint("old-", i, ".test"))
+		if i%10 == 0 {
+			mustCreate(t, store, "hot.test")
+		}
+	}
+	require.NoError(t, store.save(saveRequest{}))
+	storage.fail = true
+	for i := range 500 {
+		store.advance(1)
+		next := mustCreate(t, store, fmt.Sprint("name-", i, ".test"))
+		require.NotEqual(t, hot, next, "an address in use is not given to another domain")
+		if i%10 == 0 {
+			require.Equal(t, hot, mustCreate(t, store, "hot.test"))
+		}
+	}
+	require.LessOrEqual(t, uint32(len(store.pool4.byOffset)), store.pool4.max)
+	require.Error(t, store.save(saveRequest{}))
+
+	storage.fail = false
+	require.NoError(t, store.save(saveRequest{}))
+	var records int
+	for offset, r := range store.pool4.byOffset {
+		if r.held() {
+			continue
+		}
+		records++
+		require.Equal(t, r.domain, storage.domainOf(store.pool4.address(offset)))
+	}
+	require.Equal(t, records, storage.records(), "no record the memory has given up stays in the storage")
+	require.False(t, store.savePending())
 }
 
 func TestUnusedRecordsAreRemoved(t *testing.T) {
@@ -844,7 +905,7 @@ func TestCleanStop(t *testing.T) {
 		require.NoError(t, store.Close())
 		saves := storage.saves
 		// a query that found the range full just before the stop
-		require.Error(t, store.makeRoom(store.pool4))
+		store.makeRoom(store.pool4)
 		require.Equal(t, saves, storage.saves)
 		require.Equal(t, 13, storage.records())
 		require.NotNil(t, storage.cleanKey)
@@ -863,10 +924,8 @@ func TestTableIsKeptWhenTheFileCannotBeChangedAtStart(t *testing.T) {
 	storage.fail = true
 	store = newTestStore(t, storage, "198.18.0.0/15", "")
 	require.Equal(t, old, mustCreate(t, store, "a.test"), "known domains answer")
-	_, err := store.Create("new.test", false)
-	require.Error(t, err, "new ones wait for the storage")
+	require.Equal(t, address("198.18.0.4"), mustCreate(t, store, "new.test"), "new ones too, not with an address a client holds")
 	storage.fail = false
-	require.Equal(t, address("198.18.0.4"), mustCreate(t, store, "new.test"), "not an address a client holds")
 	require.NoError(t, store.save(saveRequest{}))
 	require.Equal(t, "a.test", storage.domainOf(old))
 }
@@ -935,9 +994,35 @@ func TestBackgroundSave(t *testing.T) {
 	require.NoError(t, store.Close())
 }
 
+// With the loop: an outage of the storage longer than the reserve lasts does not stop new
+// names, and the loop saves them when the outage ends.
+func TestNewNamesWhileTheLoopCannotSave(t *testing.T) {
+	t.Parallel()
+	storage := newFakeStorage()
+	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store.testStorage = storage
+	store.saveRetry = 20 * time.Millisecond
+	require.NoError(t, store.Start())
+	storage.access.Lock()
+	storage.fail = true
+	storage.access.Unlock()
+	const names = 2*reserveStep + 10
+	for i := range names {
+		mustCreate(t, store, fmt.Sprint("name-", i, ".test"))
+	}
+	require.Equal(t, 0, storage.records())
+	storage.access.Lock()
+	storage.fail = false
+	storage.access.Unlock()
+	require.Eventually(t, func() bool { return storage.records() == names }, 5*time.Second, 5*time.Millisecond)
+	require.NoError(t, store.Close())
+}
+
 // A model of the clients: the address each one was given and holds. Whatever happens,
 // crashes included, such an address leads to the domain it was given for or to nothing,
 // and is not given to another domain, until the store removes the record by its rules.
+// The exception is a crash while the storage could not be written: it is kept for the
+// addresses the storage has.
 func TestClientsNeverReachAnotherDomain(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -974,7 +1059,9 @@ func runClientModel(t *testing.T, prefix string, domains int, seed uint64) {
 				delete(held, gone)
 				return
 			}
-			require.NotEqual(t, r.domain, storage.domainOf(gone), "a record leaves memory only after it left the storage")
+			if !store.storageFailed {
+				require.NotEqual(t, r.domain, storage.domainOf(gone), "a record leaves memory only after it left the storage")
+			}
 			if held[gone] == r.domain {
 				delete(held, gone)
 				delete(saved, gone)
@@ -1044,10 +1131,7 @@ func runClientModel(t *testing.T, prefix string, domains int, seed uint64) {
 		case choice < 60:
 			domain := fmt.Sprint("name-", random.IntN(domains), ".test")
 			given, err := store.Create(domain, false)
-			if err != nil {
-				require.True(t, storage.fail, err)
-				continue
-			}
+			require.NoError(t, err, "a name is answered whatever the storage does")
 			if holder, isHeld := held[given]; isHeld {
 				require.Equal(t, holder, domain, "seed ", seed, ": ", given, " is given to another domain")
 			}
@@ -1072,6 +1156,15 @@ func runClientModel(t *testing.T, prefix string, domains int, seed uint64) {
 			storage.fail = !storage.fail
 		case choice < 98:
 			// a crash
+			if store.storageFailed {
+				// while the storage could not be written: the addresses that did not reach
+				// it are not covered, see Store
+				for address := range held {
+					if saved[address] == "" {
+						delete(held, address)
+					}
+				}
+			}
 			storage.fail = false
 			storage = storage.crash()
 			start()
