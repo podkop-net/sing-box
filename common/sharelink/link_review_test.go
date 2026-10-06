@@ -74,6 +74,7 @@ func TestRefusedWithoutEcho(t *testing.T) {
 	for name, link := range map[string]string{
 		"two links on a line":  "vless://" + testUUID + "@h:1 vless://" + secret + "@h:2",
 		"a link in a value":    "vless://" + testUUID + "@h:1?type=tcp vless://" + secret + "@h:2?type=ws",
+		"a link after a mode":  "vless://" + testUUID + "@h:1?type=xhttp&mode=packet-up vless://" + secret + "@h:2?type=xhttp",
 		"no scheme":            secret + "@example.org:443?type=ws&path=x://y",
 		"bare ipv6":            "vless://" + secret + "@2001:db8::1:443",
 		"security with a tail": "vless://" + secret + "@h:1?security=tls1sni=" + secret + ".example.org",

@@ -67,6 +67,13 @@ func Decode(link string) (*Outbound, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// The same for a link after the last parameter: its user would end up in
+	// that parameter, and in an error message about it.
+	for key, value := range query {
+		if strings.Contains(value, "://") && strings.ContainsAny(value, " \t\r\n") {
+			return nil, nil, E.New("the link parameter ", names[key], " contains a space and another link")
+		}
+	}
 	d := &decoder{query: query}
 	var options any
 	scheme = strings.ToLower(scheme)
