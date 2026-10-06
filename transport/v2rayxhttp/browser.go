@@ -30,25 +30,32 @@ var browserRand = func() *rand.Rand {
 	return rand.New(rand.NewSource(int64(hash.Sum64())))
 }()
 
+// The versions are worked out from the date, when the package is initialized,
+// and a router may start with its clock unset, decades back. A clock before
+// the release a version is counted from is taken for the day of that release:
+// the versions stay those of real browsers, where they would otherwise go
+// below zero.
+
 // Chrome versions follow the release cadence from Chrome 144 (2026-01-13),
 // lagging behind by a random number of days, like real installations.
-func chromeVersion() int {
+func chromeVersion(now time.Time) int {
 	start := time.Date(2026, 1, 13, 0, 0, 0, 0, time.UTC).Unix() / 86400
-	current := time.Now().Unix() / 86400
+	current := max(now.Unix()/86400, start)
 	diff := int(current-start-35) - int(math.Floor(math.Pow(browserRand.Float64(), 2)*105))
 	return 144 + diff/35
 }
 
-func curlVersion() string {
-	current := time.Now().Unix() / 86400
+func curlVersion(now time.Time) string {
 	start := time.Date(2023, 3, 20, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	current := max(now.Unix()/86400, start)
 	diff := int(current-start-60) - int(math.Floor(math.Pow(browserRand.Float64(), 2)*165))
-	return "8." + strconv.Itoa(diff/57) + ".0"
+	// 8.0 is the release counted from: there is none before it
+	return "8." + strconv.Itoa(max(diff/57, 0)) + ".0"
 }
 
-func firefoxVersion() int {
-	current := time.Now().Unix() / 86400
+func firefoxVersion(now time.Time) int {
 	start := time.Date(2024, 7, 29, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	current := max(now.Unix()/86400, start)
 	diff := current - start - 25 - int64(math.Floor(math.Pow(browserRand.Float64(), 2)*50))
 	return int(diff/30) + 128
 }
@@ -59,8 +66,13 @@ var safariMinors = [25]int{
 	4, 5, 5, 5, 5, 5, 6, 6, 6, 6,
 }
 
-func safariVersion() string {
-	now := time.Now()
+// Safari versions are counted from the year. The clock is not taken for
+// earlier than the day Chrome is counted from: by then every installation, the
+// slowest to update included, had the first version numbered that way, 26.
+func safariVersion(now time.Time) string {
+	if start := time.Date(2026, 1, 13, 0, 0, 0, 0, time.UTC); now.Before(start) {
+		now = start
+	}
 	year := now.Year()
 	delay := int(math.Floor(math.Pow(browserRand.Float64(), 3) * 75))
 	split := time.Date(year, 9, 23, 0, 0, 0, 0, time.UTC).AddDate(0, 0, delay)
@@ -82,14 +94,24 @@ var (
 	brandOrders3     = [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
 )
 
+// greaseIndex picks one of size entries by the version. The remainder of Go
+// has the sign of the version: a negative one must not index a table.
+func greaseIndex(majorVersion int, size int) int {
+	index := majorVersion % size
+	if index < 0 {
+		index += size
+	}
+	return index
+}
+
 func greasedBrandList(majorVersion int, brand string) string {
 	brands := []string{
-		"\"Not" + greaseCharacters[majorVersion%len(greaseCharacters)] + "A" + greaseCharacters[(majorVersion+1)%len(greaseCharacters)] +
-			"Brand\";v=\"" + greaseVersions[majorVersion%len(greaseVersions)] + "\"",
+		"\"Not" + greaseCharacters[greaseIndex(majorVersion, len(greaseCharacters))] + "A" + greaseCharacters[greaseIndex(majorVersion+1, len(greaseCharacters))] +
+			"Brand\";v=\"" + greaseVersions[greaseIndex(majorVersion, len(greaseVersions))] + "\"",
 		"\"Chromium\";v=\"" + strconv.Itoa(majorVersion) + "\"",
 		"\"" + brand + "\";v=\"" + strconv.Itoa(majorVersion) + "\"",
 	}
-	order := brandOrders3[majorVersion%len(brandOrders3)]
+	order := brandOrders3[greaseIndex(majorVersion, len(brandOrders3))]
 	shuffled := make([]string, len(brands))
 	for i, position := range order {
 		shuffled[position] = brands[i]
@@ -100,11 +122,11 @@ func greasedBrandList(majorVersion int, brand string) string {
 // Declared, and so drawn from the generator, in Xray's order: curl, Firefox,
 // Safari, Chrome. The same seed then gives the same versions as Xray.
 var (
-	curlUA             = "curl/" + curlVersion()
-	firefoxVersionText = strconv.Itoa(firefoxVersion())
+	curlUA             = "curl/" + curlVersion(time.Now())
+	firefoxVersionText = strconv.Itoa(firefoxVersion(time.Now()))
 	firefoxUA          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:" + firefoxVersionText + ".0) Gecko/20100101 Firefox/" + firefoxVersionText + ".0"
-	safariUA           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" + safariVersion() + " Safari/605.1.15"
-	chromeMajorVersion = chromeVersion()
+	safariUA           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" + safariVersion(time.Now()) + " Safari/605.1.15"
+	chromeMajorVersion = chromeVersion(time.Now())
 	chromeUA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + strconv.Itoa(chromeMajorVersion) + ".0.0.0 Safari/537.36"
 	chromeUACH         = greasedBrandList(chromeMajorVersion, "Google Chrome")
 	edgeUA             = chromeUA + "Edg/" + strconv.Itoa(chromeMajorVersion) + ".0.0.0"
