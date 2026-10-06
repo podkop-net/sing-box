@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -78,6 +79,26 @@ type fakeDNSTransportManager struct {
 
 func (m fakeDNSTransportManager) FakeIP() adapter.FakeIPTransport { return m.fakeIP }
 
+type fakeDNSRouter struct {
+	adapter.DNSRouter
+}
+
+func (fakeDNSRouter) LookupReverseMapping(netip.Addr) (string, bool) { return "", false }
+
+type fakeDirectOutbound struct {
+	adapter.Outbound
+}
+
+func (fakeDirectOutbound) Type() string      { return C.TypeDirect }
+func (fakeDirectOutbound) Tag() string       { return "direct-out" }
+func (fakeDirectOutbound) Network() []string { return []string{N.NetworkTCP, N.NetworkUDP} }
+
+type fakeDefaultOutboundManager struct {
+	adapter.OutboundManager
+}
+
+func (fakeDefaultOutboundManager) Default() adapter.Outbound { return fakeDirectOutbound{} }
+
 // closedPacketConn is the connection of a refused session: the router only closes it.
 type closedPacketConn struct {
 	N.PacketConn
@@ -128,4 +149,69 @@ func TestMissingFakeIPRecordIsLoggedAsWarning(t *testing.T) {
 		require.Contains(t, line, "no fakeip record")
 		require.Contains(t, line, "198.18.0.5:22")
 	}
+}
+
+// waitLoopWindowClosed waits until the refusals of no inbound are being counted.
+func waitLoopWindowClosed(t *testing.T, router *Router) {
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		router.loopRefusals.access.Lock()
+		open := len(router.loopRefusals.windows)
+		router.loopRefusals.access.Unlock()
+		if open == 0 {
+			return
+		}
+		require.False(t, time.Now().After(deadline), "the window stays open after the refusals stopped")
+	}
+}
+
+// The refusal of a connection that would be dialed back to its inbound is logged once,
+// then counted: one line per interval while the refusals go on.
+func TestLoopRefusalsAreCounted(t *testing.T) {
+	defer func() { loopRefusalLogInterval = 10 * time.Second }()
+	router, output := newLoggedRouter(t)
+	dnsIn := M.ParseSocksaddr("127.0.0.42:53")
+	router.inbound = fakeInboundManager{inbounds: map[string]adapter.Inbound{"dns-in": fakeListenInbound{addr: dnsIn}}}
+	router.outbound = fakeDefaultOutboundManager{}
+	router.dnsTransport = fakeDNSTransportManager{}
+	router.dns = fakeDNSRouter{}
+	metadata := adapter.InboundContext{
+		Inbound:     "dns-in",
+		Source:      M.ParseSocksaddr("127.0.0.1:40000"),
+		Destination: dnsIn,
+	}
+
+	// The counting, without the clock: the interval never ends by itself here, the test
+	// ends it by hand. The timers armed meanwhile do not fire while the test runs.
+	loopRefusalLogInterval = time.Hour
+	for range 20 {
+		routeRefused(t, router, N.NetworkUDP, metadata)
+	}
+	routeRefused(t, router, N.NetworkTCP, metadata)
+	lines := output.lines()
+	require.Len(t, lines, 1, output.String())
+	require.True(t, strings.HasPrefix(lines[0], "ERROR"), lines[0])
+	require.Contains(t, lines[0], "refused packet to the address of inbound dns-in (127.0.0.42:53): not hijacked, would loop")
+	router.loopRefusals.flush(router.logger, "dns-in")
+	lines = output.lines()
+	require.Len(t, lines, 2, output.String())
+	require.True(t, strings.HasPrefix(lines[1], "ERROR"), lines[1])
+	require.Contains(t, lines[1], "inbound dns-in: 20 more refused in 1h0m0s, the last: refused connection to the address of inbound dns-in (127.0.0.42:53)")
+	// an interval without refusals closes the window, silently
+	router.loopRefusals.flush(router.logger, "dns-in")
+	router.loopRefusals.access.Lock()
+	open := len(router.loopRefusals.windows)
+	router.loopRefusals.access.Unlock()
+	require.Zero(t, open)
+	require.Len(t, output.lines(), 2)
+
+	// The clock: refusals that come later are logged anew, the one that follows at once is
+	// counted, and the window closes by itself after an interval without refusals.
+	loopRefusalLogInterval = 2 * time.Second
+	routeRefused(t, router, N.NetworkUDP, metadata)
+	routeRefused(t, router, N.NetworkUDP, metadata)
+	require.Len(t, output.lines(), 3, output.String())
+	waitLoopWindowClosed(t, router)
+	lines = output.lines()
+	require.Len(t, lines, 4, output.String())
+	require.Contains(t, lines[3], "inbound dns-in: 1 more refused in 2s, the last: refused packet")
 }

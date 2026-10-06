@@ -148,7 +148,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 
 	if r.wouldLoopToInbound(&metadata, selectedOutbound) {
 		buf.ReleaseMulti(buffers)
-		return E.New("refused connection to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")
+		return &inboundLoopError{metadata.Inbound, E.New("refused connection to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")}
 	}
 	for _, buffer := range buffers {
 		conn = bufio.NewCachedConn(conn, buffer)
@@ -277,7 +277,7 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 	if r.wouldLoopToInbound(&metadata, selectedOutbound) {
 		N.ReleaseMultiPacketBuffer(packetBuffers)
-		return E.New("refused packet to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")
+		return &inboundLoopError{metadata.Inbound, E.New("refused packet to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")}
 	}
 	for _, buffer := range packetBuffers {
 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
@@ -419,6 +419,11 @@ var errMissingFakeIPRecord = E.New("missing fakeip record")
 func (r *Router) logRefused(ctx context.Context, destination M.Socksaddr, err error) bool {
 	if errors.Is(err, errMissingFakeIPRecord) {
 		r.logger.WarnContext(ctx, "connection to ", destination, " refused: no fakeip record (the address was given out shortly before a crash, was flushed, or was unused for a long time); the client gets a new one when it resolves the name again")
+		return true
+	}
+	var loop *inboundLoopError
+	if errors.As(err, &loop) {
+		r.loopRefusals.refused(ctx, r.logger, loop)
 		return true
 	}
 	return false
