@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -671,10 +672,40 @@ match:
 // ClientHellos browsers send, with a post-quantum key share, take two.
 const maxSniffPackets = 16
 
+// A sniffer that panics on what a client sends panics for every such connection. The stack
+// is logged for the first one and then once per snifferPanicLogInterval, with the number
+// of panics in between; those are left to the debug level.
+var snifferPanicLogInterval = time.Minute
+
+type snifferPanicLog struct {
+	access  sync.Mutex
+	logged  time.Time // the last stack
+	skipped int       // panics since then
+}
+
 // logSnifferPanic logs a sniffer that panicked, with its stack: a bug to report.
 func (r *Router) logSnifferPanic(ctx context.Context, err error) {
-	if errors.Is(err, sniff.ErrSnifferPanicked) {
-		r.logger.ErrorContext(ctx, err)
+	var panicked *sniff.SnifferPanicError
+	if !errors.As(err, &panicked) {
+		return
+	}
+	// the error stays in the metadata of the connection: the stack does not
+	stack := panicked.Stack
+	panicked.Stack = nil
+	r.snifferPanics.access.Lock()
+	if !r.snifferPanics.logged.IsZero() && time.Since(r.snifferPanics.logged) < snifferPanicLogInterval {
+		r.snifferPanics.skipped++
+		r.snifferPanics.access.Unlock()
+		r.logger.DebugContext(ctx, panicked)
+		return
+	}
+	skipped := r.snifferPanics.skipped
+	r.snifferPanics.logged, r.snifferPanics.skipped = time.Now(), 0
+	r.snifferPanics.access.Unlock()
+	if skipped > 0 {
+		r.logger.ErrorContext(ctx, panicked, " (", skipped, " more since the last stack was logged)\n", string(stack))
+	} else {
+		r.logger.ErrorContext(ctx, panicked, "\n", string(stack))
 	}
 }
 

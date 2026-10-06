@@ -29,14 +29,31 @@ var ErrNeedMoreData = E.New("need more data")
 // connection instead of the process.
 var ErrSnifferPanicked = E.New("sniffer panicked")
 
+// SnifferPanicError is what a sniffer that panicked returns; errors.Is finds
+// ErrSnifferPanicked in it. Its text is one line: it stays in the metadata of the
+// connection, which trackers keep, and such connections can come by the hundred. The stack
+// is apart, for whoever logs the bug.
+type SnifferPanicError struct {
+	Value string // the panic
+	Stack []byte
+}
+
+func (e *SnifferPanicError) Error() string {
+	return ErrSnifferPanicked.Error() + ": " + e.Value
+}
+
+func (e *SnifferPanicError) Unwrap() error {
+	return ErrSnifferPanicked
+}
+
 // recovered runs a sniffer. On a panic it restores the metadata the sniffer may have set
-// and returns ErrSnifferPanicked with the panic and its stack.
+// and returns a SnifferPanicError with the panic and its stack.
 func recovered(metadata *adapter.InboundContext, sniff func() error) (err error) {
 	protocol, domain, client, sniffContext := metadata.Protocol, metadata.Domain, metadata.Client, metadata.SniffContext
 	defer func() {
 		if panicked := recover(); panicked != nil {
 			metadata.Protocol, metadata.Domain, metadata.Client, metadata.SniffContext = protocol, domain, client, sniffContext
-			err = fmt.Errorf("%w: %v\n%s", ErrSnifferPanicked, panicked, debug.Stack())
+			err = &SnifferPanicError{Value: fmt.Sprint(panicked), Stack: debug.Stack()}
 		}
 	}()
 	return sniff()

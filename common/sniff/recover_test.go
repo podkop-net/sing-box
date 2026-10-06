@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -29,14 +30,16 @@ func panickingPacketSniffer(_ context.Context, metadata *adapter.InboundContext,
 	return panickingStreamSniffer(context.Background(), metadata, bytes.NewReader(packet))
 }
 
-// A sniffer that panics fails the sniff of its connection, with the panic and its stack, and
-// leaves the metadata as it found it; the next sniffer still runs.
+// A sniffer that panics fails the sniff of its connection, with the panic in one line and
+// its stack apart, and leaves the metadata as it found it; the next sniffer still runs.
 func TestSnifferPanicRecovered(t *testing.T) {
 	var metadata adapter.InboundContext
 	err := PeekPacket(context.Background(), &metadata, []byte("packet"), panickingPacketSniffer)
 	require.ErrorIs(t, err, ErrSnifferPanicked)
-	require.Contains(t, err.Error(), "index out of range")
-	require.Contains(t, err.Error(), "panickingStreamSniffer")
+	require.Equal(t, "sniffer panicked: runtime error: index out of range [1] with length 0", err.Error())
+	var panicError *SnifferPanicError
+	require.ErrorAs(t, err, &panicError)
+	require.Contains(t, string(panicError.Stack), "panickingStreamSniffer")
 	require.Empty(t, metadata.Protocol)
 	require.Empty(t, metadata.Domain)
 	require.Nil(t, metadata.SniffContext)
@@ -48,6 +51,18 @@ func TestSnifferPanicRecovered(t *testing.T) {
 		})
 	require.NoError(t, err)
 	require.Equal(t, C.ProtocolDNS, metadata.Protocol)
+
+	// among the failures of other sniffers the panic and its stack are still found
+	metadata = adapter.InboundContext{}
+	err = PeekPacket(context.Background(), &metadata, []byte("packet"),
+		func(context.Context, *adapter.InboundContext, []byte) error { return os.ErrInvalid },
+		panickingPacketSniffer)
+	require.ErrorIs(t, err, os.ErrInvalid)
+	require.ErrorIs(t, err, ErrSnifferPanicked)
+	panicError = nil
+	require.ErrorAs(t, err, &panicError)
+	require.NotEmpty(t, panicError.Stack)
+	require.NotContains(t, err.Error(), "\n")
 
 	client, server := net.Pipe()
 	defer client.Close()

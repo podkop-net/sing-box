@@ -3,6 +3,7 @@ package route
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/netip"
 	"strings"
@@ -11,8 +12,11 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/sniff"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	R "github.com/sagernet/sing-box/route/rule"
+	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 
@@ -214,4 +218,82 @@ func TestLoopRefusalsAreCounted(t *testing.T) {
 	lines = output.lines()
 	require.Len(t, lines, 4, output.String())
 	require.Contains(t, lines[3], "inbound dns-in: 1 more refused in 2s, the last: refused packet")
+}
+
+// onePacket delivers the same packet on every read.
+type onePacket struct {
+	N.PacketConn
+}
+
+func (onePacket) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	buffer.Write([]byte("packet"))
+	return M.ParseSocksaddr("192.0.2.1:443"), nil
+}
+
+func (onePacket) SetReadDeadline(time.Time) error { return nil }
+
+func panickingSniffer(context.Context, *adapter.InboundContext, []byte) error {
+	var empty []byte
+	_ = empty[1]
+	return nil
+}
+
+func panickingStreamSniffer(context.Context, *adapter.InboundContext, io.Reader) error {
+	return panickingSniffer(nil, nil, nil)
+}
+
+// A sniffer that panics on what a client sends panics for every such connection: its stack
+// is logged for the first one and then at most once per interval, with the number of
+// panics in between, and the error kept in the metadata of each connection is one line.
+func TestSnifferPanicStackIsLoggedOncePerInterval(t *testing.T) {
+	router, output := newLoggedRouter(t)
+	action := &R.RuleActionSniff{
+		PacketSniffers: []sniff.PacketSniffer{panickingSniffer},
+		StreamSniffers: []sniff.StreamSniffer{panickingStreamSniffer},
+	}
+	sniffPacket := func() {
+		var metadata adapter.InboundContext
+		_, packetBuffers, fatalErr := router.actionSniff(context.Background(), &metadata, action, nil, onePacket{}, nil, nil)
+		require.NoError(t, fatalErr)
+		N.ReleaseMultiPacketBuffer(packetBuffers)
+		require.ErrorIs(t, metadata.SniffError, sniff.ErrSnifferPanicked)
+		require.Contains(t, metadata.SniffError.Error(), "index out of range")
+		require.NotContains(t, metadata.SniffError.Error(), "\n", "the error of the connection carries no stack")
+	}
+	sniffStream := func() {
+		var metadata adapter.InboundContext
+		conn, peer := net.Pipe()
+		defer conn.Close()
+		defer peer.Close()
+		go peer.Write([]byte("stream"))
+		buffer, _, fatalErr := router.actionSniff(context.Background(), &metadata, action, conn, nil, nil, nil)
+		require.NoError(t, fatalErr)
+		buffer.Release()
+		require.ErrorIs(t, metadata.SniffError, sniff.ErrSnifferPanicked)
+		require.NotContains(t, metadata.SniffError.Error(), "\n", "the error of the connection carries no stack")
+	}
+	sniffPacket()
+	for range 3 {
+		sniffPacket()
+		sniffStream()
+	}
+	logged := output.String()
+	require.Equal(t, 1, strings.Count(logged, " [running]:"), logged)
+	require.Contains(t, logged, "panickingSniffer")
+	errorLines := 0
+	for _, line := range output.lines() {
+		if strings.HasPrefix(line, "ERROR") {
+			errorLines++
+			require.Contains(t, line, "sniffer panicked: runtime error: index out of range")
+		}
+	}
+	require.Equal(t, 1, errorLines, logged)
+
+	// the interval is over
+	snifferPanicLogInterval = time.Nanosecond
+	defer func() { snifferPanicLogInterval = time.Minute }()
+	sniffPacket()
+	logged = output.String()
+	require.Equal(t, 2, strings.Count(logged, " [running]:"), logged)
+	require.Contains(t, logged, "6 more since the last stack was logged")
 }

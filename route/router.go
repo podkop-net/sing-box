@@ -44,6 +44,7 @@ type Router struct {
 	platformInterface adapter.PlatformInterface
 	started           bool
 	loopRefusals      loopRefusalLog
+	snifferPanics     snifferPanicLog
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions) *Router {
