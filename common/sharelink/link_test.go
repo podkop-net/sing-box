@@ -162,7 +162,6 @@ func TestXHTTPDownload(t *testing.T) {
 		"network":     `{"downloadSettings":{"address":"a","port":1,"network":"ws"}}`,
 		"security":    `{"downloadSettings":{"address":"a","port":1,"security":"xtls"}}`,
 		"no key":      `{"downloadSettings":{"address":"a","port":1,"security":"reality"}}`,
-		"stream-one":  `{"downloadSettings":{"address":"a","port":1,"xhttpSettings":{"mode":"stream-one"}}}`,
 		"not object":  `{"downloadSettings":"x"}`,
 		"bad nesting": `{"downloadSettings":{"address":"a","port":1,"xhttpSettings":[1]}}`,
 	} {
@@ -185,12 +184,12 @@ func TestOtherTransports(t *testing.T) {
 		},
 		"ws early data in the path": {
 			"vless://" + testUUID + "@example.org:443/?security=tls&type=ws&host=h.example.org&path=%2Fws%3Fa%3D1%26ed%3D2560&allowInsecure=1&packetEncoding=xudp",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","packet_encoding":"xudp","tls":{"enabled":true,"insecure":true},
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","packet_encoding":"xudp","tls":{"enabled":true,"insecure":true,"utls":{"enabled":true,"fingerprint":"chrome"}},
 			"transport":{"type":"ws","path":"/ws?a=1","headers":{"Host":"h.example.org"},"max_early_data":2560,"early_data_header_name":"Sec-WebSocket-Protocol"}}`,
 		},
 		"grpc": {
 			"vless://" + testUUID + "@example.org:443?security=tls&type=grpc&serviceName=svc&mode=gun",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true},"transport":{"type":"grpc","service_name":"svc"}}`,
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"grpc","service_name":"svc"}}`,
 		},
 		"httpupgrade": {
 			"vless://" + testUUID + "@example.org:80?type=httpupgrade&host=h&path=%2Fu",
@@ -198,7 +197,7 @@ func TestOtherTransports(t *testing.T) {
 		},
 		"trojan": {
 			"trojan://pass%3Aw%40rd@example.org:443?sni=s.example.org&type=http&host=a,b&path=%2Fh",
-			`{"type":"trojan","server":"example.org","server_port":443,"password":"pass:w@rd","tls":{"enabled":true,"server_name":"s.example.org"},
+			`{"type":"trojan","server":"example.org","server_port":443,"password":"pass:w@rd","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}},
 			"transport":{"type":"http","host":["a","b"],"path":"/h"}}`,
 		},
 	} {
@@ -233,7 +232,6 @@ func TestErrors(t *testing.T) {
 		"kcp":               "vless://" + testUUID + "@example.org:443?type=kcp",
 		"tcp http header":   "vless://" + testUUID + "@example.org:443?type=tcp&headerType=http",
 		"grpc multi":        "vless://" + testUUID + "@example.org:443?type=grpc&mode=multi",
-		"early data":        "vless://" + testUUID + "@example.org:443?type=ws&ed=many",
 		"bad escape":        "vless://" + testUUID + "@example.org:443?type=ws&path=%zz",
 		"extra not json":    xhttpLink(`{"xPaddingBytes":`, url.QueryEscape, ""),
 		"extra not object":  xhttpLink(`"text"`, url.QueryEscape, ""),
@@ -296,19 +294,19 @@ func TestFoundInTheWild(t *testing.T) {
 	for name, test := range map[string]struct{ link, want string }{
 		"case and other names": {
 			base + "security=tls&allowinsecure=1&servername=s.example.org&packet-encoding=xudp&type=Tcp&headertype=none",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","packet_encoding":"xudp","tls":{"enabled":true,"server_name":"s.example.org","insecure":true}}`,
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","packet_encoding":"xudp","tls":{"enabled":true,"server_name":"s.example.org","insecure":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
 		},
 		"clash names": {
 			base + "security=tls&allow_insecure=1&peer=p.example.org",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"p.example.org","insecure":true}}`,
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"p.example.org","insecure":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
 		},
 		"copied out of HTML": {
 			base + "security=tls&amp;type=ws&amp;path=%2Fw&amp;Host=h.example.org",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true},"transport":{"type":"ws","path":"/w","headers":{"Host":"h.example.org"}}}`,
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"ws","path":"/w","headers":{"Host":"h.example.org"}}}`,
 		},
 		"password with a slash": {
 			"trojan://Km/pIG4A+j5==@example.org:443/?type=ws&path=/w&ed=2048&eh=X-Early",
-			`{"type":"trojan","server":"example.org","server_port":443,"password":"Km/pIG4A+j5==","tls":{"enabled":true},
+			`{"type":"trojan","server":"example.org","server_port":443,"password":"Km/pIG4A+j5==","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}},
 			"transport":{"type":"ws","path":"/w","max_early_data":2048,"early_data_header_name":"X-Early"}}`,
 		},
 		"flat xhttp settings": {
@@ -335,7 +333,7 @@ func TestFoundInTheWild(t *testing.T) {
 	}
 
 	_, warnings := decodeJSON(t, base+"type=xhttp&mux=1&pinSHA256=x&spx=%2F&extra="+url.QueryEscape(`{"xmux":{"cMaxLifetimeMs":5,"maxConnections":1}}`))
-	require.Equal(t, []string{"extra.xmux: cMaxLifetimeMs is not supported and is ignored", "mux is not supported and is ignored", "pinsha256 is not supported and is ignored"}, warnings)
+	require.Equal(t, []string{"extra.xmux: cMaxLifetimeMs is not supported and is ignored", "mux is not supported and is ignored", "pinSHA256 is not supported and is ignored"}, warnings)
 
 	for name, link := range map[string]string{
 		"flat range":      base + "type=xhttp&xPaddingBytes=a-b",

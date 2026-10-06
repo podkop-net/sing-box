@@ -40,9 +40,9 @@ func (o Outbound) MarshalJSON() ([]byte, error) {
 // Decode reads one share link. The warnings name what the link asks for and
 // the outbound cannot do, where the connection is still expected to work.
 func Decode(link string) (*Outbound, []string, error) {
-	link = strings.TrimSpace(link)
+	link = strings.TrimSpace(strings.TrimPrefix(link, "\ufeff"))
 	scheme, rest, found := strings.Cut(link, "://")
-	if !found || scheme == "" {
+	if !found || scheme == "" || strings.ContainsAny(scheme, " \t@?#/&=") {
 		return nil, nil, E.New("not a share link")
 	}
 	var tag string
@@ -59,7 +59,11 @@ func Decode(link string) (*Outbound, []string, error) {
 		rawQuery = rest[index+1:]
 		rest = rest[:index]
 	}
-	query, err := parseQuery(rawQuery)
+	// Two links on one line would read as one, with the first as its user.
+	if strings.ContainsAny(rest, " \t\r\n") || strings.Contains(rest, "://") {
+		return nil, nil, E.New("the address of the link contains a space or another link")
+	}
+	query, names, err := parseQuery(rawQuery)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,15 +76,15 @@ func Decode(link string) (*Outbound, []string, error) {
 	case C.TypeTrojan:
 		options, err = d.trojan(rest)
 	default:
-		return nil, nil, E.New("unsupported link type: ", scheme)
+		return nil, nil, E.New("unsupported link type", shown(scheme))
 	}
 	if err != nil {
 		return nil, nil, err
 	}
 	var unknown []string
 	for key := range query {
-		if !knownKeys[key] {
-			unknown = append(unknown, key)
+		if !knownKeys[key] && key != "" {
+			unknown = append(unknown, names[key])
 		}
 	}
 	sort.Strings(unknown)
@@ -99,13 +103,31 @@ func (d *decoder) warn(message ...any) {
 	d.warnings = append(d.warnings, E.New(message...).Error())
 }
 
+// shown gives a value of the link for an error message, as ": value", when it
+// is a plain word. Anything else may be a piece of the link that landed in
+// the wrong place, its user or password included, and is left out: a link is
+// a secret, and error messages end up in logs.
+func shown(value string) string {
+	if value == "" || len(value) > 24 {
+		return ""
+	}
+	for _, c := range []byte(value) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return ""
+		}
+	}
+	return ": " + value
+}
+
 // parseQuery splits the query of a link. "+" is a space: the generators that
 // use form encoding (3x-ui, Marzban) write spaces that way, and those that
 // follow the proposal escape a real "+". The first of repeated keys wins.
 // The names are lowered, as the clients differ in their case ("allowInsecure",
 // "allowinsecure"), and lose the "amp;" of a link copied out of HTML.
-func parseQuery(rawQuery string) (map[string]string, error) {
+func parseQuery(rawQuery string) (map[string]string, map[string]string, error) {
 	values := make(map[string]string)
+	// the names as the link writes them, for the warnings
+	names := make(map[string]string)
 	for _, pair := range strings.Split(rawQuery, "&") {
 		if pair == "" {
 			continue
@@ -113,18 +135,20 @@ func parseQuery(rawQuery string) (map[string]string, error) {
 		rawKey, rawValue, _ := strings.Cut(pair, "=")
 		key, err := url.QueryUnescape(rawKey)
 		if err != nil {
-			return nil, E.New("invalid escape in the name of a link parameter")
+			return nil, nil, E.New("invalid escape in the name of a link parameter")
 		}
 		value, err := url.QueryUnescape(rawValue)
 		if err != nil {
-			return nil, E.New("invalid escape in link parameter ", key)
+			return nil, nil, E.New("invalid escape in a link parameter", shown(key))
 		}
+		name := key
 		key = strings.TrimPrefix(strings.ToLower(key), "amp;")
 		if _, exists := values[key]; !exists {
 			values[key] = value
+			names[key] = name
 		}
 	}
-	return values, nil
+	return values, names, nil
 }
 
 // parseServer reads "userinfo@host:port", with anything after the port
@@ -165,7 +189,7 @@ func parseServer(authority string) (string, option.ServerOptions, error) {
 	}
 	portNumber, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || portNumber == 0 {
-		return "", option.ServerOptions{}, E.New("invalid server port: ", port)
+		return "", option.ServerOptions{}, E.New("invalid server port", shown(port))
 	}
 	return userinfo, option.ServerOptions{Server: host, ServerPort: uint16(portNumber)}, nil
 }
@@ -179,10 +203,24 @@ func (d *decoder) vless(authority string) (any, error) {
 	if encryption := d.query["encryption"]; encryption != "" && encryption != "none" {
 		return nil, E.New("VLESS encryption is not supported")
 	}
+	// Xray takes a UUID or a string of up to 30 bytes that it turns into one.
+	if len(uuid) > 30 && !isUUID(uuid) {
+		return nil, E.New("the user of the link is not a UUID")
+	}
+	flow := d.query["flow"]
+	switch flow {
+	case "", "xtls-rprx-vision":
+	case "xtls-rprx-vision-udp443":
+		// the same flow that also carries UDP to port 443, which sing-box
+		// does not single out
+		flow = "xtls-rprx-vision"
+	default:
+		return nil, E.New("unsupported flow", shown(flow))
+	}
 	options := option.VLESSOutboundOptions{
 		ServerOptions: server,
 		UUID:          uuid,
-		Flow:          d.query["flow"],
+		Flow:          flow,
 	}
 	if packetEncoding := d.first("packetencoding", "packet-encoding"); packetEncoding != "" {
 		if packetEncoding == "none" {
@@ -198,7 +236,31 @@ func (d *decoder) vless(authority string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if flow != "" && options.Transport != nil && options.Transport.Type == C.V2RayTransportTypeXHTTP {
+		// the outbound refuses it: with Xray a flow goes over XHTTP only with
+		// VLESS Encryption
+		return nil, E.New("flow ", flow, " is not supported over the xhttp transport")
+	}
 	return options, nil
+}
+
+func isUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, c := range []byte(value) {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (d *decoder) trojan(authority string) (any, error) {
@@ -209,6 +271,9 @@ func (d *decoder) trojan(authority string) (any, error) {
 	options := option.TrojanOutboundOptions{
 		ServerOptions: server,
 		Password:      password,
+	}
+	if d.query["flow"] != "" {
+		d.warn("flow is not a setting of Trojan and is ignored")
 	}
 	options.TLS, err = d.security("tls")
 	if err != nil {
@@ -260,7 +325,7 @@ func splitList(value string) []string {
 }
 
 func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, error) {
-	security := d.query["security"]
+	security := strings.ToLower(d.query["security"])
 	if security == "" {
 		security = defaultSecurity
 	}
@@ -269,7 +334,7 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 		return nil, nil
 	case "tls", "reality":
 	default:
-		return nil, E.New("unsupported security: ", security)
+		return nil, E.New("unsupported security", shown(security))
 	}
 	tlsOptions := &option.OutboundTLSOptions{
 		Enabled:    true,
@@ -277,7 +342,11 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 		Insecure:   isTrue(d.first("allowinsecure", "allow_insecure", "insecure")),
 		ALPN:       splitList(d.query["alpn"]),
 	}
-	fingerprint := d.query["fp"]
+	var err error
+	tlsOptions.UTLS, err = utlsOptions(d.query["fp"], security == "reality")
+	if err != nil {
+		return nil, err
+	}
 	if security == "reality" {
 		if d.query["pbk"] == "" {
 			return nil, E.New("missing REALITY public key (pbk)")
@@ -287,16 +356,9 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 			PublicKey: d.query["pbk"],
 			ShortID:   d.query["sid"],
 		}
-		// REALITY needs uTLS; Xray's default fingerprint is Chrome's
-		if fingerprint == "" {
-			fingerprint = "chrome"
-		}
 		if d.query["pqv"] != "" {
 			d.warn("pqv (the ML-DSA-65 check of the REALITY server) is not supported, the server is not verified with it")
 		}
-	}
-	if fingerprint != "" {
-		tlsOptions.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint}
 	}
 	for _, key := range []string{"ech", "pcs", "vcn", "cs"} {
 		if d.query[key] != "" {
@@ -306,7 +368,36 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 	return tlsOptions, nil
 }
 
+// utlsNames are the fingerprints sing-box knows (common/tls/utls_client.go).
+var utlsNames = map[string]bool{
+	"chrome": true, "firefox": true, "edge": true, "safari": true, "360": true, "qq": true, "ios": true, "android": true,
+	"random": true, "randomized": true,
+	"chrome_psk": true, "chrome_psk_shuffle": true, "chrome_padding_psk_shuffle": true, "chrome_pq": true, "chrome_pq_psk": true,
+}
+
+// utlsOptions reads a fingerprint as Xray does: any case, Chrome's when there
+// is none, and "unsafe" for the TLS of Go with no imitation (not for REALITY,
+// which is built on uTLS).
+func utlsOptions(fingerprint string, reality bool) (*option.OutboundUTLSOptions, error) {
+	fingerprint = strings.ToLower(fingerprint)
+	switch {
+	case fingerprint == "":
+		fingerprint = "chrome"
+	case fingerprint == "unsafe" && !reality:
+		return nil, nil
+	case !utlsNames[fingerprint]:
+		return nil, E.New("unsupported fingerprint", shown(fingerprint))
+	}
+	return &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint}, nil
+}
+
 func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
+	if strings.EqualFold(d.query["security"], "reality") {
+		switch strings.ToLower(d.query["type"]) {
+		case "ws", "http", "h2", "httpupgrade":
+			d.warn("Xray does not serve REALITY over this transport")
+		}
+	}
 	if d.query["fm"] != "" {
 		d.warn("fm (finalmask) is not supported, the connection may not work")
 	}
@@ -314,7 +405,7 @@ func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
 	switch network {
 	case "", "tcp", "raw":
 		if headerType := d.query["headertype"]; headerType != "" && headerType != "none" {
-			return nil, E.New("unsupported header type of the TCP transport: ", headerType)
+			return nil, E.New("unsupported header type of the TCP transport", shown(headerType))
 		}
 		return nil, nil
 	case "ws":
@@ -336,7 +427,12 @@ func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
 		return &option.V2RayTransportOptions{Type: C.V2RayTransportTypeWebsocket, WebsocketOptions: options}, nil
 	case "grpc":
 		if mode := d.query["mode"]; mode != "" && mode != "gun" {
-			return nil, E.New("unsupported gRPC mode: ", mode)
+			return nil, E.New("unsupported gRPC mode", shown(mode))
+		}
+		// Xray reads a name that starts with "/" as a whole path with its own
+		// stream name; sing-box always appends "/Tun".
+		if strings.HasPrefix(d.query["servicename"], "/") {
+			return nil, E.New("a gRPC service name that is a custom path is not supported")
 		}
 		if d.query["authority"] != "" {
 			d.warn("the gRPC authority is not supported and is ignored")
@@ -362,7 +458,7 @@ func (d *decoder) transport() (*option.V2RayTransportOptions, error) {
 		}
 		return &option.V2RayTransportOptions{Type: C.V2RayTransportTypeXHTTP, XHTTPOptions: *options}, nil
 	default:
-		return nil, E.New("unsupported transport: ", network)
+		return nil, E.New("unsupported transport", shown(network))
 	}
 }
 
@@ -390,7 +486,8 @@ func splitEarlyData(path string, linkValue string) (string, uint32, error) {
 	}
 	earlyData, err := strconv.ParseUint(value, 10, 32)
 	if err != nil {
-		return "", 0, E.New("invalid size of WebSocket early data: ", value)
+		// not a number is no early data, as with Xray
+		return path, 0, nil
 	}
 	return path, uint32(earlyData), nil
 }

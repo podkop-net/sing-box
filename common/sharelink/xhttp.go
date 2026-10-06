@@ -112,15 +112,21 @@ func (l *xrayStringList) UnmarshalJSON(content []byte) error {
 // readObject reads a JSON object into the Xray structure and reports the keys
 // the structure does not have: Xray ignores them, and so does the link, but a
 // setting silently dropped is how a link "does not work" with no reason shown.
-func (d *decoder) readObject(name string, content []byte, target any) error {
+//
+// It returns the keys the object has, in lower case.
+func (d *decoder) readObject(name string, content []byte, target any) (map[string]bool, error) {
 	err := json.Unmarshal(content, target)
 	if err != nil {
-		return E.Cause(err, "read ", name)
+		return nil, E.New("read ", name, ": ", plainJSONError(err))
 	}
 	var keys map[string]json.RawMessage
 	err = json.Unmarshal(content, &keys)
 	if err != nil {
-		return E.Cause(err, "read ", name)
+		return nil, E.New("read ", name, ": ", plainJSONError(err))
+	}
+	present := make(map[string]bool, len(keys))
+	for key := range keys {
+		present[strings.ToLower(key)] = true
 	}
 	known := make(map[string]bool)
 	targetType := reflect.TypeOf(target).Elem()
@@ -137,11 +143,30 @@ func (d *decoder) readObject(name string, content []byte, target any) error {
 	for _, key := range unknown {
 		d.warn(name, ": ", key, " is not supported and is ignored")
 	}
-	return nil
+	return present, nil
+}
+
+// plainJSONError drops the names of this package's types from an error of the
+// JSON decoder.
+func plainJSONError(err error) string {
+	message := err.Error()
+	const marker = "Go struct field "
+	if index := strings.Index(message, marker); index >= 0 {
+		field := message[index+len(marker):]
+		if dot := strings.IndexByte(field, '.'); dot >= 0 {
+			field = field[dot+1:]
+		}
+		if space := strings.IndexByte(field, ' '); space >= 0 {
+			field = field[:space]
+		}
+		return field + " has a value of the wrong type"
+	}
+	return strings.TrimPrefix(message, "json: ")
 }
 
 func (d *decoder) xhttp() (*option.V2RayXHTTPOptions, error) {
 	settings := new(xraySplitHTTP)
+	var present map[string]bool
 	if extra := strings.TrimSpace(d.query["extra"]); extra != "" {
 		// escaped twice by some panels and clients
 		if strings.HasPrefix(extra, "%7B") || strings.HasPrefix(extra, "%7b") {
@@ -149,7 +174,8 @@ func (d *decoder) xhttp() (*option.V2RayXHTTPOptions, error) {
 				extra = decoded
 			}
 		}
-		err := d.readObject("extra", []byte(extra), settings)
+		var err error
+		present, err = d.readObject("extra", []byte(extra), settings)
 		if err != nil {
 			return nil, err
 		}
@@ -159,23 +185,28 @@ func (d *decoder) xhttp() (*option.V2RayXHTTPOptions, error) {
 	// own way.
 	settings.Host, settings.Path, settings.Mode = d.query["host"], d.query["path"], d.first("mode", "xhttpmode")
 	// 3x-ui repeats the padding outside of "extra" under this name
-	if settings.XPaddingBytes == nil && d.query["x_padding_bytes"] != "" {
+	if !present["xpaddingbytes"] && d.query["x_padding_bytes"] != "" {
 		settings.XPaddingBytes = new(option.V2RayXHTTPRange)
 		err := settings.XPaddingBytes.UnmarshalJSON([]byte(strconv.Quote(d.query["x_padding_bytes"])))
 		if err != nil {
 			return nil, E.Cause(err, "read x_padding_bytes")
 		}
 	}
-	err := d.flatSettings(settings)
+	err := d.flatSettings(settings, present)
 	if err != nil {
 		return nil, err
+	}
+	hasDownload := len(settings.DownloadSettings) > 0 && string(settings.DownloadSettings) != "null"
+	if hasDownload && settings.Mode == "stream-one" {
+		// as Xray: one request cannot have its download elsewhere
+		return nil, E.New("downloadSettings cannot be used with the stream-one mode")
 	}
 	options := &option.V2RayXHTTPOptions{Mode: settings.Mode}
 	options.V2RayXHTTPBaseOptions, err = d.xhttpBase("extra", settings)
 	if err != nil {
 		return nil, err
 	}
-	if len(settings.DownloadSettings) > 0 && string(settings.DownloadSettings) != "null" {
+	if hasDownload {
 		download, err := d.xhttpDownload(settings.DownloadSettings)
 		if err != nil {
 			return nil, err
@@ -215,13 +246,26 @@ var flatKeys = func() map[string]int {
 	return keys
 }()
 
-// flatSettings fills what "extra" has left unset from the parameters of the link.
-func (d *decoder) flatSettings(settings *xraySplitHTTP) error {
+// The session settings have an older name each; one of a pair set in "extra"
+// settles both.
+var sameSetting = map[string]string{
+	"sessionplacement": "sessionidplacement", "sessionidplacement": "sessionplacement",
+	"sessionkey": "sessionidkey", "sessionidkey": "sessionkey",
+}
+
+// flatSettings fills what "extra" does not mention from the parameters of the
+// link: a setting "extra" has, also as false or empty, is settled there.
+func (d *decoder) flatSettings(settings *xraySplitHTTP, present map[string]bool) error {
 	value := reflect.ValueOf(settings).Elem()
-	for key, index := range flatKeys {
+	keys := make([]string, 0, len(flatKeys))
+	for key := range flatKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		text := d.query[key]
-		field := value.Field(index)
-		if text == "" || !field.IsZero() {
+		field := value.Field(flatKeys[key])
+		if text == "" || present[key] || present[sameSetting[key]] {
 			continue
 		}
 		switch field.Kind() {
@@ -232,7 +276,7 @@ func (d *decoder) flatSettings(settings *xraySplitHTTP) error {
 		case reflect.Int32, reflect.Int64:
 			number, err := strconv.ParseInt(text, 10, 32)
 			if err != nil {
-				return E.New("invalid ", key, ": ", text)
+				return E.New("invalid number in the link parameter ", key)
 			}
 			field.SetInt(number)
 		case reflect.Pointer:
@@ -283,7 +327,15 @@ func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) (option.V2RayX
 	}
 	if len(settings.Headers) > 0 {
 		headers := make(badoption.HTTPHeader)
-		for key, value := range settings.Headers {
+		// in the order of the names: with several spellings of Host the result
+		// must not depend on the order of a map
+		names := make([]string, 0, len(settings.Headers))
+		for key := range settings.Headers {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		for _, key := range names {
+			value := settings.Headers[key]
 			// Xray refuses a Host among the headers; panels put it there for
 			// the lack of a host of their own
 			if strings.EqualFold(key, "Host") {
@@ -302,7 +354,7 @@ func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) (option.V2RayX
 	}
 	if len(settings.Xmux) > 0 && string(settings.Xmux) != "null" {
 		xmux := new(xrayXmux)
-		err := d.readObject(name+".xmux", settings.Xmux, xmux)
+		_, err := d.readObject(name+".xmux", settings.Xmux, xmux)
 		if err != nil {
 			return options, err
 		}
@@ -326,10 +378,12 @@ func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) (option.V2RayX
 func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptions, error) {
 	const name = "downloadSettings"
 	stream := new(xrayStream)
-	err := d.readObject(name, content, stream)
+	_, err := d.readObject(name, content, stream)
 	if err != nil {
 		return nil, err
 	}
+	stream.Address = strings.TrimSuffix(strings.TrimPrefix(stream.Address, "["), "]")
+	stream.Network, stream.Security = strings.ToLower(stream.Network), strings.ToLower(stream.Security)
 	if stream.Address == "" {
 		return nil, E.New(name, ": missing address")
 	}
@@ -349,7 +403,7 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 	case "tls":
 		tlsSettings := new(xrayTLS)
 		if len(stream.TLSSettings) > 0 {
-			err = d.readObject(name+".tlsSettings", stream.TLSSettings, tlsSettings)
+			_, err = d.readObject(name+".tlsSettings", stream.TLSSettings, tlsSettings)
 			if err != nil {
 				return nil, err
 			}
@@ -360,13 +414,14 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 			Insecure:   tlsSettings.AllowInsecure,
 			ALPN:       badoption.Listable[string](tlsSettings.ALPN),
 		}
-		if tlsSettings.Fingerprint != "" {
-			options.TLS.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: tlsSettings.Fingerprint}
+		options.TLS.UTLS, err = utlsOptions(tlsSettings.Fingerprint, false)
+		if err != nil {
+			return nil, E.Cause(err, name)
 		}
 	case "reality":
 		realitySettings := new(xrayREALITY)
 		if len(stream.REALITYSettings) > 0 {
-			err = d.readObject(name+".realitySettings", stream.REALITYSettings, realitySettings)
+			_, err = d.readObject(name+".realitySettings", stream.REALITYSettings, realitySettings)
 			if err != nil {
 				return nil, err
 			}
@@ -379,33 +434,33 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 		if publicKey == "" {
 			return nil, E.New(name, ": missing REALITY public key")
 		}
-		fingerprint := realitySettings.Fingerprint
-		if fingerprint == "" {
-			fingerprint = "chrome"
+		utls, err := utlsOptions(realitySettings.Fingerprint, true)
+		if err != nil {
+			return nil, E.Cause(err, name)
 		}
 		options.TLS = &option.OutboundTLSOptions{
 			Enabled:    true,
 			ServerName: realitySettings.ServerName,
-			UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint},
+			UTLS:       utls,
 			Reality:    &option.OutboundRealityOptions{Enabled: true, PublicKey: publicKey, ShortID: realitySettings.ShortID},
 		}
 	default:
 		return nil, E.New(name, ": unsupported security: ", stream.Security)
 	}
 	content = stream.XHTTPSettings
-	if len(content) == 0 {
+	if len(content) == 0 || string(content) == "null" {
 		content = stream.SplitHTTPSettings
 	}
 	settings := new(xraySplitHTTP)
 	if len(content) > 0 && string(content) != "null" {
-		err = d.readObject(name+".xhttpSettings", content, settings)
+		_, err = d.readObject(name+".xhttpSettings", content, settings)
 		if err != nil {
 			return nil, err
 		}
 		// "extra" replaces everything but the host, the path and the mode
 		if len(settings.Extra) > 0 && string(settings.Extra) != "null" {
 			inner := new(xraySplitHTTP)
-			err = d.readObject(name+".xhttpSettings.extra", settings.Extra, inner)
+			_, err = d.readObject(name+".xhttpSettings.extra", settings.Extra, inner)
 			if err != nil {
 				return nil, err
 			}
@@ -413,9 +468,8 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 			settings = inner
 		}
 	}
-	if settings.Mode == "stream-one" {
-		return nil, E.New(name, ": the mode cannot be stream-one")
-	}
+	// The download leg sends GETs only: what says how uploads go is not its.
+	settings.UplinkHTTPMethod, settings.UplinkDataPlacement, settings.UplinkDataKey, settings.UplinkChunkSize = "", "", "", nil
 	if len(settings.DownloadSettings) > 0 && string(settings.DownloadSettings) != "null" {
 		d.warn(name, ": nested downloadSettings are ignored")
 	}
