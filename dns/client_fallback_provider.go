@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -148,7 +149,7 @@ func (p *providerSet) refresh(logger logger.ContextLogger, device string) []M.So
 	p.access.Lock()
 	defer p.access.Unlock()
 	p.reading = false
-	changed := p.readAt.IsZero() || device != p.device || !sameServers(servers, p.servers)
+	changed := p.readAt.IsZero() || device != p.device || !slices.Equal(servers, p.servers)
 	p.servers, p.device, p.readAt, p.readErr, p.stale = servers, device, time.Now(), err != nil, false
 	if changed {
 		p.best = M.Socksaddr{}
@@ -200,7 +201,7 @@ func (p *providerSet) names() string {
 func (p *providerSet) pick(servers []M.Socksaddr) (M.Socksaddr, bool) {
 	p.access.Lock()
 	defer p.access.Unlock()
-	if !p.best.IsValid() || p.uses >= providerRoundAfter || time.Since(p.roundAt) >= providerRoundEvery || !containsServer(servers, p.best) {
+	if !p.best.IsValid() || p.uses >= providerRoundAfter || time.Since(p.roundAt) >= providerRoundEvery || !slices.Contains(servers, p.best) {
 		return M.Socksaddr{}, false
 	}
 	p.uses++
@@ -408,27 +409,6 @@ func (s *fallbackServer) providersFor(servers []M.Socksaddr) []M.Socksaddr {
 		}
 	}
 	return others
-}
-
-func sameServers(a, b []M.Socksaddr) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func containsServer(servers []M.Socksaddr, server M.Socksaddr) bool {
-	for _, candidate := range servers {
-		if candidate == server {
-			return true
-		}
-	}
-	return false
 }
 
 func joinServers(servers []M.Socksaddr) string {
