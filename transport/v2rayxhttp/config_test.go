@@ -61,6 +61,13 @@ func TestXHTTPConfigErrors(t *testing.T) {
 			o.Download = &option.V2RayXHTTPDownloadOptions{ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}
 			o.Download.XPaddingBytes = xrange(0, 10)
 		},
+		"method with a space":   func(o *option.V2RayXHTTPOptions) { o.Mode, o.UplinkHTTPMethod = modePacketUp, "P OST" },
+		"method with a newline": func(o *option.V2RayXHTTPOptions) { o.UplinkHTTPMethod = "POST\r\nX: y" },
+		"method not ASCII":      func(o *option.V2RayXHTTPOptions) { o.UplinkHTTPMethod = "ПОСТ" },
+		"download method": func(o *option.V2RayXHTTPOptions) {
+			o.Download = &option.V2RayXHTTPDownloadOptions{ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 1}}
+			o.Download.UplinkHTTPMethod = "P OST"
+		},
 	}
 	for name, configure := range cases {
 		options := option.V2RayXHTTPOptions{}
@@ -76,6 +83,7 @@ func TestXHTTPConfigDefaults(t *testing.T) {
 		"zero post size is default": func(o *option.V2RayXHTTPOptions) { o.ScMaxEachPostBytes = xrange(0, 0) },
 		"negative interval":         func(o *option.V2RayXHTTPOptions) { o.ScMinPostsIntervalMs = xrange(-1, -1) },
 		"GET upload in packet-up":   func(o *option.V2RayXHTTPOptions) { o.Mode, o.UplinkHTTPMethod = modePacketUp, "GET" },
+		"method in lower case":      func(o *option.V2RayXHTTPOptions) { o.UplinkHTTPMethod = "put" },
 		"server-side settings": func(o *option.V2RayXHTTPOptions) {
 			o.NoSSEHeader, o.ScMaxBufferedPosts, o.ScStreamUpServerSecs, o.ServerMaxHeaderBytes = true, 30, xrange(20, 80), 8192
 		},

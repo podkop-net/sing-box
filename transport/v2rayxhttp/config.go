@@ -227,6 +227,12 @@ func newRequestConfig(options option.V2RayXHTTPBaseOptions, mode string) (*reque
 	if c.uplinkHTTPMethod == "" {
 		c.uplinkHTTPMethod = http.MethodPost
 	}
+	// A method is a token, as a header name is. One that is not is refused by
+	// the HTTP/1.1 and HTTP/3 clients at the first request and sent as it is
+	// by the HTTP/2 client.
+	if !httpguts.ValidHeaderFieldName(c.uplinkHTTPMethod) {
+		return nil, E.New("invalid uplink_http_method: ", options.UplinkHTTPMethod)
+	}
 	if c.uplinkHTTPMethod == http.MethodGet && mode != modePacketUp {
 		return nil, E.New("uplink_http_method can be GET only in packet-up mode")
 	}
