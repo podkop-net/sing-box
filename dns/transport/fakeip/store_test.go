@@ -1018,6 +1018,40 @@ func TestNewNamesWhileTheLoopCannotSave(t *testing.T) {
 	require.NoError(t, store.Close())
 }
 
+// Close stops the loop no later than it makes the store refuse saves: a save of the loop
+// that is refused finds the loop told to stop, and is not logged as a failure.
+func TestCloseStopsTheLoopBeforeSavesAreRefused(t *testing.T) {
+	t.Parallel()
+	for range 300 {
+		store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+		store.testStorage = newFakeStorage()
+		require.NoError(t, store.Start())
+		refusedWhileRunning := make(chan bool)
+		go func() {
+			// what a save of the loop sees, as often as the lock is free
+			for {
+				if !store.access.TryRLock() {
+					continue
+				}
+				closed := store.closed
+				stopped := false
+				select {
+				case <-store.done:
+					stopped = true
+				default:
+				}
+				store.access.RUnlock()
+				if closed {
+					refusedWhileRunning <- !stopped
+					return
+				}
+			}
+		}()
+		require.NoError(t, store.Close())
+		require.False(t, <-refusedWhileRunning, "the store refuses saves while the loop is not told to stop")
+	}
+}
+
 // A model of the clients: the address each one was given and holds. Whatever happens,
 // crashes included, such an address leads to the domain it was given for or to nothing,
 // and is not given to another domain, until the store removes the record by its rules.

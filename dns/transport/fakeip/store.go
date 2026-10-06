@@ -502,9 +502,13 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
+	if s.loopDone != nil {
+		// before closed can be seen: a save of the loop that is refused because of it
+		// finds the loop told to stop, and does not log the refusal as a failed save
+		close(s.done)
+	}
 	s.access.Unlock()
 	if s.loopDone != nil {
-		close(s.done)
 		<-s.loopDone
 	}
 	err := s.save(saveRequest{clean: true})
