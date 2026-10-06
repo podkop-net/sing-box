@@ -124,5 +124,9 @@ func checkDecoded(outbound *sharelink.Outbound) error {
 	if transport == nil || transport.Type != C.V2RayTransportTypeXHTTP {
 		return nil
 	}
-	return E.Cause(v2rayxhttp.CheckOptions(transport.XHTTPOptions), "xhttp")
+	err := v2rayxhttp.CheckOptions(transport.XHTTPOptions)
+	if err != nil {
+		return E.Cause(err, "xhttp")
+	}
+	return nil
 }
