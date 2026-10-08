@@ -608,6 +608,10 @@ match:
 			if routeOptions.TLSRecordFragment {
 				metadata.TLSRecordFragment = true
 			}
+			if routeOptions.TLSSpoof != "" {
+				metadata.TLSSpoof = routeOptions.TLSSpoof
+				metadata.TLSSpoofMethod = routeOptions.TLSSpoofMethod
+			}
 		}
 		switch action := currentRule.Action().(type) {
 		case *R.RuleActionSniff:

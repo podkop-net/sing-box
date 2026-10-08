@@ -85,6 +85,9 @@ func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if options.UTLS == nil || !options.UTLS.Enabled {
 		return nil, E.New("uTLS is required by reality client")
 	}
+	if options.Spoof != "" || options.SpoofMethod != "" {
+		return nil, E.New("spoof is unsupported in reality")
+	}
 
 	classicFingerprint, err := checkRealityFingerprint(options.UTLS.Fingerprint)
 	if err != nil {

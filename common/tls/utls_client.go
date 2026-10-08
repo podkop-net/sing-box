@@ -14,6 +14,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tlsfragment"
+	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -32,6 +33,8 @@ type UTLSClientConfig struct {
 	fragment              bool
 	fragmentFallbackDelay time.Duration
 	recordFragment        bool
+	spoof                 string
+	spoofMethod           tlsspoof.Method
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -61,6 +64,10 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if c.recordFragment {
 		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
 	}
+	conn, err := applyTLSSpoof(conn, c.spoof, c.spoofMethod)
+	if err != nil {
+		return nil, err
+	}
 	uConn, err := newUClient(conn, c.config.Clone(), c.id)
 	if err != nil {
 		return nil, err
@@ -74,7 +81,7 @@ func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []by
 
 func (c *UTLSClientConfig) Clone() Config {
 	return &UTLSClientConfig{
-		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment,
+		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment, c.spoof, c.spoofMethod,
 	}
 }
 
@@ -280,7 +287,11 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
-	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment}
+	spoof, spoofMethod, err := parseTLSSpoofOptions(serverName, options)
+	if err != nil {
+		return nil, err
+	}
+	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, spoof, spoofMethod}
 	if options.ECH != nil && options.ECH.Enabled {
 		if options.Reality != nil && options.Reality.Enabled {
 			return nil, E.New("Reality is conflict with ECH")

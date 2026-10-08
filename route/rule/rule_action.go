@@ -11,6 +11,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/sniff"
+	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
@@ -29,6 +30,10 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 	case "":
 		return nil, nil
 	case C.RuleActionTypeRoute:
+		spoof, spoofMethod, err := tlsspoof.ParseOptions(action.RouteOptions.TLSSpoof, action.RouteOptions.TLSSpoofMethod)
+		if err != nil {
+			return nil, err
+		}
 		return &RuleActionRoute{
 			Outbound: action.RouteOptions.Outbound,
 			RuleActionRouteOptions: RuleActionRouteOptions{
@@ -41,9 +46,15 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 				TLSFragment:               action.RouteOptions.TLSFragment,
 				TLSFragmentFallbackDelay:  time.Duration(action.RouteOptions.TLSFragmentFallbackDelay),
 				TLSRecordFragment:         action.RouteOptions.TLSRecordFragment,
+				TLSSpoof:                  spoof,
+				TLSSpoofMethod:            spoofMethod,
 			},
 		}, nil
 	case C.RuleActionTypeRouteOptions:
+		spoof, spoofMethod, err := tlsspoof.ParseOptions(action.RouteOptionsOptions.TLSSpoof, action.RouteOptionsOptions.TLSSpoofMethod)
+		if err != nil {
+			return nil, err
+		}
 		return &RuleActionRouteOptions{
 			OverrideAddress:           M.ParseSocksaddrHostPort(action.RouteOptionsOptions.OverrideAddress, 0),
 			OverridePort:              action.RouteOptionsOptions.OverridePort,
@@ -55,8 +66,14 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 			TLSFragment:               action.RouteOptionsOptions.TLSFragment,
 			TLSFragmentFallbackDelay:  time.Duration(action.RouteOptionsOptions.TLSFragmentFallbackDelay),
 			TLSRecordFragment:         action.RouteOptionsOptions.TLSRecordFragment,
+			TLSSpoof:                  spoof,
+			TLSSpoofMethod:            spoofMethod,
 		}, nil
 	case C.RuleActionTypeBypass:
+		spoof, spoofMethod, err := tlsspoof.ParseOptions(action.BypassOptions.TLSSpoof, action.BypassOptions.TLSSpoofMethod)
+		if err != nil {
+			return nil, err
+		}
 		return &RuleActionBypass{
 			Outbound: action.BypassOptions.Outbound,
 			RuleActionRouteOptions: RuleActionRouteOptions{
@@ -69,6 +86,8 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 				TLSFragment:               action.BypassOptions.TLSFragment,
 				TLSFragmentFallbackDelay:  time.Duration(action.BypassOptions.TLSFragmentFallbackDelay),
 				TLSRecordFragment:         action.BypassOptions.TLSRecordFragment,
+				TLSSpoof:                  spoof,
+				TLSSpoofMethod:            spoofMethod,
 			},
 		}, nil
 	case C.RuleActionTypeDirect:
@@ -205,6 +224,8 @@ type RuleActionRouteOptions struct {
 	TLSFragment               bool
 	TLSFragmentFallbackDelay  time.Duration
 	TLSRecordFragment         bool
+	TLSSpoof                  string
+	TLSSpoofMethod            tlsspoof.Method
 }
 
 func (r *RuleActionRouteOptions) Type() string {
@@ -252,6 +273,10 @@ func (r *RuleActionRouteOptions) Descriptions() []string {
 	}
 	if r.TLSRecordFragment {
 		descriptions = append(descriptions, "tls-record-fragment")
+	}
+	if r.TLSSpoof != "" {
+		descriptions = append(descriptions, F.ToString("tls-spoof=", r.TLSSpoof))
+		descriptions = append(descriptions, F.ToString("tls-spoof-method=", r.TLSSpoofMethod.String()))
 	}
 	return descriptions
 }
