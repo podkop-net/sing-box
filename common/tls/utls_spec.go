@@ -33,7 +33,18 @@ func newUClient(conn net.Conn, config *utls.Config, id utls.ClientHelloID) (*utl
 			return nil, err
 		}
 	default:
-		return utls.UClient(conn, config, id), nil
+		// By its specification, not by its ID. uTLS keeps the specification of a hello made
+		// by ID for the life of the connection, and with it the extension objects that
+		// releaseHandshakeState drops, the key shares among them; a custom specification
+		// it does not keep. The hello is the same: uTLS makes it from this very
+		// specification (TestNewUClientHelloUnchanged).
+		parrot, err := utls.UTLSIdToSpec(id)
+		if err != nil {
+			return utls.UClient(conn, config, id), nil
+		}
+		// as uTLS has it for a hello made by ID (the configuration is the caller's copy)
+		config.PreferSkipResumptionOnNilExtension = true
+		spec = &parrot
 	}
 	uConn := utls.UClient(conn, config, utls.HelloCustom)
 	err := uConn.ApplyPreset(spec)
