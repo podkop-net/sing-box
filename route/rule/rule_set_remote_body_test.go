@@ -3,6 +3,7 @@ package rule
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -10,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/common/interrupt"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/stretchr/testify/require"
 )
@@ -129,4 +132,29 @@ func TestRemoteRuleSetUpdateCancelledByShutdown(t *testing.T) {
 	require.False(t, set.updateOnce())
 	require.Zero(t, set.failures)
 	require.Zero(t, countPrefix(writer.take(), "ERROR"))
+}
+
+// The download is dialed as an external connection, so that a group switching members does
+// not close it together with its own connections.
+func TestRemoteRuleSetFetchIsExternalConnection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, testSourceSet)
+	}))
+	defer server.Close()
+	dialer := &recordingDialer{}
+	set := newTestRuleSet(server.URL)
+	set.dialer = dialer
+	set.options.Format = C.RuleSetFormatSource
+	require.NoError(t, set.fetch(context.Background(), nil))
+	require.True(t, dialer.external)
+}
+
+type recordingDialer struct {
+	testDialer
+	external bool
+}
+
+func (d *recordingDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	d.external = interrupt.IsExternalConnectionFromContext(ctx)
+	return d.testDialer.DialContext(ctx, network, destination)
 }

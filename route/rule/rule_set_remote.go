@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/srs"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -405,6 +406,9 @@ func describeRuleSetBody(response *http.Response, size int64, sample []byte) str
 
 func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPStartContext) error {
 	s.logger.Debug("updating rule-set ", s.options.Tag, " from URL: ", s.options.RemoteOptions.URL)
+	// a group that switches members closes the connections it does not know as routed
+	// ones: a list half downloaded through it would wait for the next update_interval
+	ctx = interrupt.ContextWithIsExternalConnection(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if startContext != nil {
