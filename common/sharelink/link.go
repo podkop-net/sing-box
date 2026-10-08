@@ -186,6 +186,10 @@ func (d *decoder) split(rest string) error {
 	// The same for a link after the last parameter: its user would end up in
 	// that parameter, and in an error message about it.
 	for key, value := range d.query {
+		if key == "ech" {
+			// a name and a resolver joined with "+", which form decoding reads as a space
+			continue
+		}
 		if strings.Contains(value, "://") && strings.ContainsAny(value, " \t\r\n") {
 			return E.New("the link parameter ", d.names[key], " contains a space and another link")
 		}

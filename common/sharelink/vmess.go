@@ -110,7 +110,9 @@ func (d *decoder) vmess() (any, error) {
 	case "grpc":
 		// the service name is in "path", the mode in "type"
 		d.query["servicename"] = d.query["path"]
-		d.query["mode"] = string(link.HeaderType)
+		if mode := strings.ToLower(string(link.HeaderType)); mode == "gun" || mode == "multi" {
+			d.query["mode"] = mode
+		}
 		delete(d.query, "path")
 	case "kcp", "mkcp":
 	case "quic":
@@ -129,7 +131,9 @@ func (d *decoder) vmess() (any, error) {
 		d.names[key] = key
 	}
 	alterID, _ := strconv.Atoi(string(link.AlterID))
-	return d.vmessOptions(string(link.ID), option.ServerOptions{Server: string(link.Address), ServerPort: uint16(port)}, alterID)
+	// some generators write an IPv6 address in brackets here too
+	address := strings.TrimSuffix(strings.TrimPrefix(string(link.Address), "["), "]")
+	return d.vmessOptions(string(link.ID), option.ServerOptions{Server: address, ServerPort: uint16(port)}, alterID)
 }
 
 func (d *decoder) vmessURL() (any, error) {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
@@ -86,7 +87,7 @@ func hopPorts(body string) (string, string) {
 // hysteria2 reads a Hysteria 2 link, as its project defines it:
 // "hysteria2://[auth@]host[:ports]/?parameters#name", also as "hy2://".
 func (d *decoder) hysteria2() (any, error) {
-	d.reads("obfs", "obfs-password", "mport", "up", "down", "upmbps", "downmbps")
+	d.reads("obfs", "obfs-password", "mport", "up", "down", "upmbps", "downmbps", "fm")
 	body, ports := hopPorts(d.body)
 	user, _, server, _, err := parseAuthority(body, 443)
 	if err != nil {
@@ -111,8 +112,75 @@ func (d *decoder) hysteria2() (any, error) {
 	if obfs := strings.ToLower(d.query["obfs"]); obfs != "" && obfs != "none" && obfs != "plain" {
 		options.Obfs = &option.Hysteria2Obfs{Type: obfs, Password: d.query["obfs-password"]}
 	}
+	err = d.hysteria2Mask(&options)
+	if err != nil {
+		return nil, err
+	}
 	options.TLS = d.tlsAlways()
 	return options, nil
+}
+
+// hysteria2Mask reads "fm", the finalmask of Xray, in a Hysteria 2 link: Remnawave writes
+// the obfuscation, the port hopping and the speeds of its Hysteria inbounds there.
+func (d *decoder) hysteria2Mask(options *option.Hysteria2OutboundOptions) error {
+	content := strings.TrimSpace(d.query["fm"])
+	if content == "" {
+		return nil
+	}
+	var mask struct {
+		UDP []struct {
+			Type     string `json:"type"`
+			Settings struct {
+				Password string `json:"password"`
+			} `json:"settings"`
+		} `json:"udp"`
+		QUIC struct {
+			BrutalUp   vmessText `json:"brutalUp"`
+			BrutalDown vmessText `json:"brutalDown"`
+			UDPHop     struct {
+				Ports    vmessText `json:"ports"`
+				Interval vmessText `json:"interval"`
+			} `json:"udpHop"`
+		} `json:"quicParams"`
+	}
+	err := json.Unmarshal([]byte(content), &mask)
+	if err != nil {
+		d.warn("fm (finalmask) cannot be read and is ignored")
+		return nil
+	}
+	for _, entry := range mask.UDP {
+		switch strings.ToLower(entry.Type) {
+		case "salamander":
+			if options.Obfs == nil {
+				options.Obfs = &option.Hysteria2Obfs{Type: "salamander", Password: entry.Settings.Password}
+			}
+		case "noise":
+		default:
+			return refuse("finalmask", "fm (finalmask) asks for the mask", shown(entry.Type), ", which is not supported: the server expects it")
+		}
+	}
+	if ports := string(mask.QUIC.UDPHop.Ports); ports != "" && len(options.ServerPorts) == 0 {
+		ranges, err := portRanges(ports)
+		if err != nil {
+			return err
+		}
+		options.ServerPorts = badoption.Listable[string](ranges)
+		// seconds; a range of them is how often Xray hops, between the two
+		interval, _, _ := strings.Cut(string(mask.QUIC.UDPHop.Interval), "-")
+		if seconds, err := strconv.Atoi(strings.TrimSpace(interval)); err == nil && seconds > 0 {
+			err = options.HopInterval.UnmarshalJSON([]byte(strconv.Quote(strconv.Itoa(seconds) + "s")))
+			if err != nil {
+				return E.New("invalid hop interval in fm")
+			}
+		}
+	}
+	if options.UpMbps == 0 {
+		options.UpMbps = megabits(string(mask.QUIC.BrutalUp))
+	}
+	if options.DownMbps == 0 {
+		options.DownMbps = megabits(string(mask.QUIC.BrutalDown))
+	}
+	return nil
 }
 
 // hysteria reads a link of the first Hysteria:

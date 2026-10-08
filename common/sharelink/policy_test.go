@@ -186,6 +186,37 @@ func TestLeniencies(t *testing.T) {
 			"ech":{"enabled":true,"query_server_name":"ech.example.org"}}}`,
 			[]string{"the resolver named in ech is not used"},
 		},
+		"ECH from DNS, with the plus of the link read as a space": {
+			policyBase + "security=tls&ech=ech.example.org+https%3A%2F%2F1.1.1.1%2Fdns-query",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"},
+			"ech":{"enabled":true,"query_server_name":"ech.example.org"}}}`,
+			[]string{"the resolver named in ech is not used"},
+		},
+		"the parameters of TLS without TLS, the settings of the client of Xray": {
+			policyBase + "security=none&sni=s.example.org&fp=chrome&alpn=h2&allowInsecure=1&heartbeatPeriod=30&fragment=100-200%2C10-20%2Ctlshello&noise=rand",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `"}`,
+			[]string{"fragment is a setting of the client of Xray and is not applied", "noise is a setting of the client of Xray and is not applied"},
+		},
+		"the padding of 3x-ui outside of extra": {
+			policyBase + "type=xhttp&x_padding_bytes=200-300",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"xhttp","x_padding_bytes":"200-300"}}`,
+			nil,
+		},
+		"the HTTP header of TCP with a list of paths": {
+			policyBase + "type=tcp&headerType=http&host=a.example.org&path=%2Fa%2C%2Fb",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"http","host":"a.example.org","path":"/a"}}`,
+			nil,
+		},
+		"a gRPC authority that is the server name of TLS": {
+			policyBase + "security=tls&sni=s.example.org&type=grpc&serviceName=svc&authority=S.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"grpc","service_name":"svc"}}`,
+			nil,
+		},
+		"a gRPC authority of its own": {
+			policyBase + "security=tls&sni=s.example.org&type=grpc&serviceName=svc&authority=cdn.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"grpc","service_name":"svc"}}`,
+			[]string{"the gRPC authority is not supported: the server name of TLS is sent instead"},
+		},
 		"no SNI and a certificate to trust": {
 			policyBase + "security=tls&disable_sni=1&cert=-----BEGIN%20CERTIFICATE-----%0AMIIB%0A-----END%20CERTIFICATE-----",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"disable_sni":true,

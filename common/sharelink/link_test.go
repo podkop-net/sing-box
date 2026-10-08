@@ -334,7 +334,8 @@ func TestFoundInTheWild(t *testing.T) {
 	}
 
 	_, warnings := decodeJSON(t, base+"type=xhttp&mux=1&pinSHA256=x&spx=%2F&extra="+url.QueryEscape(`{"xmux":{"cMaxLifetimeMs":5,"maxConnections":1}}`))
-	require.Equal(t, []string{"extra.xmux: cMaxLifetimeMs is not supported and is ignored", "mux is not supported and is ignored", "pinSHA256 is not supported and is ignored"}, warnings)
+	// pinSHA256 belongs to TLS, which this link does not have: nothing to warn of
+	require.Equal(t, []string{"extra.xmux: cMaxLifetimeMs is not supported and is ignored", "mux is not supported and is ignored"}, warnings)
 
 	for name, link := range map[string]string{
 		"flat range":      base + "type=xhttp&xPaddingBytes=a-b",

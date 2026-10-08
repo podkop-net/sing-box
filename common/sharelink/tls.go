@@ -101,7 +101,8 @@ func (d *decoder) tlsCommon(tlsOptions *option.OutboundTLSOptions) {
 // ech reads the "ech" of a link: the ECH configuration list in base64 or, as Xray takes
 // it, where to ask for it: a resolver, or a name and a resolver joined with "+".
 func (d *decoder) ech() *option.OutboundECHOptions {
-	value := strings.TrimSpace(d.query["ech"])
+	// form decoding has made a space of every "+"
+	value := strings.ReplaceAll(strings.TrimSpace(d.query["ech"]), " ", "+")
 	if value == "" {
 		return nil
 	}
@@ -113,8 +114,6 @@ func (d *decoder) ech() *option.OutboundECHOptions {
 		d.warn("the resolver named in ech is not used: the ECH configuration is asked from the DNS of sing-box")
 		return echOptions
 	}
-	// form decoding has made a space of every "+"
-	value = strings.ReplaceAll(value, " ", "+")
 	var list []byte
 	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 		decoded, err := encoding.DecodeString(value)
@@ -140,7 +139,10 @@ func (d *decoder) ech() *option.OutboundECHOptions {
 // security reads the TLS of a link of the VLESS family (the proposal of Xray-core
 // discussion #716): "security" chooses none, TLS or REALITY.
 func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, error) {
-	d.reads("security", "fp", "pbk", "sid", "pqv", "spx", "spiderx")
+	// also the ones a link without TLS carries along: the generators write them anyway
+	d.reads("security", "fp", "pbk", "sid", "pqv", "spx", "spiderx",
+		"sni", "servername", "peer", "allowinsecure", "allow_insecure", "insecure", "skip-cert-verify",
+		"alpn", "disable_sni", "nosni", "cert", "ech", "pcs", "pinsha256", "vcn", "cs")
 	security := strings.ToLower(d.query["security"])
 	if security == "" {
 		security = defaultSecurity

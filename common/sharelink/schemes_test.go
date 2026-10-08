@@ -86,6 +86,19 @@ func TestSchemes(t *testing.T) {
 			"hysteria2://p@[2001:db8::1]:443?mport=20000-30000",
 			`{"type":"hysteria2","server":"2001:db8::1","server_port":443,"server_ports":"20000:30000","password":"p","tls":{"enabled":true}}`, nil,
 		},
+		"hysteria2 of Remnawave: obfuscation, port hopping and speeds in fm": {
+			"hysteria2://p@example.com:443/?sni=s.example.com&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"obfs pass"}},{"type":"noise"}],"quicParams":{"brutalUp":"50 mbps","brutalDown":200,"udpHop":{"ports":"20000-30000,40000","interval":"10-30"}}}`),
+			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":["20000:30000","40000:40000"],"hop_interval":"10s","up_mbps":50,"down_mbps":200,
+			"obfs":{"type":"salamander","password":"obfs pass"},"password":"p","tls":{"enabled":true,"server_name":"s.example.com"}}`, nil,
+		},
+		"hysteria2 with fm that says what the link says already": {
+			"hysteria2://p@example.com:443/?obfs=salamander&obfs-password=link&mport=5000-6000&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"mask"}}],"quicParams":{"udpHop":{"ports":"1-2"}}}`),
+			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":"5000:6000","obfs":{"type":"salamander","password":"link"},"password":"p","tls":{"enabled":true}}`, nil,
+		},
+		"vmess of Marzban: gRPC with type none, an IPv6 address in brackets": {
+			"vmess://" + b64(`{"add": "[2001:db8::10]", "aid": "0", "host": "", "id": "`+testUUID+`", "net": "grpc", "path": "svc", "port": 443, "ps": "m", "scy": "auto", "tls": "tls", "type": "none", "v": "2"}`),
+			`{"type":"vmess","tag":"m","server":"2001:db8::10","server_port":443,"uuid":"` + testUUID + `","security":"auto","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"grpc","service_name":"svc"}}`, nil,
+		},
 		"tuic": {
 			"tuic://" + testUUID + ":pass%3Aword@example.org:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=s.example.org&allow_insecure=1&disable_sni=1&reduce_rtt=1&heartbeat_interval=10#t",
 			`{"type":"tuic","tag":"t","server":"example.org","server_port":443,"uuid":"` + testUUID + `","password":"pass:word","congestion_control":"bbr","udp_relay_mode":"native",
@@ -165,6 +178,7 @@ func TestSchemeRefusals(t *testing.T) {
 		"tuic://token@example.org:443":              "tuic-v4",
 		"vmess://" + b64(`{"add":"h","port":1,"id":"`+testUUID+`","net":"kcp","type":"none","path":"seed"}`):        "kcp",
 		"vmess://" + b64(`{"add":"h","port":1,"id":"`+testUUID+`","net":"quic","host":"aes-128-gcm","path":"key"}`): "quic-security",
+		"hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"xdns"}]}`):                                 "finalmask",
 	} {
 		require.Equal(t, id, refusalID(t, link), link)
 	}

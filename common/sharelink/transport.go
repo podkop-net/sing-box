@@ -21,6 +21,18 @@ var knownKeys = make(map[string]bool)
 // server expects it.
 var localMasks = map[string]bool{"fragment": true, "noise": true}
 
+// clientSide warns of the settings of Xray's client that a panel writes into a link: how
+// it fragments and pads its own packets. The server is reached without them.
+func (d *decoder) clientSide() {
+	d.reads("fragment", "noise", "noises")
+	if d.query["fragment"] != "" {
+		d.warn("fragment is a setting of the client of Xray and is not applied (sb.tls.fragment=1 turns on the fragmenting of sing-box)")
+	}
+	if d.first("noise", "noises") != "" {
+		d.warn("noise is a setting of the client of Xray and is not applied")
+	}
+}
+
 // finalMask reads "fm", the finalmask object of Xray.
 func (d *decoder) finalMask() error {
 	d.reads("fm")
@@ -53,8 +65,11 @@ func (d *decoder) finalMask() error {
 // transport reads the transport of a link of the VLESS family. tls tells whether the
 // link has TLS, and serverName the name it is asked by.
 func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2RayTransportOptions, error) {
-	d.reads("type", "host", "path", "mode", "xhttpmode", "extra", "headertype", "servicename", "authority", "ed", "eh", "method",
-		"seed", "mtu", "tti", "quicsecurity", "key")
+	d.reads("type", "host", "path", "mode", "xhttpmode", "extra", "x_padding_bytes", "headertype", "servicename", "authority",
+		"ed", "eh", "method", "seed", "mtu", "tti", "quicsecurity", "key",
+		// how often the client of Xray pings over WebSocket: its own business
+		"heartbeatperiod")
+	d.clientSide()
 	network := strings.ToLower(d.query["type"])
 	if tlsOptions != nil && tlsOptions.Reality != nil {
 		switch network {
@@ -78,9 +93,14 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 			if tlsOptions != nil {
 				return nil, refuse("tcp-http-header-tls", "the HTTP header of the TCP transport (headerType=http) is not supported together with TLS")
 			}
+			// Xray takes a list of paths and asks for one of them at random
+			path := d.query["path"]
+			if paths := splitList(path); len(paths) > 1 {
+				path = paths[0]
+			}
 			return &option.V2RayTransportOptions{
 				Type:        C.V2RayTransportTypeHTTP,
-				HTTPOptions: option.V2RayHTTPOptions{Host: splitList(d.query["host"]), Path: d.query["path"]},
+				HTTPOptions: option.V2RayHTTPOptions{Host: splitList(d.query["host"]), Path: path},
 			}, nil
 		default:
 			return nil, refuse("tcp-header", "unsupported header type of the TCP transport", shown(headerType))
@@ -129,8 +149,15 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 			// the server answers both kinds of stream under the usual names
 			d.warn("the gRPC mode multi is not supported, gun is used")
 		}
-		if d.query["authority"] != "" {
-			d.warn("the gRPC authority is not supported and is ignored")
+		// sing-box sends the server name of TLS, or the address of the server, there
+		if authority := d.query["authority"]; authority != "" {
+			sent := ""
+			if tlsOptions != nil {
+				sent = tlsOptions.ServerName
+			}
+			if !strings.EqualFold(authority, sent) {
+				d.warn("the gRPC authority is not supported: the server name of TLS is sent instead, and a reverse proxy that chooses the server by the authority may not find it")
+			}
 		}
 		return &option.V2RayTransportOptions{
 			Type:        C.V2RayTransportTypeGRPC,
