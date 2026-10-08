@@ -1,0 +1,260 @@
+//go:build with_utls
+
+package tls
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+
+	utls "github.com/metacubex/utls"
+	"github.com/stretchr/testify/require"
+)
+
+// dropArriving adds an nftables rule that drops the packets arriving for port which match.
+// They are dropped on the way in, not on the way out: a packet refused on the way out was
+// never sent, as the kernel sees it, and waits in the send queue instead of going
+// unacknowledged, which is not what a middlebox on the path does. The tests that need the
+// rule run as root with nft at hand, in a network namespace of their own (a container).
+func dropArriving(t *testing.T, port int, match string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("needs root and nft")
+	}
+	table := fmt.Sprintf("hellowatch%d", port)
+	script := fmt.Sprintf("add table inet %s\nadd chain inet %s input { type filter hook input priority 0; }\nadd rule inet %s input tcp dport %d %s counter drop\n", table, table, table, port, match)
+	command := exec.Command("nft", "-f", "-")
+	command.Stdin = strings.NewReader(script)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Skip("nft: ", err, ": ", string(output))
+	}
+	t.Cleanup(func() {
+		exec.Command("nft", "delete", "table", "inet", table).Run()
+	})
+}
+
+func listenLocal(t *testing.T, handle func(conn net.Conn)) *net.TCPAddr {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go handle(conn)
+		}
+	}()
+	return listener.Addr().(*net.TCPAddr)
+}
+
+// A connection whose first write is never acknowledged is closed by the watch after two
+// retransmissions; one whose write arrives is left alone, and so is one nothing has been
+// written to yet.
+func TestIntegrationHelloWatch(t *testing.T) {
+	address := listenLocal(t, func(conn net.Conn) {
+		io.Copy(io.Discard, conn)
+		conn.Close()
+	})
+
+	delivered, err := net.Dial("tcp4", address.String())
+	require.NoError(t, err)
+	defer delivered.Close()
+	watch := watchClientHello(delivered)
+	require.NotNil(t, watch)
+	time.Sleep(4 * helloWatchInterval)
+	select {
+	case <-watch.finished:
+		t.Fatal("the watch ended before anything was written")
+	default:
+	}
+	_, err = delivered.Write(make([]byte, 600))
+	require.NoError(t, err)
+	select {
+	case <-watch.finished:
+	case <-time.After(time.Second):
+		t.Fatal("the watch goes on after the write was acknowledged")
+	}
+	require.False(t, watch.stop())
+	_, err = delivered.Write(make([]byte, 600))
+	require.NoError(t, err, "the connection stays open")
+
+	dropArriving(t, address.Port, "meta length > 100")
+	dropped, err := net.Dial("tcp4", address.String())
+	require.NoError(t, err)
+	defer dropped.Close()
+	watch = watchClientHello(dropped)
+	require.NotNil(t, watch)
+	start := time.Now()
+	_, err = dropped.Write(make([]byte, 600))
+	require.NoError(t, err)
+	select {
+	case <-watch.finished:
+	case <-time.After(helloWatchLimit):
+		t.Fatal("the watch did not notice the unacknowledged write")
+	}
+	require.True(t, watch.stop())
+	t.Logf("an unacknowledged write noticed after %d ms", time.Since(start).Milliseconds())
+	_, err = dropped.Write([]byte("more"))
+	require.Error(t, err, "the connection is closed")
+}
+
+type wrappedConn struct {
+	net.Conn
+}
+
+func (c *wrappedConn) Upstream() any {
+	return c.Conn
+}
+
+type wrappingDialer struct{}
+
+func (wrappingDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	conn, err := N.SystemDialer.DialContext(ctx, network, destination)
+	if err != nil {
+		return nil, err
+	}
+	return &wrappedConn{&wrappedConn{conn}}, nil
+}
+
+func (wrappingDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	return nil, os.ErrInvalid
+}
+
+// otherAddrConn is a connection carried by another one: its addresses are not the socket's.
+type otherAddrConn struct {
+	net.Conn
+}
+
+func (c *otherAddrConn) Upstream() any {
+	return c.Conn
+}
+
+func (c *otherAddrConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 443}
+}
+
+// The watch finds the socket under the wrappers of the dialer, and leaves alone a
+// connection that is not the socket to the server.
+func TestHelloWatchFindsTheSocket(t *testing.T) {
+	address := listenLocal(t, func(conn net.Conn) {
+		io.Copy(io.Discard, conn)
+		conn.Close()
+	})
+	conn, err := net.Dial("tcp4", address.String())
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NotNil(t, kernelTCPConn(conn))
+	require.NotNil(t, kernelTCPConn(&wrappedConn{&wrappedConn{conn}}))
+	require.Nil(t, kernelTCPConn(&otherAddrConn{conn}))
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	require.Nil(t, kernelTCPConn(client))
+	require.Nil(t, watchClientHello(client))
+	watch := watchClientHello(&wrappedConn{conn})
+	require.NotNil(t, watch)
+	require.False(t, watch.stop())
+}
+
+func cipherSuitesLength(t *testing.T, fingerprint string) uint16 {
+	t.Helper()
+	id, err := uTLSClientHelloID(fingerprint)
+	require.NoError(t, err)
+	uConn, err := newUClient(nil, &utls.Config{ServerName: "example.org"}, id)
+	require.NoError(t, err)
+	require.NoError(t, uConn.BuildHandshakeState())
+	// the handshake header, the version, the random, the session ID with its length
+	return binary.BigEndian.Uint16(uConn.HandshakeState.Hello.Raw[4+2+32+1+32:])
+}
+
+// A path that drops the ClientHello of the configured fingerprint and passes the others:
+// the dial gets through with the next fingerprint of the list after one lost ClientHello,
+// and the dials after it begin with that one.
+func TestIntegrationFingerprintFallback(t *testing.T) {
+	setFallbackOrder(t, "safari,firefox")
+	chromeSuites := cipherSuitesLength(t, "chrome")
+	if chromeSuites == cipherSuitesLength(t, "safari") {
+		t.Skip("the ClientHello of chrome and safari cannot be told apart by the length of the cipher suites")
+	}
+	certificate := testCertificate(t)
+	address := listenLocal(t, func(conn net.Conn) {
+		defer conn.Close()
+		server := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{certificate}})
+		if server.Handshake() != nil {
+			return
+		}
+		io.Copy(server, server)
+	})
+	// the length of the cipher suites follows the record header (5 bytes) and what
+	// cipherSuitesLength skips, in the payload of the segment
+	dropArriving(t, address.Port, fmt.Sprintf("@ih,%d,16 == %d", (5+4+2+32+1+32)*8, chromeSuites))
+
+	logger, warnings := newWarnLogger(t)
+	options := option.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: "example.org",
+		Insecure:   true,
+		UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"},
+	}
+	config, err := NewClient(context.Background(), logger, "127.0.0.1", options)
+	require.NoError(t, err)
+	// the dialer of an outbound wraps its connections, as the tracking of connections does
+	dialer := NewDialer(wrappingDialer{}, config)
+	destination := M.SocksaddrFromNet(address)
+
+	echo := func(conn net.Conn) {
+		_, err := conn.Write([]byte("ping"))
+		require.NoError(t, err)
+		answer := make([]byte, 4)
+		_, err = io.ReadFull(conn, answer)
+		require.NoError(t, err)
+		require.Equal(t, "ping", string(answer))
+	}
+
+	start := time.Now()
+	conn, err := dialer.DialTLSContext(context.Background(), destination)
+	require.NoError(t, err)
+	t.Logf("the first dial took %d ms", time.Since(start).Milliseconds())
+	echo(conn)
+	conn.Close()
+	lines := warnings.take()
+	require.Len(t, lines, 2)
+	require.Contains(t, lines[0], "unanswered with fingerprint chrome, retrying with safari")
+	require.Contains(t, lines[1], "fingerprint safari is answered where chrome was not")
+
+	start = time.Now()
+	conn, err = dialer.DialTLSContext(context.Background(), destination)
+	require.NoError(t, err)
+	elapsed := time.Since(start)
+	t.Logf("the second dial took %d ms", elapsed.Milliseconds())
+	require.Less(t, elapsed, 150*time.Millisecond, "the second dial begins with the fingerprint that works")
+	echo(conn)
+	conn.Close()
+	require.Empty(t, warnings.take())
+
+	// without the list the same dial waits for its handshake timeout
+	setFallbackOrder(t, "")
+	config, err = NewClient(context.Background(), logger, "127.0.0.1", options)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = NewDialer(N.SystemDialer, config).DialTLSContext(ctx, destination)
+	require.Error(t, err)
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "the control: the ClientHello of chrome is dropped, the handshake hangs")
+}

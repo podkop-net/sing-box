@@ -35,6 +35,8 @@ type UTLSClientConfig struct {
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+	// the fingerprint fallback, shared with the clones; nil when off
+	fallback *utlsFallback
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -81,7 +83,7 @@ func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []by
 
 func (c *UTLSClientConfig) Clone() Config {
 	return &UTLSClientConfig{
-		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment, c.spoof, c.spoofMethod,
+		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment, c.spoof, c.spoofMethod, c.fallback,
 	}
 }
 
@@ -291,7 +293,8 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
-	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, spoof, spoofMethod}
+	fallback := newUTLSFallback(logger, options.UTLS.Fingerprint, id, options.Reality != nil && options.Reality.Enabled, spoof != "")
+	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, spoof, spoofMethod, fallback}
 	if options.ECH != nil && options.ECH.Enabled {
 		if options.Reality != nil && options.Reality.Enabled {
 			return nil, E.New("Reality is conflict with ECH")

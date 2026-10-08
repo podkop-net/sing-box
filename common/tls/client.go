@@ -166,19 +166,43 @@ func (d *defaultDialer) DialTLSContext(ctx context.Context, destination M.Socksa
 }
 
 func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr, echRetry bool) (Conn, error) {
-	conn, err := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
-	if err != nil {
-		return nil, err
+	var fallback fingerprintDial
+	if fallbackConfig, hasFallback := d.config.(fingerprintFallbackConfig); hasFallback {
+		fallback = fallbackConfig.fingerprintDial()
 	}
-	// The handshake is bounded as in ClientHandshake above (and by handshake_timeout in
-	// 1.14, same default): a server that accepts the connection and never answers the
-	// ClientHello kept a dial waiting for as long as its caller did, which for a proxied
-	// connection has no deadline (podkop-engine).
-	handshakeCtx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
-	tlsConn, err := aTLS.ClientHandshake(handshakeCtx, conn, d.config)
-	cancel()
-	if err != nil {
+	for {
+		conn, err := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
+		if err != nil {
+			return nil, err
+		}
+		config := d.config
+		var watch *helloWatch
+		if fallback != nil {
+			config = fallback.attempt(conn)
+			watch = watchClientHello(conn)
+		}
+		// The handshake is bounded as in ClientHandshake above (and by handshake_timeout in
+		// 1.14, same default): a server that accepts the connection and never answers the
+		// ClientHello kept a dial waiting for as long as its caller did, which for a proxied
+		// connection has no deadline (podkop-engine).
+		handshakeCtx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+		tlsConn, err := aTLS.ClientHandshake(handshakeCtx, conn, config)
+		cancel()
+		unanswered := watch.stop()
+		if err == nil {
+			if fallback != nil {
+				fallback.answered()
+			}
+			return withReadWait(tlsConn), nil
+		}
 		conn.Close()
+		if unanswered {
+			again, fallbackErr := fallback.unanswered(destination)
+			if again {
+				continue
+			}
+			return nil, fallbackErr
+		}
 		var echErr *tls.ECHRejectionError
 		if echRetry && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			if echConfig, isECH := d.config.(ECHCapableConfig); isECH {
@@ -188,7 +212,6 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 		}
 		return nil, err
 	}
-	return withReadWait(tlsConn), nil
 }
 
 func (d *defaultDialer) Upstream() any {
