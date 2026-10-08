@@ -140,3 +140,44 @@ func TestDecodeLinkEveryScheme(t *testing.T) {
 		require.NotContains(t, errorOutput.String(), uuid, scheme)
 	}
 }
+
+// An option named by its path goes through the same building: what the outbound takes is
+// printed, what it refuses is the error of the command.
+func TestDecodeLinkOptionPaths(t *testing.T) {
+	const link = "vless://6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11@example.org:443?security=tls&sni=example.org&type=ws"
+	run := func(parameters string) (int, string, string) {
+		var output, errorOutput bytes.Buffer
+		status := decodeLink([]string{link + parameters}, strings.NewReader(""), &output, &errorOutput)
+		return status, output.String(), errorOutput.String()
+	}
+	status, output, errorOutput := run("&sb.multiplex.enabled=1&sb.multiplex.protocol=h2mux&sb.tls.fragment=1&sb.tls.spoof=packagist.org&sb.tls.spoof_method=wrong-md5")
+	require.Zero(t, status, errorOutput)
+	require.Empty(t, errorOutput)
+	var outbound struct {
+		TLS struct {
+			Fragment bool   `json:"fragment"`
+			Spoof    string `json:"spoof"`
+		} `json:"tls"`
+		Multiplex struct {
+			Protocol string `json:"protocol"`
+		} `json:"multiplex"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(output), &outbound))
+	require.True(t, outbound.TLS.Fragment)
+	require.Equal(t, "packagist.org", outbound.TLS.Spoof)
+	require.Equal(t, "h2mux", outbound.Multiplex.Protocol)
+	for parameters, say := range map[string]string{
+		"&sb.tls.min_version=9.9":                                   "error: ",
+		"&sb.tls.spoof=example.org":                                 "error: `spoof` must differ from `server_name`",
+		"&sb.multiplex.enabled=1&sb.multiplex.protocol=carrier":     "error: ",
+		"&sb.detour=direct":                                         "error: the option detour is not for a link to set (another object)",
+		"&sb.tls.certificate_path=%2Fetc":                           "error: the option tls.certificate_path is not for a link to set (a local file)",
+		"&sb.no_such=1":                                             "error: this sing-box has no option no_such",
+		"&sb.multiplex.enabled=1&sb.multiplex.max_connections=many": "error: the value of the link parameter sb.multiplex.max_connections does not fit the option",
+	} {
+		status, output, errorOutput := run(parameters)
+		require.Equal(t, decodeLinkExitBadLink, status, parameters)
+		require.Empty(t, output, parameters)
+		require.True(t, strings.HasPrefix(errorOutput, say), "%s: %q", parameters, errorOutput)
+	}
+}

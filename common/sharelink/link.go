@@ -142,6 +142,10 @@ func Decode(link string) (*Outbound, []string, error) {
 	if err != nil {
 		return nil, nil, E.Cause(err, "write the options")
 	}
+	err = d.fallback(linkScheme.outbound, options)
+	if err != nil {
+		return nil, nil, err
+	}
 	var unknown []string
 	for key := range d.query {
 		if !knownKeys[key] && !d.known[key] && key != "" {

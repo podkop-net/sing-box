@@ -33,4 +33,7 @@ var refusals = map[string]string{
 	"hysteria-protocol":     "the faketcp and wechat-video modes of Hysteria are not in sing-box",
 	"hysteria-obfs":         "the first Hysteria has one obfuscation, xplus",
 	"tuic-v4":               "TUIC v4 authenticates by a token; sing-box speaks v5, with a UUID and a password",
+	"sb-denied":             "a link may tune how its own server is reached; other objects of the configuration, the local route, local files and features of the system are not its to set",
+	"sb-unknown":            "the option named after sb. is not one this sing-box has for the outbound",
+	"sb-value":              "the value does not read as the type the option has",
 }
