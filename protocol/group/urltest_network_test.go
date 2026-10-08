@@ -2,7 +2,9 @@ package group
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -160,4 +162,27 @@ func TestURLTestFrozenAsOfDownloadStart(t *testing.T) {
 
 	group.performUpdateCheck()
 	require.Equal(t, int32(2), frozen.gets.Load(), "the result that came during the download test did not count as newer")
+}
+
+// A dial that fails through the group returns one error that names the member, and the
+// error still is what it was for the code above the group.
+func TestURLTestDialErrorNamesMember(t *testing.T) {
+	link, _ := testURL(t, 0)
+	blackholed := newTestMember(C.TypeVLESS, "blackholed", func(context.Context, string, M.Socksaddr) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	})
+	spare := newTestMember(C.TypeVLESS, "spare", dialWorking)
+	urlTest, _ := newTestURLTest(t, link, blackholed, spare)
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "outbound/vless[blackholed]: ")
+	var netErr net.Error
+	require.True(t, errors.As(err, &netErr) && netErr.Timeout())
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+
+	_, err = urlTest.ListenPacket(context.Background(), M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "outbound/vless[")
+	require.ErrorIs(t, err, os.ErrInvalid)
 }

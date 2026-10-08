@@ -208,9 +208,15 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 		}
 		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
-	s.logger.ErrorContext(ctx, err)
 	s.group.memberFailed(ctx, outbound, N.NetworkName(network), err, start)
-	return nil, err
+	return nil, memberError(outbound, err)
+}
+
+// memberError names the member a dial through the group failed on. The caller logs the
+// error once, with the tag of the outbound it dialed (the group, or a selector above it):
+// without the member in it nothing in the log says which server failed.
+func memberError(member adapter.Outbound, err error) error {
+	return E.Cause(err, "outbound/", member.Type(), "[", member.Tag(), "]")
 }
 
 func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -226,9 +232,8 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	if err == nil {
 		return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
-	s.logger.ErrorContext(ctx, err)
 	s.group.memberFailed(ctx, outbound, N.NetworkUDP, err, time.Time{})
-	return nil, err
+	return nil, memberError(outbound, err)
 }
 
 func (s *URLTest) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
