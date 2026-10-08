@@ -1,6 +1,7 @@
 package tlsspoof
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 
@@ -17,10 +18,13 @@ const (
 	// include/net/tcp.h; not exported by golang.org/x/sys/unix.
 	tcpRecvQueue = 1
 	tcpSendQueue = 2
+	// TCPI_OPT_TIMESTAMPS of include/uapi/linux/tcp.h, a bit of tcp_info.tcpi_options
+	tcpInfoOptionTimestamps = 1
 )
 
 type linuxSpoofer struct {
 	method      Method
+	tcpConn     *net.TCPConn
 	src         netip.AddrPort
 	dst         netip.AddrPort
 	rawFD       int
@@ -30,28 +34,84 @@ type linuxSpoofer struct {
 	timestamp   uint32
 }
 
+// The raw socket is opened when the forged ClientHello is sent (Inject), not here. A
+// handshake that fails before its first write is ended by closing the underlying
+// connection, which does not reach the spoofer: a socket opened here would stay open
+// for the life of the process.
 func newRawSpoofer(conn net.Conn, method Method) (rawSpoofer, error) {
 	tcpConn, src, dst, err := tcpEndpoints(conn)
 	if err != nil {
 		return nil, err
 	}
-	fd, sockaddr, err := openLinuxRawSocket(dst)
+	return &linuxSpoofer{
+		method:  method,
+		tcpConn: tcpConn,
+		src:     src,
+		dst:     dst,
+		rawFD:   -1,
+	}, nil
+}
+
+func (s *linuxSpoofer) open() error {
+	fd, sockaddr, err := openLinuxRawSocket(s.dst)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			return E.Cause(err, "CAP_NET_RAW and CAP_NET_ADMIN are needed (sing-box run as root)")
+		}
+		return err
 	}
-	spoofer := &linuxSpoofer{
-		method:      method,
-		src:         src,
-		dst:         dst,
-		rawFD:       fd,
-		rawSockAddr: sockaddr,
-	}
-	err = spoofer.loadSequenceNumbers(tcpConn)
+	s.rawFD = fd
+	s.rawSockAddr = sockaddr
+	err = s.followConnection(s.tcpConn)
 	if err != nil {
-		unix.Close(fd)
-		return nil, err
+		return err
 	}
-	return spoofer, nil
+	return s.loadSequenceNumbers(s.tcpConn)
+}
+
+// followConnection makes the raw socket send the way the connection does: with its mark,
+// through its device, from its address. Routing takes all three from the socket, not
+// from the packet, so a raw socket without them is routed by the destination alone, past
+// the rules the connection was dialed under (routing_mark, bind_interface,
+// auto_detect_interface, a rule by source address), and the forged ClientHello may leave
+// through another interface than the connection it belongs to.
+func (s *linuxSpoofer) followConnection(tcpConn *net.TCPConn) error {
+	return control.Conn(tcpConn, func(raw uintptr) error {
+		fd := int(raw)
+		mark, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK)
+		if err == nil && mark != 0 {
+			err = unix.SetsockoptInt(s.rawFD, unix.SOL_SOCKET, unix.SO_MARK, mark)
+			if err != nil {
+				return E.Cause(err, "set the mark of the connection")
+			}
+		}
+		device, err := unix.GetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE)
+		if err == nil && device != "" {
+			err = unix.BindToDevice(s.rawFD, device)
+			if err != nil {
+				return E.Cause(err, "bind to the device of the connection")
+			}
+		}
+		var local unix.Sockaddr
+		if s.src.Addr().Is4() {
+			local = &unix.SockaddrInet4{Addr: s.src.Addr().As4()}
+		} else {
+			local6 := &unix.SockaddrInet6{Addr: s.src.Addr().As16()}
+			if zone := s.src.Addr().Zone(); zone != "" {
+				zoneInterface, err := net.InterfaceByName(zone)
+				if err != nil {
+					return E.Cause(err, "find the interface of the local address")
+				}
+				local6.ZoneId = uint32(zoneInterface.Index)
+			}
+			local = local6
+		}
+		err = unix.Bind(s.rawFD, local)
+		if err != nil {
+			return E.Cause(err, "bind to the local address of the connection")
+		}
+		return nil
+	})
 }
 
 func openLinuxRawSocket(dst netip.AddrPort) (int, unix.Sockaddr, error) {
@@ -87,6 +147,16 @@ func (s *linuxSpoofer) loadSequenceNumbers(tcpConn *net.TCPConn) error {
 		fd := int(raw)
 
 		if s.method == MethodWrongTimestamp {
+			// a peer that has not agreed on timestamps does not look at the option: it
+			// would take the forged ClientHello, in sequence and with a valid checksum,
+			// for the data of the connection
+			info, err := unix.GetsockoptTCPInfo(fd, unix.IPPROTO_TCP, unix.TCP_INFO)
+			if err != nil {
+				return E.Cause(err, "read TCP_INFO")
+			}
+			if info.Options&tcpInfoOptionTimestamps == 0 {
+				return E.New("wrong-timestamp needs TCP timestamps, and this connection has none; use another spoof_method")
+			}
 			timestamp, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_TIMESTAMP)
 			if err != nil {
 				return E.Cause(err, "read timestamp")
@@ -99,7 +169,12 @@ func (s *linuxSpoofer) loadSequenceNumbers(tcpConn *net.TCPConn) error {
 			return E.Cause(err, "enter TCP_REPAIR (need CAP_NET_ADMIN)")
 		}
 		defer func() {
-			offErr := unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR, unix.TCP_REPAIR_OFF)
+			// without the window probe that leaving the plain way sends: a segment before
+			// the ClientHello that no connection of its own sends
+			offErr := unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR, unix.TCP_REPAIR_OFF_NO_WP)
+			if errors.Is(offErr, unix.EINVAL) { // Linux before 4.19
+				offErr = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR, unix.TCP_REPAIR_OFF)
+			}
 			if err == nil && offErr != nil {
 				err = E.Cause(offErr, "leave TCP_REPAIR")
 			}
@@ -128,6 +203,11 @@ func (s *linuxSpoofer) loadSequenceNumbers(tcpConn *net.TCPConn) error {
 }
 
 func (s *linuxSpoofer) Inject(payload []byte) error {
+	defer s.Close()
+	err := s.open()
+	if err != nil {
+		return err
+	}
 	frame, err := buildSpoofFrame(s.method, s.src, s.dst, s.sendNext, s.receiveNext, s.timestamp, nil, payload)
 	if err != nil {
 		return err
