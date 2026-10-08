@@ -112,11 +112,13 @@ func TestOptionRefusals(t *testing.T) {
 		"sb.tls.no_such_option=1":                   "sb-unknown",
 		"sb.tls.alpn.first=h2":                      "sb-unknown",
 		"sb.=1":                                     "sb-unknown",
-		"sb.tls..fragment=1":                        "sb-unknown",
-		"sb.tls.fragment=maybe":                     "sb-value",
-		"sb.multiplex.max_connections=many":         "sb-value",
-		"sb.connect_timeout=soon":                   "sb-value",
-		"sb.multiplex=on":                           "sb-value",
+		// a name that grows when lowered: found by the fuzzer
+		"SB.%C4%B0=1":                       "sb-unknown",
+		"sb.tls..fragment=1":                "sb-unknown",
+		"sb.tls.fragment=maybe":             "sb-value",
+		"sb.multiplex.max_connections=many": "sb-value",
+		"sb.connect_timeout=soon":           "sb-value",
+		"sb.multiplex=on":                   "sb-value",
 	} {
 		require.Equal(t, id, refusalID(t, fallbackBase+"&"+parameter), parameter)
 	}

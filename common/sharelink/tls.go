@@ -91,10 +91,18 @@ func (d *decoder) tlsCommon(tlsOptions *option.OutboundTLSOptions) {
 		// one cannot be made from the other
 		d.warn("the pinned certificate (pcs, pinSHA256) is not supported: the server is verified against the system roots, and one with a self-signed certificate is refused")
 	}
-	for _, key := range []string{"vcn", "cs"} {
-		if d.query[key] != "" {
-			d.warn(key, " is not supported and is ignored")
+	if names := splitList(d.query["vcn"]); len(names) > 0 && !tlsOptions.Insecure {
+		// Xray verifies the certificate by these names instead of the one it sends
+		same := false
+		for _, name := range names {
+			same = same || strings.EqualFold(name, tlsOptions.ServerName)
 		}
+		if !same {
+			d.warn("vcn (the names the certificate is verified by) is not supported: the certificate is verified by the server name of TLS, and a server with a certificate for another name is refused")
+		}
+	}
+	if d.query["cs"] != "" {
+		d.warn("cs (the cipher suites of TLS) is not supported and is ignored")
 	}
 }
 

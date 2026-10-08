@@ -167,7 +167,12 @@ func TestLeniencies(t *testing.T) {
 		"a pinned certificate": {
 			policyBase + "security=tls&pcs=0123abcd&vcn=example.org",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
-			[]string{"the pinned certificate (pcs, pinSHA256) is not supported", "vcn is not supported and is ignored"},
+			[]string{"the pinned certificate (pcs, pinSHA256) is not supported", "vcn (the names the certificate is verified by) is not supported"},
+		},
+		"the certificate verified by the name that is sent": {
+			policyBase + "security=tls&sni=s.example.org&vcn=other.example.org,S.example.org&cs=TLS_AES_128_GCM_SHA256",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			[]string{"cs (the cipher suites of TLS) is not supported and is ignored"},
 		},
 		"a pinned certificate, not verified anyway": {
 			policyBase + "security=tls&pcs=0123abcd&allowInsecure=1",

@@ -185,12 +185,20 @@ func optionType(valueType reflect.Type, segments []string, node *object, walked 
 			return nil, false, refuse("sb-unknown", "this sing-box has no option ", walked)
 		}
 		chosen := candidates[0]
-		if node != nil {
+		if node != nil && node.text("type") != "" {
+			// the shape the structure has now: an option of another shape is not one
+			// the outbound has
 			member := unionMembers[strings.ToLower(node.text("type"))]
+			found := false
 			for _, candidate := range candidates {
-				if candidate.member != "" && candidate.member == member {
+				if candidate.member == "" || candidate.member == member {
 					chosen = candidate
+					found = true
+					break
 				}
+			}
+			if !found {
+				return nil, false, refuse("sb-unknown", "this sing-box has no option ", walked, " for the type ", node.text("type"))
 			}
 		}
 		if reason := deniedOption(name, &chosen.field); reason != "" {
@@ -317,7 +325,14 @@ func (d *decoder) fallback(outboundType string, options *object) error {
 		if strings.HasPrefix(key, "sb.") {
 			// the path with the case the link writes: a header has one
 			name := d.names[key]
-			settings = append(settings, setting{name, name[len(name)-len(key)+len("sb."):], text})
+			path := name
+			if len(path) >= len("amp;") && strings.EqualFold(path[:len("amp;")], "amp;") {
+				path = path[len("amp;"):]
+			}
+			if len(path) < len("sb.") || !strings.EqualFold(path[:len("sb.")], "sb.") {
+				continue
+			}
+			settings = append(settings, setting{name, path[len("sb."):], text})
 		}
 	}
 	if len(settings) == 0 {
@@ -327,6 +342,11 @@ func (d *decoder) fallback(outboundType string, options *object) error {
 		iPath, jPath := strings.HasPrefix(strings.ToLower(settings[i].key), "sb."), strings.HasPrefix(strings.ToLower(settings[j].key), "sb.")
 		if iPath != jPath {
 			return jPath
+		}
+		// a type first: it tells which options the structure has
+		iType, jType := strings.HasSuffix(settings[i].path, ".type"), strings.HasSuffix(settings[j].path, ".type")
+		if iType != jType {
+			return iType
 		}
 		return settings[i].key < settings[j].key
 	})

@@ -1,7 +1,9 @@
 package sharelink
 
 import (
+	"context"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -271,18 +273,87 @@ func TestRoundTrip(t *testing.T) {
 	require.Equal(t, []string{"h3", "h2"}, []string(got.XHTTPOptions.Download.TLS.ALPN))
 }
 
+// deniedIn finds an option a link may not set in what the decoder made of one.
+func deniedIn(value any) string {
+	node, isObject := value.(*object)
+	if !isObject {
+		return ""
+	}
+	for _, key := range node.keys {
+		if reason := deniedOption(key, nil); reason != "" {
+			return key
+		}
+		if found := deniedIn(node.values[key]); found != "" {
+			return found
+		}
+	}
+	return ""
+}
+
 func FuzzDecode(f *testing.F) {
+	const canary = "5ec2e7aa-cana-4000-8000-5ec2e7000000"
 	f.Add(xhttpLink(`{"xPaddingBytes":"100-1000","xmux":{"maxConcurrency":"16-32"},"downloadSettings":{"address":"a","port":1}}`, url.QueryEscape, ""))
 	f.Add("trojan://p@example.org:443?type=ws&path=%2Fws%3Fed%3D2560#n")
 	f.Add("vless://u@[::1]:1?security=reality&pbk=k&type=grpc")
+	f.Add("vless://" + testUUID + "@h:1?security=tls&sb.tls.fragment=1&sb.multiplex.protocol=h2mux&sb.detour=x&sb.transport.type=ws&sb.transport.headers.A=b,c")
+	f.Add("ss://" + b64url("aes-256-gcm:p") + "@h:1/?plugin=obfs-local%3Bobfs%3Dhttp&uot=1#n")
+	f.Add("ss://" + b64("aes-256-gcm:p@h:1") + "#n")
+	f.Add("socks://" + b64("u:p") + "@h:1")
+	f.Add("hysteria2://p@h:1,2-3/?obfs=salamander&obfs-password=x&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"p"}}],"quicParams":{"udpHop":{"ports":"1-2","interval":"3-4"}}}`))
+	f.Add("tuic://" + testUUID + ":p@h:1?congestion_control=bbr&heartbeat_interval=10")
+	f.Add("vmess://" + b64(`{"add":"h","port":"1","id":"`+testUUID+`","net":"ws","tls":"tls","path":"/p?ed=1","host":"x","type":"none"}`))
+	f.Add("vmess://" + testUUID + "@h:1?type=grpc&mode=multi&serviceName=%2Fa%2FTun")
+	f.Add("https://u:p@h:1?sni=s&fp=chrome")
+	f.Add("hysteria://h:1?auth=a&obfs=xplus&obfsParam=p&mport=1-2")
+	f.Add("anytls://p@h/?sni=s&insecure=1")
+	f.Add("naive+https://u:p@h?extra-headers=A%3A%20b%0D%0AC%3A%20d")
 	f.Fuzz(func(t *testing.T, link string) {
+		// the user of the link is a secret: no message repeats it
+		if strings.Count(link, "://") == 1 && !strings.Contains(link, canary) {
+			scheme, rest, _ := strings.Cut(link, "://")
+			_, warnings, err := Decode(scheme + "://" + canary + "@" + strings.TrimLeft(rest, "@"))
+			if err != nil && strings.Contains(err.Error(), canary) {
+				t.Fatalf("the error repeats the user of the link: %v", err)
+			}
+			for _, warning := range warnings {
+				if strings.Contains(warning, canary) {
+					t.Fatalf("a warning repeats the user of the link: %s", warning)
+				}
+			}
+		}
 		outbound, _, err := Decode(link)
 		if err != nil {
 			return
 		}
-		_, err = json.Marshal(outbound)
+		content, err := json.Marshal(outbound)
 		if err != nil {
 			t.Fatal(err)
+		}
+		// what is written is JSON that reads back, and has nothing a link may not set
+		parsed, err := parseObject(content)
+		if err != nil {
+			t.Fatalf("the outbound does not read back: %v", err)
+		}
+		for _, key := range outbound.options.keys {
+			if found := deniedIn(outbound.options.values[key]); found != "" {
+				t.Fatalf("the outbound has the option %s, which a link may not set", found)
+			}
+			if deniedOption(key, nil) != "" {
+				t.Fatalf("the outbound has the option %s, which a link may not set", key)
+			}
+		}
+		if parsed.text("type") != outbound.Type {
+			t.Fatal("the type of the outbound is not the type of the scheme")
+		}
+		// the options read into the structure of the type, with no option it does not have
+		target := reflect.New(optionTypes[outbound.Type]).Interface()
+		options, err := json.Marshal(outbound.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = json.UnmarshalContextDisallowUnknownFields(context.Background(), options, target)
+		if err != nil && strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("the outbound has an option its type does not have: %v", err)
 		}
 	})
 }
