@@ -94,11 +94,15 @@ func (g *URLTestGroup) selectTested() (adapter.Outbound, bool) {
 			// made it a candidate again: it is tested, or it would keep out, by the
 			// tolerance, a member that has recovered meanwhile
 		}
+		start := time.Now()
 		if !g.downloadStopped(tag, candidate) {
 			g.setFrozen(tag, time.Time{})
 			return candidate, true
 		}
-		g.setFrozen(tag, time.Now())
+		// frozen as of the start of the test: a URL test that passed while the download
+		// ran (the round forced by a network change, which also cut this download) is a
+		// newer result and brings the member back
+		g.setFrozen(tag, start)
 		tried[tag] = true
 	}
 	if current != nil && g.history.LoadURLTestHistory(RealTag(current)) != nil {

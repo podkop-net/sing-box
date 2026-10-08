@@ -57,6 +57,10 @@ func serverOnlyDial(outbound adapter.Outbound) bool {
 // memberFailed judges a failed dial through member, begun at start, or a failed handshake
 // write (start is zero).
 func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound, network string, err error, start time.Time) {
+	if g.networkPaused() {
+		// without a network every dial fails at once: that says nothing about the member
+		return
+	}
 	// A reset, an EOF, a closed pipe or a timeout are the member's: E.IsClosedOrCanceled
 	// counts them as closed, which suits a copy loop, not this. A timeout stays the
 	// member's even when it also reports itself closed: the idle and handshake timeouts of
@@ -80,6 +84,13 @@ func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound
 		g.history.DeleteURLTestHistory(tag)
 	}
 	g.requestUpdateCheck()
+}
+
+// networkPaused reports whether the device sleeps or has no default interface. The ticker
+// of the group stops for that time, and so must the judgements made from traffic: they
+// would erase the test results of every member the group tries, one after another.
+func (g *URLTestGroup) networkPaused() bool {
+	return g.pause != nil && (g.pause.IsDevicePaused() || g.pause.IsNetworkPaused())
 }
 
 // memberSucceeded records a successful TCP dial through member.
@@ -144,6 +155,9 @@ func (g *URLTestGroup) confirmUnanswered(tag string, member adapter.Outbound) bo
 }
 
 func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag string, member adapter.Outbound) bool {
+	if g.networkPaused() {
+		return false
+	}
 	now := time.Now()
 	g.confirmAccess.Lock()
 	if *confirms == nil {
@@ -178,7 +192,8 @@ func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag stri
 		if err == nil {
 			g.memberTestPassed(tag, start)
 		}
-		if err == nil || g.ctx.Err() != nil {
+		if err == nil || g.ctx.Err() != nil || g.networkPaused() {
+			// a test that failed because the network went away meanwhile proves nothing
 			return
 		}
 		g.logger.Info("outbound ", tag, " unavailable: ", err)

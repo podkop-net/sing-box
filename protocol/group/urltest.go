@@ -165,7 +165,7 @@ func (s *URLTest) PerformUpdateCheck() {
 // InterfaceUpdated re-checks the group when the default interface changes
 // (e.g. WAN came up after boot), instead of waiting for the next interval.
 func (s *URLTest) InterfaceUpdated() {
-	if s.group != nil {
+	if s.group != nil && !s.group.networkPaused() {
 		go s.group.CheckOutbounds(true)
 	}
 }
@@ -271,6 +271,7 @@ type URLTestGroup struct {
 	idleTimeout                  time.Duration
 	history                      adapter.URLTestHistoryStorage
 	checking                     atomic.Bool
+	recheck                      atomic.Bool
 	selectedOutboundTCP          common.TypedValue[adapter.Outbound]
 	selectedOutboundUDP          common.TypedValue[adapter.Outbound]
 	interruptGroup               *interrupt.Group
@@ -494,9 +495,19 @@ type urlTestResult struct {
 func (g *URLTestGroup) urlTestRound(ctx context.Context, force bool) (map[string]uint16, error) {
 	result := make(map[string]uint16)
 	if g.checking.Swap(true) {
+		if force {
+			// the round in progress began before whatever forced this one (a new default
+			// interface, mostly): its results are of the old state, so another follows it
+			g.recheck.Store(true)
+		}
 		return result, nil
 	}
-	defer g.checking.Store(false)
+	defer func() {
+		g.checking.Store(false)
+		if g.recheck.Swap(false) && g.ctx.Err() == nil && !g.networkPaused() {
+			go g.CheckOutbounds(true)
+		}
+	}()
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
 	checked := make(map[string]bool)
 	var resultAccess sync.Mutex
