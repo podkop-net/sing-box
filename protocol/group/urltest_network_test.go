@@ -186,3 +186,105 @@ func TestURLTestDialErrorNamesMember(t *testing.T) {
 	require.Contains(t, err.Error(), "outbound/vless[")
 	require.ErrorIs(t, err, os.ErrInvalid)
 }
+
+// dialUnreachable fails as a dial does when this host has no route to the server.
+func dialUnreachable(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}
+}
+
+func shortLocalFailureGrace(t *testing.T) {
+	saved := localFailureGrace
+	localFailureGrace = 300 * time.Millisecond
+	t.Cleanup(func() { localFailureGrace = saved })
+}
+
+// The route goes a second before the network monitor reports that there is no default
+// interface, and the dials of that second fail with "network is unreachable". They are
+// this host's failure: once the monitor has spoken the members still have their test
+// results, and the group has not moved.
+func TestURLTestLocalNetworkErrorWaitsForMonitor(t *testing.T) {
+	shortLocalFailureGrace(t)
+	link, requests := testURL(t, 0)
+	first := newTestMember(C.TypeVLESS, "first", dialUnreachable)
+	second := newTestMember(C.TypeVLESS, "second", dialUnreachable)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	paused := &testPause{}
+	group.pause = paused
+
+	for range 3 {
+		_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+		require.Error(t, err)
+	}
+	paused.networkPaused.Store(true) // the monitor speaks
+	time.Sleep(2 * localFailureGrace)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"))
+	require.NotNil(t, group.history.LoadURLTestHistory("second"))
+	require.Equal(t, "first", group.selectedOutboundTCP.Load().Tag())
+	require.Equal(t, int32(3), first.dials.Load())
+	require.Equal(t, int32(0), second.dials.Load())
+	require.Equal(t, int32(0), requests.Load())
+}
+
+// With the network still there after that time the missing route was the member's own (an
+// interface it is bound to went down): the member is unavailable, as after any failed dial.
+func TestURLTestLocalNetworkErrorOfOneMember(t *testing.T) {
+	shortLocalFailureGrace(t)
+	link, _ := testURL(t, 0)
+	first := newTestMember(C.TypeVLESS, "first", dialUnreachable)
+	second := newTestMember(C.TypeVLESS, "second", dialWorking)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	group.pause = &testPause{}
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"), "judged before the monitor could speak")
+	waitSelected(t, group, "second")
+	require.Nil(t, group.history.LoadURLTestHistory("first"))
+}
+
+// A member tested after the failure, by the round a new default interface forces, keeps
+// that result: the failure was of the network that is no more.
+func TestURLTestLocalNetworkErrorOutdated(t *testing.T) {
+	shortLocalFailureGrace(t)
+	link, _ := testURL(t, 0)
+	first := newTestMember(C.TypeVLESS, "first", dialUnreachable)
+	second := newTestMember(C.TypeVLESS, "second", dialWorking)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	group.pause = &testPause{}
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	group.history.StoreURLTestHistory("first", &adapter.URLTestHistory{Time: time.Now(), Delay: 10})
+	time.Sleep(2 * localFailureGrace)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"))
+	require.Equal(t, "first", group.selectedOutboundTCP.Load().Tag())
+}
+
+// A confirming test that met the missing route waits for the monitor too.
+func TestURLTestConfirmLocalNetworkErrorWaitsForMonitor(t *testing.T) {
+	shortLocalFailureGrace(t)
+	link, _ := testURL(t, 0)
+	member := newTestMember(C.TypeVLESS, "member", dialUnreachable)
+	spare := newTestMember(C.TypeVLESS, "spare", dialWorking)
+	urlTest, group := newTestURLTest(t, link, member, spare)
+	paused := &testPause{}
+	group.pause = paused
+
+	// a failed packet dial is confirmed by a URL test of the member, which finds no route
+	_, err := urlTest.ListenPacket(context.Background(), M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	waitConfirmed(t, group, "member")
+	require.Equal(t, int32(1), member.dials.Load())
+	paused.networkPaused.Store(true)
+	time.Sleep(2 * localFailureGrace)
+	require.NotNil(t, group.history.LoadURLTestHistory("member"))
+	require.Equal(t, "member", group.selectedOutboundTCP.Load().Tag())
+
+	// and without the monitor's word the member is unavailable after that time
+	paused.networkPaused.Store(false)
+	allowConfirm(group, "member", time.Now())
+	_, err = urlTest.ListenPacket(context.Background(), M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	waitSelected(t, group, "spare")
+	require.Nil(t, group.history.LoadURLTestHistory("member"))
+}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -41,6 +42,13 @@ import (
 // path, drops the first data, every dial succeeds. Only a member with a test result is
 // judged, the others are unavailable already, and a failure the caller caused (it
 // canceled, or closed the connection itself) says nothing.
+//
+// Nor does a failure this host's own network caused, while that network is gone: with no
+// default interface every dial through every member fails at once. The network monitor
+// says so (networkPaused), but a second after the route went: until then the dials fail
+// with "network is unreachable" (localNetworkError). Such a failure waits for the monitor
+// (afterLocalFailure) and is judged only if the network is still said to be there: then
+// it was the member's own way that was missing.
 
 // serverOnlyDial reports whether a dial through outbound contacts only its server, so that a
 // failed dial or handshake write is the server's.
@@ -71,6 +79,18 @@ func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound
 		return
 	}
 	tag := RealTag(member)
+	if localNetworkError(err) {
+		g.afterLocalFailure(tag, func() {
+			g.judgeFailure(tag, member, network, err, start)
+		})
+		return
+	}
+	g.judgeFailure(tag, member, network, err, start)
+}
+
+// judgeFailure decides what a failure that is neither the caller's nor the network's says
+// about the member.
+func (g *URLTestGroup) judgeFailure(tag string, member adapter.Outbound, network string, err error, start time.Time) {
 	if !start.IsZero() && g.succeededSince(tag, start) {
 		g.logger.Debug("outbound ", tag, " failed while another connection through it succeeded: ", err)
 		return
@@ -84,6 +104,38 @@ func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound
 		g.history.DeleteURLTestHistory(tag)
 	}
 	g.requestUpdateCheck()
+}
+
+// localFailureGrace is how long a failure of this host's own network waits for the network
+// monitor, which looks at the routes a second after they change.
+var localFailureGrace = 3 * time.Second
+
+// localNetworkError reports whether err is this host's own refusal to send: no route to
+// the address, no interface that is up, no address to send from.
+func localNetworkError(err error) bool {
+	return errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.EADDRNOTAVAIL)
+}
+
+// afterLocalFailure runs judge for a failure of this host's own network through the member
+// once the network monitor has had time to tell whether the network is gone. It is not run
+// if the network is reported gone by then, or if the member was tested or carried a
+// connection since: the failure is of the past. A member has one failure waiting at a time.
+func (g *URLTestGroup) afterLocalFailure(tag string, judge func()) {
+	if _, waiting := g.localFailures.LoadOrStore(tag, struct{}{}); waiting {
+		return
+	}
+	failed := time.Now()
+	time.AfterFunc(localFailureGrace, func() {
+		g.localFailures.Delete(tag)
+		if g.ctx.Err() != nil || g.networkPaused() || g.succeededSince(tag, failed) {
+			return
+		}
+		history := g.history.LoadURLTestHistory(tag)
+		if history != nil && history.Time.After(failed) {
+			return
+		}
+		judge()
+	})
 }
 
 // networkPaused reports whether the device sleeps or has no default interface. The ticker
@@ -196,9 +248,16 @@ func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag stri
 			// a test that failed because the network went away meanwhile proves nothing
 			return
 		}
-		g.logger.Info("outbound ", tag, " unavailable: ", err)
-		g.history.DeleteURLTestHistory(tag)
-		g.performUpdateCheck()
+		unavailable := func() {
+			g.logger.Info("outbound ", tag, " unavailable: ", err)
+			g.history.DeleteURLTestHistory(tag)
+			g.performUpdateCheck()
+		}
+		if localNetworkError(err) {
+			g.afterLocalFailure(tag, unavailable)
+			return
+		}
+		unavailable()
 	}()
 	return true
 }

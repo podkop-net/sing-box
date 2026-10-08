@@ -293,6 +293,7 @@ type URLTestGroup struct {
 	unansweredConfirms           map[string]*memberConfirm
 	epoch                        time.Time
 	successes                    sync.Map // member tag → *atomic.Int64, its last successful TCP dial, since epoch
+	localFailures                sync.Map // member tag → a failure of this host's own network waits to be judged
 	downloadLink                 string
 	frozen                       common.TypedValue[map[string]time.Time] // member tag → when it last failed the download test
 	responses                    sync.Map                                // member tag → *memberResponses
