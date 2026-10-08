@@ -85,9 +85,6 @@ func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if options.UTLS == nil || !options.UTLS.Enabled {
 		return nil, E.New("uTLS is required by reality client")
 	}
-	if options.Spoof != "" || options.SpoofMethod != "" {
-		return nil, E.New("spoof is unsupported in reality")
-	}
 
 	classicFingerprint, err := checkRealityFingerprint(options.UTLS.Fingerprint)
 	if err != nil {
@@ -169,6 +166,12 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
+	// the forged ClientHello goes before the real one on the same connection, as with any
+	// other TLS client; REALITY authenticates by the real one
+	conn, err := applyTLSSpoof(conn, e.uClient.spoof, e.uClient.spoofMethod)
+	if err != nil {
+		return nil, err
+	}
 	uConn, err := newUClient(conn, uConfig, e.uClient.id)
 	if err != nil {
 		return nil, err
