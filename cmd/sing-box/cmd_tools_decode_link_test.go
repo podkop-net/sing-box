@@ -52,7 +52,7 @@ func TestDecodeLinkCommand(t *testing.T) {
 		args  []string
 		say   string
 	}{
-		"unsupported":         {"", []string{"vless://u@example.org:443?type=kcp"}, "error: unsupported transport: kcp\n"},
+		"unsupported":         {"", []string{"vless://u@example.org:443?type=kcp"}, "error: the mKCP transport is not supported\n"},
 		"refused by xhttp":    {"", []string{strings.Replace(link, "mode=packet-up", "mode=stream-up", 1) + "&extra=%7B%22uplinkHTTPMethod%22%3A%22GET%22%7D"}, "error: xhttp: "},
 		"flow over xhttp":     {"", []string{link + "&flow=xtls-rprx-vision"}, "error: flow xtls-rprx-vision is not supported over the xhttp transport\n"},
 		"no link":             {"\n\n", nil, "error: no link\n"},

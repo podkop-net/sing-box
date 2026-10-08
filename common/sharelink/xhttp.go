@@ -146,10 +146,19 @@ func (d *decoder) readObject(name string, content []byte, target any) (map[strin
 	return present, nil
 }
 
-// plainJSONError drops the names of this package's types from an error of the
-// JSON decoder.
+// plainJSONError drops from an error of the JSON decoder the names of this
+// package's types and the value it could not read: a link is a secret, and a
+// second link glued to it would be a part of that value.
 func plainJSONError(err error) string {
 	message := err.Error()
+	if strings.Contains(message, "Go value of type ") {
+		return "not a JSON object"
+	}
+	for _, marker := range []string{"invalid range", "range out of bounds", "not a whole number"} {
+		if strings.Contains(message, marker) {
+			return marker
+		}
+	}
 	const marker = "Go struct field "
 	if index := strings.Index(message, marker); index >= 0 {
 		field := message[index+len(marker):]
@@ -189,7 +198,7 @@ func (d *decoder) xhttp() (*option.V2RayXHTTPOptions, error) {
 		settings.XPaddingBytes = new(option.V2RayXHTTPRange)
 		err := settings.XPaddingBytes.UnmarshalJSON([]byte(strconv.Quote(d.query["x_padding_bytes"])))
 		if err != nil {
-			return nil, E.Cause(err, "read x_padding_bytes")
+			return nil, E.New("invalid range in the link parameter x_padding_bytes")
 		}
 	}
 	err := d.flatSettings(settings, present)
@@ -283,7 +292,7 @@ func (d *decoder) flatSettings(settings *xraySplitHTTP, present map[string]bool)
 			valueRange := new(option.V2RayXHTTPRange)
 			err := valueRange.UnmarshalJSON([]byte(strconv.Quote(text)))
 			if err != nil {
-				return E.Cause(err, "read ", key)
+				return E.New("invalid range in the link parameter ", key)
 			}
 			field.Set(reflect.ValueOf(valueRange))
 		}
@@ -414,7 +423,7 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 			Insecure:   tlsSettings.AllowInsecure,
 			ALPN:       badoption.Listable[string](tlsSettings.ALPN),
 		}
-		options.TLS.UTLS, err = utlsOptions(tlsSettings.Fingerprint, false)
+		options.TLS.UTLS, err = d.utlsOf(tlsSettings.Fingerprint, false)
 		if err != nil {
 			return nil, E.Cause(err, name)
 		}
@@ -434,7 +443,7 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 		if publicKey == "" {
 			return nil, E.New(name, ": missing REALITY public key")
 		}
-		utls, err := utlsOptions(realitySettings.Fingerprint, true)
+		utls, err := d.utlsOf(realitySettings.Fingerprint, true)
 		if err != nil {
 			return nil, E.Cause(err, name)
 		}

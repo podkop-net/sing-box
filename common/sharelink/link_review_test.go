@@ -1,6 +1,7 @@
 package sharelink
 
 import (
+	"context"
 	"net/url"
 	"strings"
 	"testing"
@@ -11,17 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// optionsOf reads the options of a decoded outbound into the structure of its type, as
+// the configuration reader would.
+func optionsOf[T any](t *testing.T, outbound *Outbound) T {
+	t.Helper()
+	content, err := json.Marshal(outbound.options)
+	require.NoError(t, err)
+	var options T
+	require.NoError(t, json.UnmarshalContext(context.Background(), content, &options))
+	return options
+}
+
 func tlsOf(t *testing.T, link string) *option.OutboundTLSOptions {
 	t.Helper()
 	outbound, _, err := Decode(link)
 	require.NoError(t, err)
-	switch options := outbound.Options.(type) {
-	case option.VLESSOutboundOptions:
-		return options.TLS
-	case option.TrojanOutboundOptions:
-		return options.TLS
-	}
-	return nil
+	return optionsOf[option.OutboundTLSOptionsContainer](t, outbound).TLS
 }
 
 // Fingerprints as Xray reads them: any case, Chrome's by default, "unsafe" for
@@ -34,16 +40,35 @@ func TestFingerprints(t *testing.T) {
 	require.Nil(t, tlsOf(t, base+"&fp=unsafe").UTLS)
 	require.Equal(t, "chrome", tlsOf(t, "trojan://p@example.org:443").UTLS.Fingerprint)
 	require.Equal(t, "chrome", tlsOf(t, "vless://"+testUUID+"@example.org:443?security=REALITY&pbk=K").UTLS.Fingerprint)
+	// a name only Xray knows gives the fingerprint of the same browser, with a warning
+	for link, fingerprint := range map[string]string{
+		base + "&fp=hellochrome_131":  "chrome",
+		base + "&fp=HelloFirefox_148": "firefox",
+		base + "&fp=randomizednoalpn": "randomized",
+		"vless://" + testUUID + "@h:1?security=reality&pbk=K&fp=hellosafari_26_3": "safari",
+	} {
+		outbound, warnings, err := Decode(link)
+		require.NoError(t, err, link)
+		require.Equal(t, fingerprint, optionsOf[option.OutboundTLSOptionsContainer](t, outbound).TLS.UTLS.Fingerprint, link)
+		require.Len(t, warnings, 1, link)
+		require.Contains(t, warnings[0], "has no counterpart, "+fingerprint+" is used", link)
+	}
+	options, warnings := transportOf(t, xhttpLink(`{"downloadSettings":{"address":"a","port":1,"security":"tls","tlsSettings":{"fingerprint":"hellochrome_131"}}}`, url.QueryEscape, ""))
+	require.Equal(t, "chrome", options.Download.TLS.UTLS.Fingerprint)
+	require.Len(t, warnings, 1)
+	// a name nobody knows: no imitation with TLS, as in Xray; REALITY cannot do without
+	outbound, warnings, err := Decode(base + "&fp=netscape")
+	require.NoError(t, err)
+	require.Nil(t, optionsOf[option.OutboundTLSOptionsContainer](t, outbound).TLS.UTLS)
+	require.Len(t, warnings, 1)
 	for _, link := range []string{
-		base + "&fp=hellochrome_131",
-		base + "&fp=randomizednoalpn",
 		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&fp=unsafe",
-		xhttpLink(`{"downloadSettings":{"address":"a","port":1,"security":"tls","tlsSettings":{"fingerprint":"hellochrome_131"}}}`, url.QueryEscape, ""),
+		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&fp=netscape",
 	} {
 		_, _, err := Decode(link)
 		require.ErrorContains(t, err, "unsupported fingerprint", link)
 	}
-	options, _ := transportOf(t, xhttpLink(`{"downloadSettings":{"address":"[2001:db8::1]","port":1,"network":"XHTTP","security":"TLS","tlsSettings":{"fingerprint":"Edge"},"xhttpSettings":null,"splithttpSettings":{"path":"/s"}}}`, url.QueryEscape, ""))
+	options, _ = transportOf(t, xhttpLink(`{"downloadSettings":{"address":"[2001:db8::1]","port":1,"network":"XHTTP","security":"TLS","tlsSettings":{"fingerprint":"Edge"},"xhttpSettings":null,"splithttpSettings":{"path":"/s"}}}`, url.QueryEscape, ""))
 	require.Equal(t, "edge", options.Download.TLS.UTLS.Fingerprint)
 	require.Equal(t, "2001:db8::1", options.Download.Server)
 	require.Equal(t, "/s", options.Download.Path)
@@ -54,7 +79,7 @@ func TestFlows(t *testing.T) {
 	base := "vless://" + testUUID + "@example.org:443?security=reality&pbk=K&flow="
 	outbound, _, err := Decode(base + "xtls-rprx-vision-udp443")
 	require.NoError(t, err)
-	require.Equal(t, "xtls-rprx-vision", outbound.Options.(option.VLESSOutboundOptions).Flow)
+	require.Equal(t, "xtls-rprx-vision", optionsOf[option.VLESSOutboundOptions](t, outbound).Flow)
 	for _, flow := range []string{"xtls-rprx-direct", "none", "xtls-rprx-origin"} {
 		_, _, err = Decode(base + flow)
 		require.ErrorContains(t, err, "unsupported flow", flow)
@@ -89,12 +114,23 @@ func TestRefusedWithoutEcho(t *testing.T) {
 		require.NotContains(t, strings.ToLower(err.Error()), secret[:13], name)
 		require.NotContains(t, err.Error(), "://", name)
 	}
+	// what could not be read is not repeated, and no type of the program is named
+	for name, test := range map[string]struct{ link, say string }{
+		"extra that is not an object": {xhttpLink(`"text"`, url.QueryEscape, ""), "read extra: not a JSON object"},
+		"a range in extra":            {xhttpLink(`{"xPaddingBytes":"a-`+secret+`"}`, url.QueryEscape, ""), "invalid range"},
+		"a range in a parameter":      {xhttpLink(`{}`, url.QueryEscape, "&x_padding_bytes=a-"+secret), "invalid range in the link parameter x_padding_bytes"},
+	} {
+		_, _, err := Decode(test.link)
+		require.ErrorContains(t, err, test.say, name)
+		require.NotContains(t, err.Error(), secret[:13], name)
+		require.NotContains(t, err.Error(), "sharelink", name)
+	}
 	// a short user is Xray's "string turned into a UUID"
 	_, _, err := Decode("vless://my-user@h:1")
 	require.NoError(t, err)
 	// a plain word is shown
-	_, _, err = Decode("vless://" + testUUID + "@h:1?type=kcp")
-	require.ErrorContains(t, err, "unsupported transport: kcp")
+	_, _, err = Decode("vless://" + testUUID + "@h:1?type=tor")
+	require.ErrorContains(t, err, "unsupported transport: tor")
 	// a byte order mark before the link
 	_, _, err = Decode("\ufeffvless://" + testUUID + "@h:1")
 	require.NoError(t, err)

@@ -76,7 +76,7 @@ func transportOf(t *testing.T, link string) (option.V2RayXHTTPOptions, []string)
 	t.Helper()
 	outbound, warnings, err := Decode(link)
 	require.NoError(t, err)
-	transport := outbound.Options.(option.VLESSOutboundOptions).Transport
+	transport := optionsOf[option.VLESSOutboundOptions](t, outbound).Transport
 	require.NotNil(t, transport)
 	require.Equal(t, "xhttp", transport.Type)
 	return transport.XHTTPOptions, warnings
@@ -218,7 +218,7 @@ func TestErrors(t *testing.T) {
 	for name, link := range map[string]string{
 		"empty":             "",
 		"not a link":        "hello",
-		"scheme":            "ss://YWVzLTI1Ni1nY206cGFzcw@example.org:8388",
+		"scheme":            "gopher://example.org:70",
 		"no user":           "vless://example.org:443",
 		"empty user":        "vless://@example.org:443",
 		"no port":           "vless://" + testUUID + "@example.org",
@@ -230,8 +230,9 @@ func TestErrors(t *testing.T) {
 		"security":          "vless://" + testUUID + "@example.org:443?security=xtls",
 		"reality no key":    "vless://" + testUUID + "@example.org:443?security=reality",
 		"kcp":               "vless://" + testUUID + "@example.org:443?type=kcp",
-		"tcp http header":   "vless://" + testUUID + "@example.org:443?type=tcp&headerType=http",
-		"grpc multi":        "vless://" + testUUID + "@example.org:443?type=grpc&mode=multi",
+		"tcp http header":   "vless://" + testUUID + "@example.org:443?security=tls&type=tcp&headerType=http",
+		"tcp other header":  "vless://" + testUUID + "@example.org:443?type=tcp&headerType=srtp",
+		"grpc mode":         "vless://" + testUUID + "@example.org:443?type=grpc&mode=other",
 		"bad escape":        "vless://" + testUUID + "@example.org:443?type=ws&path=%zz",
 		"extra not json":    xhttpLink(`{"xPaddingBytes":`, url.QueryEscape, ""),
 		"extra not object":  xhttpLink(`"text"`, url.QueryEscape, ""),
@@ -261,7 +262,7 @@ func TestRoundTrip(t *testing.T) {
 	outbound, warnings, err := Decode(xhttpLink(extra, url.QueryEscape, ""))
 	require.NoError(t, err)
 	require.Empty(t, warnings)
-	want := *outbound.Options.(option.VLESSOutboundOptions).Transport
+	want := *optionsOf[option.VLESSOutboundOptions](t, outbound).Transport
 	content, err := json.Marshal(want)
 	require.NoError(t, err)
 	var got option.V2RayTransportOptions

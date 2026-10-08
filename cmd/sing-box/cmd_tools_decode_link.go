@@ -2,16 +2,21 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	stdJSON "encoding/json"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/common/sharelink"
-	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/experimental/deprecated"
+	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/transport/v2rayxhttp"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/service"
 
 	"github.com/spf13/cobra"
 )
@@ -82,44 +87,70 @@ func decodeLink(args []string, input io.Reader, output io.Writer, errorOutput io
 		return decodeLinkExitBadLink
 	}
 	outbound, warnings, err := sharelink.Decode(link)
-	if err == nil {
-		err = checkDecoded(outbound)
-	}
 	if err != nil {
 		io.WriteString(errorOutput, "error: "+err.Error()+"\n")
 		return decodeLinkExitBadLink
 	}
-	for _, warning := range warnings {
-		io.WriteString(errorOutput, "warning: "+warning+"\n")
-	}
-	encoder := json.NewEncoder(output)
-	if !commandDecodeLinkFlagCompact {
-		encoder.SetIndent("", "  ")
-	}
-	err = encoder.Encode(outbound)
+	content, err := json.Marshal(outbound)
 	if err != nil {
 		io.WriteString(errorOutput, "error: "+E.Cause(err, "encode the outbound").Error()+"\n")
 		return decodeLinkExitOther
 	}
+	notes, err := checkDecoded(content)
+	if err != nil {
+		io.WriteString(errorOutput, "error: "+err.Error()+"\n")
+		return decodeLinkExitBadLink
+	}
+	for _, warning := range append(warnings, notes...) {
+		io.WriteString(errorOutput, "warning: "+warning+"\n")
+	}
+	if !commandDecodeLinkFlagCompact {
+		var indented bytes.Buffer
+		err = stdJSON.Indent(&indented, content, "", "  ")
+		if err != nil {
+			io.WriteString(errorOutput, "error: "+E.Cause(err, "encode the outbound").Error()+"\n")
+			return decodeLinkExitOther
+		}
+		content = indented.Bytes()
+	}
+	output.Write(content)
+	io.WriteString(output, "\n")
 	return 0
 }
 
-// checkDecoded reports now what the transport would refuse when the outbound
-// starts: a link is then known to be unusable where it is entered.
-func checkDecoded(outbound *sharelink.Outbound) error {
-	var transport *option.V2RayTransportOptions
-	switch options := outbound.Options.(type) {
-	case option.VLESSOutboundOptions:
-		transport = options.Transport
-	case option.TrojanOutboundOptions:
-		transport = options.Transport
-	}
-	if transport == nil || transport.Type != C.V2RayTransportTypeXHTTP {
-		return nil
-	}
-	err := v2rayxhttp.CheckOptions(transport.XHTTPOptions)
+// decodeLinkNotes collects what sing-box would report as deprecated while it builds the
+// outbound: the manager of a run prints such a note, and for one about to be removed
+// ends the process.
+type decodeLinkNotes struct {
+	notes []string
+}
+
+func (n *decodeLinkNotes) ReportDeprecated(feature deprecated.Note) {
+	n.notes = append(n.notes, feature.Message())
+}
+
+// checkDecoded builds the outbound the way "sing-box check" builds a configuration, as
+// the only outbound of one: what is printed is then an outbound this very sing-box
+// takes, with the protocols and the options it was built with. Nothing is opened, read
+// or dialed by it: an outbound from a link names no files, and connections are made
+// when it is used.
+func checkDecoded(outbound []byte) ([]string, error) {
+	notes := new(decodeLinkNotes)
+	ctx, cancel := context.WithCancel(service.ExtendContext(include.Context(service.ContextWith[deprecated.Manager](context.Background(), notes))))
+	defer cancel()
+	configuration := append(append([]byte(`{"log":{"disabled":true},"outbounds":[`), outbound...), "]}"...)
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, configuration)
 	if err != nil {
-		return E.Cause(err, "xhttp")
+		return nil, E.New("this sing-box does not take the outbound of the link: ", strings.TrimPrefix(err.Error(), "outbounds[0]."))
 	}
-	return nil
+	instance, err := box.New(box.Options{Context: ctx, Options: options})
+	if err != nil {
+		message := err.Error()
+		for _, prefix := range []string{"initialize outbound[0]: ", "create client transport: "} {
+			message = strings.TrimPrefix(message, prefix)
+		}
+		return nil, E.New(message)
+	}
+	instance.Close()
+	return notes.notes, nil
 }
