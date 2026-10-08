@@ -1,6 +1,7 @@
 package rule
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -263,6 +265,10 @@ func (s *RemoteRuleSet) updateOnce() bool {
 	s.fetchLoaded = false
 	err := s.fetch(s.ctx, nil)
 	if err != nil {
+		if s.ctx.Err() != nil {
+			// cut by the shutdown, not a failed update
+			return false
+		}
 		s.fetchFailed(err)
 		return false
 	}
@@ -308,9 +314,8 @@ func (s *RemoteRuleSet) fetchFailed(err error) {
 var (
 	ruleSetStartDeadline = 30 * time.Second
 	ruleSetStallTimeout  = 30 * time.Second
+	ruleSetMaxSize       = 50 << 20
 )
-
-const ruleSetMaxSize = 50 << 20
 
 // stallResetReader resets a watchdog on every read that carries data, so a transfer making
 // steady progress is never cut off while one that goes silent is.
@@ -325,6 +330,77 @@ func (r *stallResetReader) Read(p []byte) (int, error) {
 		r.reset()
 	}
 	return n, err
+}
+
+// readRuleSetBody reads the body of a 200 response. What cannot be a rule-set is refused
+// before it is held in memory: a declared length above the cap, and for the binary format a
+// body that does not start with the magic bytes (an error or login page served with status
+// 200). The slice is sized by the declared length, so a normal download is read without
+// regrowing.
+func (s *RemoteRuleSet) readRuleSetBody(response *http.Response, body io.Reader) ([]byte, error) {
+	if response.ContentLength > int64(ruleSetMaxSize) {
+		return nil, E.New("rule-set larger than ", ruleSetMaxSize>>20, " MB")
+	}
+	reader := bufio.NewReader(io.LimitReader(body, int64(ruleSetMaxSize)+1))
+	if s.options.Format == C.RuleSetFormatBinary {
+		head, err := reader.Peek(len(srs.MagicBytes))
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		if !bytes.Equal(head, srs.MagicBytes[:]) {
+			sample, _ := reader.Peek(ruleSetSampleSize)
+			return nil, E.New("not a binary rule-set: ", describeRuleSetBody(response, response.ContentLength, sample))
+		}
+	}
+	capacity := 512
+	if response.ContentLength > 0 {
+		// one byte more: the read that finds the end must not regrow the slice
+		capacity = int(response.ContentLength) + 1
+	}
+	content := make([]byte, 0, capacity)
+	for {
+		if len(content) == cap(content) {
+			content = append(content, 0)[:len(content)]
+		}
+		n, err := reader.Read(content[len(content):cap(content)])
+		content = content[:len(content)+n]
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(content) > ruleSetMaxSize {
+		return nil, E.New("rule-set larger than ", ruleSetMaxSize>>20, " MB")
+	}
+	return content, nil
+}
+
+// ruleSetSampleSize is how much of a body that is not a rule-set an error shows.
+const ruleSetSampleSize = 16
+
+// describeRuleSetBody tells a page from a damaged file in the log: the size, the declared
+// type and the first bytes. The header and the bytes come from the server, so they are
+// quoted and cut.
+func describeRuleSetBody(response *http.Response, size int64, sample []byte) string {
+	var description strings.Builder
+	if size >= 0 {
+		description.WriteString(strconv.FormatInt(size, 10))
+		description.WriteString(" bytes, ")
+	}
+	contentType := response.Header.Get("Content-Type")
+	if len(contentType) > 64 {
+		contentType = contentType[:64]
+	}
+	description.WriteString("Content-Type ")
+	description.WriteString(strconv.Quote(contentType))
+	if len(sample) > ruleSetSampleSize {
+		sample = sample[:ruleSetSampleSize]
+	}
+	description.WriteString(", starts with ")
+	description.WriteString(strconv.Quote(string(sample)))
+	return description.String()
 }
 
 func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPStartContext) error {
@@ -414,18 +490,17 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 		return E.New("unexpected status: ", response.Status)
 	}
 	body := &stallResetReader{reader: response.Body, reset: func() { stall.Reset(ruleSetStallTimeout) }}
-	content, err := io.ReadAll(io.LimitReader(body, ruleSetMaxSize+1))
+	content, err := s.readRuleSetBody(response, body)
+	// the transfer is over: parsing a large list must not look like a stalled download
+	stall.Stop()
 	if err != nil {
 		response.Body.Close()
 		return describe(err)
 	}
-	if len(content) > ruleSetMaxSize {
-		return E.New("rule-set larger than ", ruleSetMaxSize>>20, " MB")
-	}
 	err = s.loadBytes(content)
 	if err != nil {
 		response.Body.Close()
-		return err
+		return E.Cause(err, "read rule-set (", describeRuleSetBody(response, int64(len(content)), content), ")")
 	}
 	response.Body.Close()
 	s.fetchLoaded = true
