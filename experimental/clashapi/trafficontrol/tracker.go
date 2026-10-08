@@ -118,8 +118,17 @@ func (tt *TCPConn) WriterReplaceable() bool {
 	return true
 }
 
+// trimTrackedMetadata drops from the tracker's copy what only routing needed: the sniffer's
+// working state (for QUIC, the fragments of the client hello collected so far). A tracker
+// lives as long as its connection, and then in the list of closed connections.
+func trimTrackedMetadata(metadata *adapter.InboundContext) {
+	metadata.SniffContext = nil
+	metadata.SniffError = nil
+}
+
 func NewTCPTracker(conn net.Conn, manager *Manager, metadata adapter.InboundContext, outboundManager adapter.OutboundManager, matchRule adapter.Rule, matchOutbound adapter.Outbound) *TCPConn {
 	id, _ := uuid.NewV4()
+	trimTrackedMetadata(&metadata)
 	var (
 		chain        []string
 		next         string
@@ -201,6 +210,7 @@ func (ut *UDPConn) WriterReplaceable() bool {
 
 func NewUDPTracker(conn N.PacketConn, manager *Manager, metadata adapter.InboundContext, outboundManager adapter.OutboundManager, matchRule adapter.Rule, matchOutbound adapter.Outbound) *UDPConn {
 	id, _ := uuid.NewV4()
+	trimTrackedMetadata(&metadata)
 	var (
 		chain        []string
 		next         string
