@@ -79,4 +79,6 @@ var versionFeatures = []string{
 	"transport.xhttp",
 	// the command "sing-box tools decode-link"
 	"tools.decode-link",
+	// the uTLS fingerprint fallback (SING_BOX_UTLS_FALLBACK)
+	"tls.utls-fallback",
 }

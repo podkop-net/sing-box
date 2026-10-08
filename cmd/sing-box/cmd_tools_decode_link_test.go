@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sagernet/sing-box/common/sharelink"
 	"github.com/sagernet/sing/common/json"
 
 	"github.com/stretchr/testify/require"
@@ -72,7 +73,8 @@ func TestDecodeLinkCommand(t *testing.T) {
 	require.Zero(t, status)
 }
 
-// Scripts read the features as whole names between commas.
+// Scripts read the features as whole names between commas, and ask for the ones they
+// depend on by name: the names of the releases before stay, in their order.
 func TestVersionFeatures(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, feature := range versionFeatures {
@@ -81,5 +83,60 @@ func TestVersionFeatures(t *testing.T) {
 		require.False(t, seen[feature], feature)
 		seen[feature] = true
 	}
-	require.True(t, seen["tools.decode-link"])
+	require.Equal(t, []string{"urltest.fallbacks", "urltest.download_url", "transport.xhttp", "tools.decode-link"}, versionFeatures[:4])
+	require.True(t, seen["tls.utls-fallback"])
+}
+
+// outboundAvailable reports whether this sing-box was built with the outbound type: one
+// left out of the build is there as a stub that refuses to be made, with these words.
+func outboundAvailable(outboundType string) bool {
+	_, err := checkDecoded([]byte(`{"type":"` + outboundType + `","tag":"probe"}`))
+	return err == nil || !(strings.Contains(err.Error(), "is not included in this build") || strings.Contains(err.Error(), "unknown outbound type"))
+}
+
+// One link of every scheme: the command prints an outbound exactly when this build has
+// the type of the outbound, and names the build otherwise. What is printed has been
+// built, so "sing-box check" takes it.
+func TestDecodeLinkEveryScheme(t *testing.T) {
+	const uuid = "6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11"
+	links := map[string]string{
+		"vless":       "vless://" + uuid + "@example.org:443?security=reality&pbk=YBZ6SAP7KfiD5YJiyAGvD49eNYW-f-7IlhMarfyy4k0&sid=0123456789abcdef&flow=xtls-rprx-vision&sni=www.example.com",
+		"trojan":      "trojan://password@example.org:443?type=ws&path=%2Fws&sni=example.org",
+		"ss":          "ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206ZG1DbHkvWmgxNVd3OStzK0dGWGlGVElrcHc3Yy9xQ0lTYUJyYWk3V2hoWT0@127.0.0.1:25144",
+		"socks":       "socks://dXNlcjpwYXNz@127.0.0.1:1080",
+		"socks4":      "socks4://127.0.0.1:1080",
+		"socks4a":     "socks4a://127.0.0.1:1080",
+		"socks5":      "socks5://user:pass@127.0.0.1:1080",
+		"socks5h":     "socks5h://127.0.0.1:1080",
+		"hysteria2":   "hysteria2://password@example.org:443,5000-6000/?sni=example.org&obfs=salamander&obfs-password=x&insecure=1",
+		"hy2":         "hy2://password@example.org",
+		"tuic":        "tuic://" + uuid + ":password@example.org:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3",
+		"vmess":       "vmess://" + uuid + "@example.org:443?type=ws&security=tls&path=%2Fws",
+		"http":        "http://user:pass@example.org:3128",
+		"https":       "https://user:pass@example.org:8443",
+		"hysteria":    "hysteria://example.org:36712?auth=secret&upmbps=10&downmbps=50&peer=example.org",
+		"anytls":      "anytls://password@example.org:8443?sni=example.org",
+		"naive+https": "naive+https://user:pass@example.org",
+		"naive+quic":  "naive+quic://user:pass@example.org",
+	}
+	require.False(t, outboundAvailable("no-such-type-is-a-stub"), "an unknown type is not a type of the build")
+	for scheme, outboundType := range sharelink.Schemes() {
+		link, hasLink := links[scheme]
+		require.True(t, hasLink, "no test link of the scheme %s", scheme)
+		var output, errorOutput bytes.Buffer
+		status := decodeLink([]string{link}, strings.NewReader(""), &output, &errorOutput)
+		if outboundAvailable(outboundType) {
+			require.Zero(t, status, "%s: %s", scheme, errorOutput.String())
+			var outbound map[string]any
+			require.NoError(t, json.Unmarshal(output.Bytes(), &outbound), scheme)
+			require.Equal(t, outboundType, outbound["type"], scheme)
+			_, err := checkDecoded(output.Bytes())
+			require.NoError(t, err, scheme)
+		} else {
+			require.Equal(t, decodeLinkExitBadLink, status, scheme)
+			require.Empty(t, output.String(), scheme)
+			require.Contains(t, errorOutput.String(), "error: "+outboundType+" outbound is not included in this build", scheme)
+		}
+		require.NotContains(t, errorOutput.String(), uuid, scheme)
+	}
 }

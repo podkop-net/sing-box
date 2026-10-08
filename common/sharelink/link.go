@@ -67,9 +67,39 @@ type scheme struct {
 	opaque bool
 }
 
-var schemes = map[string]scheme{
-	"vless":  {outbound: C.TypeVLESS, decode: (*decoder).vless},
-	"trojan": {outbound: C.TypeTrojan, decode: (*decoder).trojan},
+var schemes map[string]scheme
+
+func init() {
+	schemes = map[string]scheme{
+		"vless":       {outbound: C.TypeVLESS, decode: (*decoder).vless},
+		"trojan":      {outbound: C.TypeTrojan, decode: (*decoder).trojan},
+		"ss":          {outbound: C.TypeShadowsocks, decode: (*decoder).shadowsocks},
+		"socks":       {outbound: C.TypeSOCKS, decode: (*decoder).socks},
+		"socks4":      {outbound: C.TypeSOCKS, decode: (*decoder).socks},
+		"socks4a":     {outbound: C.TypeSOCKS, decode: (*decoder).socks},
+		"socks5":      {outbound: C.TypeSOCKS, decode: (*decoder).socks},
+		"socks5h":     {outbound: C.TypeSOCKS, decode: (*decoder).socks},
+		"hysteria2":   {outbound: C.TypeHysteria2, decode: (*decoder).hysteria2},
+		"hy2":         {outbound: C.TypeHysteria2, decode: (*decoder).hysteria2},
+		"tuic":        {outbound: C.TypeTUIC, decode: (*decoder).tuic},
+		"vmess":       {outbound: C.TypeVMess, decode: (*decoder).vmess, opaque: true},
+		"http":        {outbound: C.TypeHTTP, decode: (*decoder).httpProxy},
+		"https":       {outbound: C.TypeHTTP, decode: (*decoder).httpProxy},
+		"hysteria":    {outbound: C.TypeHysteria, decode: (*decoder).hysteria},
+		"anytls":      {outbound: C.TypeAnyTLS, decode: (*decoder).anytls},
+		"naive+https": {outbound: C.TypeNaive, decode: (*decoder).naive},
+		"naive+quic":  {outbound: C.TypeNaive, decode: (*decoder).naive},
+	}
+}
+
+// Schemes lists the kinds of links the decoder reads, each with the type of the outbound
+// it makes.
+func Schemes() map[string]string {
+	list := make(map[string]string, len(schemes))
+	for name, linkScheme := range schemes {
+		list[name] = linkScheme.outbound
+	}
+	return list
 }
 
 // The outbound types that are configured as an outbound and not as a link: nothing
@@ -96,40 +126,14 @@ func Decode(link string) (*Outbound, []string, error) {
 		return nil, nil, E.New("unsupported link type", shown(schemeName))
 	}
 	d := &decoder{scheme: schemeName, known: make(map[string]bool)}
-	var tag string
-	if !linkScheme.opaque {
-		if index := strings.IndexByte(rest, '#'); index >= 0 {
-			tag = rest[index+1:]
-			// a name is free text, often with a stray "%"
-			if decoded, err := url.PathUnescape(tag); err == nil {
-				tag = decoded
-			}
-			rest = rest[:index]
-		}
-		var rawQuery string
-		if index := strings.IndexByte(rest, '?'); index >= 0 {
-			rawQuery = rest[index+1:]
-			rest = rest[:index]
-		}
-		// Two links on one line would read as one, with the first as its user.
-		if strings.ContainsAny(rest, " \t\r\n") || strings.Contains(rest, "://") {
-			return nil, nil, E.New("the address of the link contains a space or another link")
-		}
-		var err error
-		d.query, d.names, err = parseQuery(rawQuery)
+	if linkScheme.opaque {
+		d.body = rest
+	} else {
+		err := d.split(rest)
 		if err != nil {
 			return nil, nil, err
 		}
-		// The same for a link after the last parameter: its user would end up in
-		// that parameter, and in an error message about it.
-		for key, value := range d.query {
-			if strings.Contains(value, "://") && strings.ContainsAny(value, " \t\r\n") {
-				return nil, nil, E.New("the link parameter ", d.names[key], " contains a space and another link")
-			}
-		}
 	}
-	d.body = rest
-	d.tag = tag
 	typed, err := linkScheme.decode(d)
 	if err != nil {
 		return nil, nil, err
@@ -149,6 +153,41 @@ func Decode(link string) (*Outbound, []string, error) {
 		d.warn(key, " is not supported and is ignored")
 	}
 	return &Outbound{Type: linkScheme.outbound, Tag: strings.TrimSpace(d.tag), options: options}, d.warnings, nil
+}
+
+// split takes the name ("#...") and the parameters ("?...") off a link that is a URL.
+func (d *decoder) split(rest string) error {
+	if index := strings.IndexByte(rest, '#'); index >= 0 {
+		d.tag = rest[index+1:]
+		// a name is free text, often with a stray "%"
+		if decoded, err := url.PathUnescape(d.tag); err == nil {
+			d.tag = decoded
+		}
+		rest = rest[:index]
+	}
+	var rawQuery string
+	if index := strings.IndexByte(rest, '?'); index >= 0 {
+		rawQuery = rest[index+1:]
+		rest = rest[:index]
+	}
+	// Two links on one line would read as one, with the first as its user.
+	if strings.ContainsAny(rest, " \t\r\n") || strings.Contains(rest, "://") {
+		return E.New("the address of the link contains a space or another link")
+	}
+	var err error
+	d.query, d.names, err = parseQuery(rawQuery)
+	if err != nil {
+		return err
+	}
+	// The same for a link after the last parameter: its user would end up in
+	// that parameter, and in an error message about it.
+	for key, value := range d.query {
+		if strings.Contains(value, "://") && strings.ContainsAny(value, " \t\r\n") {
+			return E.New("the link parameter ", d.names[key], " contains a space and another link")
+		}
+	}
+	d.body = rest
+	return nil
 }
 
 type decoder struct {
@@ -228,26 +267,38 @@ func parseQuery(rawQuery string) (map[string]string, map[string]string, error) {
 // ignored. The user is everything up to the last "@": a Trojan password is
 // often base64, with "/" and "=", and not always escaped.
 func parseServer(authority string) (string, option.ServerOptions, error) {
-	index := strings.LastIndexByte(authority, '@')
-	if index < 0 {
-		return "", option.ServerOptions{}, E.New("missing user in the link")
-	}
-	userinfo, err := url.PathUnescape(authority[:index])
+	user, hasUser, server, _, err := parseAuthority(authority, 0)
 	if err != nil {
-		return "", option.ServerOptions{}, E.New("invalid escape in the user of the link")
+		return "", option.ServerOptions{}, err
 	}
-	if userinfo == "" {
+	if !hasUser || user == "" {
 		return "", option.ServerOptions{}, E.New("missing user in the link")
 	}
-	hostPort := authority[index+1:]
+	return user, server, nil
+}
+
+// parseAuthority reads "[userinfo@]host[:port][/path]". A link without a port gets
+// defaultPort, when that is not zero. The port is returned as written too: some schemes
+// have a list of ports there.
+func parseAuthority(authority string, defaultPort uint16) (user string, hasUser bool, server option.ServerOptions, path string, err error) {
+	hostPort := authority
+	if index := strings.LastIndexByte(authority, '@'); index >= 0 {
+		hasUser = true
+		user, err = url.PathUnescape(authority[:index])
+		if err != nil {
+			return "", false, option.ServerOptions{}, "", E.New("invalid escape in the user of the link")
+		}
+		hostPort = authority[index+1:]
+	}
 	if slash := strings.IndexByte(hostPort, '/'); slash >= 0 {
+		path = hostPort[slash:]
 		hostPort = hostPort[:slash]
 	}
 	var host, port string
 	if strings.HasPrefix(hostPort, "[") {
 		end := strings.IndexByte(hostPort, ']')
 		if end < 0 {
-			return "", option.ServerOptions{}, E.New("invalid server address")
+			return "", false, option.ServerOptions{}, "", E.New("invalid server address")
 		}
 		host = hostPort[1:end]
 		port = strings.TrimPrefix(hostPort[end+1:], ":")
@@ -255,16 +306,22 @@ func parseServer(authority string) (string, option.ServerOptions, error) {
 		host, port, _ = strings.Cut(hostPort, ":")
 	}
 	if host == "" || strings.ContainsAny(host, " \t@?#") {
-		return "", option.ServerOptions{}, E.New("invalid server address")
+		return "", false, option.ServerOptions{}, "", E.New("invalid server address")
 	}
+	server.Server = host
 	if port == "" {
-		return "", option.ServerOptions{}, E.New("missing server port")
+		if defaultPort == 0 {
+			return "", false, option.ServerOptions{}, "", E.New("missing server port")
+		}
+		server.ServerPort = defaultPort
+		return user, hasUser, server, path, nil
 	}
 	portNumber, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || portNumber == 0 {
-		return "", option.ServerOptions{}, E.New("invalid server port", shown(port))
+		return "", false, option.ServerOptions{}, "", E.New("invalid server port", shown(port))
 	}
-	return userinfo, option.ServerOptions{Server: host, ServerPort: uint16(portNumber)}, nil
+	server.ServerPort = uint16(portNumber)
+	return user, hasUser, server, path, nil
 }
 
 // first returns the first of the link parameters that is set.
