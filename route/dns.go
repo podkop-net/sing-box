@@ -44,14 +44,15 @@ func (r *Router) hijackDNSPacket(ctx context.Context, conn N.PacketConn, packetB
 			N.PutPacketBuffer(packet)
 			go ExchangeDNSPacket(ctx, r.dns, r.logger, natConn, buffer, metadata, destination)
 		}
-		natConn.SetHandler(&dnsHijacker{
+		// see dns_nat.go
+		setDNSNatHandler(natConn, &dnsHijacker{
 			router:   r.dns,
 			logger:   r.logger,
 			conn:     conn,
 			ctx:      ctx,
 			metadata: metadata,
 			onClose:  onClose,
-		})
+		}, len(packetBuffers) == 0)
 		return nil
 	}
 	err := dnsOutbound.NewDNSPacketConnection(ctx, r.dns, conn, packetBuffers, metadata)
