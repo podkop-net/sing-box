@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,24 +51,58 @@ func listenLocal(t *testing.T, handle func(conn net.Conn)) *net.TCPAddr {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() { listener.Close() })
+	var (
+		access   sync.Mutex
+		accepted []net.Conn
+		running  sync.WaitGroup
+	)
+	// the handlers end with the test: one left behind runs into the tests after it
+	t.Cleanup(func() {
+		listener.Close()
+		access.Lock()
+		for _, conn := range accepted {
+			conn.Close()
+		}
+		access.Unlock()
+		running.Wait()
+	})
+	running.Add(1)
 	go func() {
+		defer running.Done()
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			go handle(conn)
+			access.Lock()
+			accepted = append(accepted, conn)
+			access.Unlock()
+			running.Add(1)
+			go func() {
+				defer running.Done()
+				handle(conn)
+			}()
 		}
 	}()
 	return listener.Addr().(*net.TCPAddr)
 }
 
 // A connection whose first write is never acknowledged is closed by the watch after two
-// retransmissions; one whose write arrives is left alone, and so is one nothing has been
-// written to yet.
+// retransmissions; one whose writes arrive is left alone, and so is one nothing has been
+// written to yet. The watch ends by itself when the server sends something, not when it
+// acknowledges what was written: more of the ClientHello may follow.
 func TestIntegrationHelloWatch(t *testing.T) {
+	// the server answers one connection, when told to
+	answer, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(done) })
 	address := listenLocal(t, func(conn net.Conn) {
+		go func() {
+			select {
+			case <-answer:
+				conn.Write([]byte("answer"))
+			case <-done:
+			}
+		}()
 		io.Copy(io.Discard, conn)
 		conn.Close()
 	})
@@ -83,12 +118,21 @@ func TestIntegrationHelloWatch(t *testing.T) {
 		t.Fatal("the watch ended before anything was written")
 	default:
 	}
-	_, err = delivered.Write(make([]byte, 600))
-	require.NoError(t, err)
+	for range 2 {
+		_, err = delivered.Write(make([]byte, 600))
+		require.NoError(t, err)
+		time.Sleep(4 * helloWatchInterval)
+		select {
+		case <-watch.finished:
+			t.Fatal("the watch ended when a piece was acknowledged")
+		default:
+		}
+	}
+	answer <- struct{}{}
 	select {
 	case <-watch.finished:
 	case <-time.After(time.Second):
-		t.Fatal("the watch goes on after the write was acknowledged")
+		t.Fatal("the watch goes on after the server has answered")
 	}
 	require.False(t, watch.stop())
 	_, err = delivered.Write(make([]byte, 600))
@@ -184,10 +228,15 @@ func cipherSuitesLength(t *testing.T, fingerprint string) uint16 {
 }
 
 // A path that drops the ClientHello of the configured fingerprint and passes the others:
-// the dial gets through with the next fingerprint of the list after one lost ClientHello,
-// and the dials after it begin with that one.
+// the dial gets through with the next fingerprint of the list after two lost ClientHellos
+// of the configured one, and the dials after it begin with that one.
 func TestIntegrationFingerprintFallback(t *testing.T) {
 	setFallbackOrder(t, "safari,firefox")
+	// the second dial would say the same as the first: none of it is to be taken for a
+	// repeat and left out
+	interval := utlsFallbackLogInterval
+	utlsFallbackLogInterval = 0
+	t.Cleanup(func() { utlsFallbackLogInterval = interval })
 	chromeSuites := cipherSuitesLength(t, "chrome")
 	if chromeSuites == cipherSuitesLength(t, "safari") {
 		t.Skip("the ClientHello of chrome and safari cannot be told apart by the length of the cipher suites")
@@ -234,19 +283,21 @@ func TestIntegrationFingerprintFallback(t *testing.T) {
 	echo(conn)
 	conn.Close()
 	lines := warnings.take()
-	require.Len(t, lines, 2)
-	require.Contains(t, lines[0], "unanswered with fingerprint chrome, retrying with safari")
-	require.Contains(t, lines[1], "fingerprint safari is answered where chrome was not")
+	require.Len(t, lines, 3)
+	require.Contains(t, lines[0], "unanswered with fingerprint chrome, trying it once more")
+	require.Contains(t, lines[1], "unanswered with fingerprint chrome, retrying with safari")
+	require.Contains(t, lines[2], "fingerprint safari is answered where chrome was not")
 
 	start = time.Now()
 	conn, err = dialer.DialTLSContext(context.Background(), destination)
 	require.NoError(t, err)
 	elapsed := time.Since(start)
 	t.Logf("the second dial took %d ms", elapsed.Milliseconds())
-	require.Less(t, elapsed, 150*time.Millisecond, "the second dial begins with the fingerprint that works")
 	echo(conn)
 	conn.Close()
+	// a dial that began with the fingerprint that is dropped would have said so
 	require.Empty(t, warnings.take())
+	require.Equal(t, "safari", attemptName(t, config.(fingerprintFallbackConfig).fingerprintDial(), "127.0.0.1"))
 
 	// without the list the same dial waits for its handshake timeout
 	setFallbackOrder(t, "")

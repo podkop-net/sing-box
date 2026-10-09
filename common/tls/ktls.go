@@ -38,6 +38,12 @@ func (w *KTLSClientConfig) Clone() Config {
 	}
 }
 
+// spoofs answers for the configuration it wraps (podkop-engine).
+func (w *KTLSClientConfig) spoofs() bool {
+	spoofing, canSpoof := w.Config.(spoofingConfig)
+	return canSpoof && spoofing.spoofs()
+}
+
 type KTlSServerConfig struct {
 	ServerConfig
 	logger             logger.ContextLogger

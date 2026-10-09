@@ -22,10 +22,11 @@ var (
 
 // watchClientHello closes conn when what the client writes to it stays unacknowledged
 // through helloWatchRetransmits retransmissions (or for helloWatchLimit) while nothing
-// has come from the server. The watch ends by itself once the server has acknowledged
-// all that was written or has sent anything: from then on a stalled connection is not
-// the ClientHello's doing. A connection that is not a TCP socket of the kernel is not
-// watched.
+// has come from the server. The watch ends by itself once the server has sent anything:
+// from then on a stalled connection is not the ClientHello's doing. Until then the
+// client writes nothing but its ClientHello, in pieces when it is fragmented: an
+// acknowledgment of what is written so far does not end the watch. A connection that is
+// not a TCP socket of the kernel is not watched.
 func watchClientHello(conn net.Conn) *helloWatch {
 	tcpConn := kernelTCPConn(conn)
 	if tcpConn == nil {
@@ -44,9 +45,9 @@ func watchClientHello(conn net.Conn) *helloWatch {
 }
 
 // kernelTCPConn finds the TCP socket a connection of the dialer is: the dialer wraps what
-// it returns (the tracking of connections, counters). A connection carried by another
-// one, as with a detour, is not a socket to the server: it has addresses of its own, or
-// is past its first flight, which the watch then sees at once.
+// it returns (the tracking of connections, counters). A connection with addresses of its
+// own is carried by something else and is not a socket to the server; the dialer of a
+// detour is left out before this (throughTunnel).
 func kernelTCPConn(conn net.Conn) *net.TCPConn {
 	tcpConn, isTCP := common.Cast[*net.TCPConn](conn)
 	if !isTCP || tcpConn == nil {
@@ -84,10 +85,6 @@ func (w *helloWatch) run(tcpConn *net.TCPConn, rawConn syscall.RawConn) {
 		case info.Bytes_received > 0:
 			return
 		case info.Unacked == 0:
-			// more than the SYN acknowledged: the ClientHello has arrived
-			if info.Bytes_acked > 1 {
-				return
-			}
 			unackedSince = time.Time{}
 		default:
 			if unackedSince.IsZero() {

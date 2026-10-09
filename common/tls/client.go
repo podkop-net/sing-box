@@ -38,6 +38,16 @@ func parseTLSSpoofOptions(serverName string, options option.OutboundTLSOptions) 
 	return spoof, method, nil
 }
 
+// spoofingConfig is a client configuration that may send a forged ClientHello first
+// (podkop-engine). A configuration that wraps another answers for it.
+type spoofingConfig interface {
+	spoofs() bool
+}
+
+func (c *STDClientConfig) spoofs() bool {
+	return c.spoof != ""
+}
+
 func applyTLSSpoof(conn net.Conn, spoof string, method tlsspoof.Method) (net.Conn, error) {
 	if spoof == "" {
 		return conn, nil
@@ -166,9 +176,18 @@ func (d *defaultDialer) DialTLSContext(ctx context.Context, destination M.Socksa
 }
 
 func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr, echRetry bool) (Conn, error) {
+	// Inside the connection of another outbound the socket is not the server's: there is
+	// no ClientHello of this client to watch on it, and a forged one would be sent to the
+	// server of the tunnel, into its connection (podkop-engine).
+	tunnel := throughTunnel(d.dialer)
 	var fallback fingerprintDial
-	if fallbackConfig, hasFallback := d.config.(fingerprintFallbackConfig); hasFallback {
+	if fallbackConfig, hasFallback := d.config.(fingerprintFallbackConfig); hasFallback && !tunnel {
 		fallback = fallbackConfig.fingerprintDial()
+	}
+	if tunnel {
+		if spoofing, canSpoof := d.config.(spoofingConfig); canSpoof && spoofing.spoofs() {
+			return nil, E.New("tls.spoof does not work through a detour to a proxy outbound")
+		}
 	}
 	for {
 		conn, err := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
@@ -178,8 +197,11 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 		config := d.config
 		var watch *helloWatch
 		if fallback != nil {
-			config = fallback.attempt(conn)
-			watch = watchClientHello(conn)
+			var watched bool
+			config, watched = fallback.attempt(conn)
+			if watched {
+				watch = watchClientHello(conn)
+			}
 		}
 		// The handshake is bounded as in ClientHandshake above (and by handshake_timeout in
 		// 1.14, same default): a server that accepts the connection and never answers the
@@ -189,7 +211,9 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 		tlsConn, err := aTLS.ClientHandshake(handshakeCtx, conn, config)
 		cancel()
 		unanswered := watch.stop()
-		if err == nil {
+		// a handshake that completed in the instant the watch gave the connection up has
+		// a closed socket under it
+		if err == nil && !unanswered {
 			if fallback != nil {
 				fallback.answered()
 			}
@@ -209,6 +233,9 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 				echConfig.SetECHConfigList(echErr.RetryConfigList)
 				return d.dialContext(ctx, destination, false)
 			}
+		}
+		if fallback != nil && fallback.failed(ctx, destination, err) {
+			continue
 		}
 		return nil, err
 	}

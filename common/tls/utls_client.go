@@ -293,7 +293,7 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
-	fallback := newUTLSFallback(logger, options.UTLS.Fingerprint, id, options.Reality != nil && options.Reality.Enabled, spoof != "")
+	fallback := newUTLSFallback(ctx, logger, options.UTLS.Fingerprint, id, options.Reality != nil && options.Reality.Enabled, spoof != "")
 	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, spoof, spoofMethod, fallback}
 	if options.ECH != nil && options.ECH.Enabled {
 		if options.Reality != nil && options.Reality.Enabled {
@@ -371,4 +371,8 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	default:
 		return utls.ClientHelloID{}, E.New("unknown uTLS fingerprint: ", name)
 	}
+}
+
+func (c *UTLSClientConfig) spoofs() bool {
+	return c.spoof != ""
 }
