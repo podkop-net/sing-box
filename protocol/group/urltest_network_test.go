@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service/pause"
 
 	"github.com/stretchr/testify/require"
@@ -23,10 +25,41 @@ import (
 type testPause struct {
 	pause.Manager
 	networkPaused atomic.Bool
+	access        sync.Mutex
+	callbacks     list.List[pause.Callback]
 }
 
 func (p *testPause) IsDevicePaused() bool  { return false }
 func (p *testPause) IsNetworkPaused() bool { return p.networkPaused.Load() }
+func (p *testPause) IsPaused() bool        { return p.networkPaused.Load() }
+
+func (p *testPause) RegisterCallback(callback pause.Callback) *list.Element[pause.Callback] {
+	p.access.Lock()
+	defer p.access.Unlock()
+	return p.callbacks.PushBack(callback)
+}
+
+func (p *testPause) UnregisterCallback(element *list.Element[pause.Callback]) {
+	p.access.Lock()
+	defer p.access.Unlock()
+	p.callbacks.Remove(element)
+}
+
+// set reports the network gone or back, as the monitor does: the state, then the event.
+func (p *testPause) set(paused bool) {
+	p.access.Lock()
+	defer p.access.Unlock()
+	if p.networkPaused.Swap(paused) == paused {
+		return
+	}
+	event := pause.EventNetworkWake
+	if paused {
+		event = pause.EventNetworkPause
+	}
+	for element := p.callbacks.Front(); element != nil; element = element.Next() {
+		element.Value(event)
+	}
+}
 
 // Without a default interface every dial fails at once. That is not the members' failure:
 // their test results stay, and the group does not walk through them erasing each.
@@ -36,8 +69,8 @@ func TestURLTestPausedNetworkKeepsResults(t *testing.T) {
 	second := newTestMember(C.TypeVLESS, "second", dialRefused)
 	urlTest, group := newTestURLTest(t, link, first, second)
 	paused := &testPause{}
-	paused.networkPaused.Store(true)
-	group.pause = paused
+	paused.set(true)
+	group.watchPause(paused)
 
 	for range 3 {
 		_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
@@ -50,7 +83,7 @@ func TestURLTestPausedNetworkKeepsResults(t *testing.T) {
 	require.Equal(t, int32(0), requests.Load())
 
 	// the network is back: the same failure is the member's again
-	paused.networkPaused.Store(false)
+	paused.set(false)
 	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
 	require.Error(t, err)
 	waitSelected(t, group, "second")
@@ -62,12 +95,12 @@ func TestURLTestConfirmDuringPauseDiscarded(t *testing.T) {
 	link, _ := testURL(t, 0)
 	paused := &testPause{}
 	member := newTestMember(C.TypeVLESS, "member", func(context.Context, string, M.Socksaddr) (net.Conn, error) {
-		paused.networkPaused.Store(true) // the interface goes down under the test
+		paused.set(true) // the interface goes down under the test
 		return nil, syscall.ENETUNREACH
 	})
 	spare := newTestMember(C.TypeVLESS, "spare", dialWorking)
 	urlTest, group := newTestURLTest(t, link, member, spare)
-	group.pause = paused
+	group.watchPause(paused)
 
 	// a failed packet dial is confirmed by a URL test of the member
 	_, err := urlTest.ListenPacket(context.Background(), M.ParseSocksaddr("1.2.3.4:443"))
@@ -192,6 +225,11 @@ func dialUnreachable(context.Context, string, M.Socksaddr) (net.Conn, error) {
 	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}
 }
 
+// dialNoDevice fails as a dial does when the interface its socket is bound to is gone.
+func dialNoDevice(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENODEV)}
+}
+
 func shortLocalFailureGrace(t *testing.T) {
 	saved := localFailureGrace
 	localFailureGrace = 300 * time.Millisecond
@@ -209,13 +247,13 @@ func TestURLTestLocalNetworkErrorWaitsForMonitor(t *testing.T) {
 	second := newTestMember(C.TypeVLESS, "second", dialUnreachable)
 	urlTest, group := newTestURLTest(t, link, first, second)
 	paused := &testPause{}
-	group.pause = paused
+	group.watchPause(paused)
 
 	for range 3 {
 		_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
 		require.Error(t, err)
 	}
-	paused.networkPaused.Store(true) // the monitor speaks
+	paused.set(true) // the monitor speaks
 	time.Sleep(2 * localFailureGrace)
 	require.NotNil(t, group.history.LoadURLTestHistory("first"))
 	require.NotNil(t, group.history.LoadURLTestHistory("second"))
@@ -233,7 +271,7 @@ func TestURLTestLocalNetworkErrorOfOneMember(t *testing.T) {
 	first := newTestMember(C.TypeVLESS, "first", dialUnreachable)
 	second := newTestMember(C.TypeVLESS, "second", dialWorking)
 	urlTest, group := newTestURLTest(t, link, first, second)
-	group.pause = &testPause{}
+	group.watchPause(&testPause{})
 
 	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
 	require.Error(t, err)
@@ -250,7 +288,7 @@ func TestURLTestLocalNetworkErrorOutdated(t *testing.T) {
 	first := newTestMember(C.TypeVLESS, "first", dialUnreachable)
 	second := newTestMember(C.TypeVLESS, "second", dialWorking)
 	urlTest, group := newTestURLTest(t, link, first, second)
-	group.pause = &testPause{}
+	group.watchPause(&testPause{})
 
 	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
 	require.Error(t, err)
@@ -268,23 +306,124 @@ func TestURLTestConfirmLocalNetworkErrorWaitsForMonitor(t *testing.T) {
 	spare := newTestMember(C.TypeVLESS, "spare", dialWorking)
 	urlTest, group := newTestURLTest(t, link, member, spare)
 	paused := &testPause{}
-	group.pause = paused
+	group.watchPause(paused)
 
 	// a failed packet dial is confirmed by a URL test of the member, which finds no route
 	_, err := urlTest.ListenPacket(context.Background(), M.ParseSocksaddr("1.2.3.4:443"))
 	require.Error(t, err)
 	waitConfirmed(t, group, "member")
 	require.Equal(t, int32(1), member.dials.Load())
-	paused.networkPaused.Store(true)
+	paused.set(true)
 	time.Sleep(2 * localFailureGrace)
 	require.NotNil(t, group.history.LoadURLTestHistory("member"))
 	require.Equal(t, "member", group.selectedOutboundTCP.Load().Tag())
 
 	// and without the monitor's word the member is unavailable after that time
-	paused.networkPaused.Store(false)
+	paused.set(false)
 	allowConfirm(group, "member", time.Now())
 	_, err = urlTest.ListenPacket(context.Background(), M.ParseSocksaddr("1.2.3.4:443"))
 	require.Error(t, err)
 	waitSelected(t, group, "spare")
 	require.Nil(t, group.history.LoadURLTestHistory("member"))
+}
+
+// An interface that is removed, not taken down (a PPPoE session that ended, a modem that
+// was unplugged), fails the dials bound to it with "no such device": this host's failure
+// as well, which waits for the monitor.
+func TestURLTestLocalNetworkErrorOfAGoneDevice(t *testing.T) {
+	shortLocalFailureGrace(t)
+	link, requests := testURL(t, 0)
+	first := newTestMember(C.TypeVLESS, "first", dialNoDevice)
+	second := newTestMember(C.TypeVLESS, "second", dialNoDevice)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	paused := &testPause{}
+	group.watchPause(paused)
+
+	for range 3 {
+		_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+		require.Error(t, err)
+	}
+	paused.set(true)
+	time.Sleep(2 * localFailureGrace)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"))
+	require.NotNil(t, group.history.LoadURLTestHistory("second"))
+	require.Equal(t, "first", group.selectedOutboundTCP.Load().Tag())
+	require.Equal(t, int32(0), requests.Load())
+}
+
+// An outage shorter than the wait: the route went, the monitor said so, and the route is
+// back before the failure of the first second is looked at. It is of the network that
+// was, whatever the monitor says now.
+func TestURLTestLocalNetworkErrorAcrossAShortOutage(t *testing.T) {
+	shortLocalFailureGrace(t)
+	link, requests := testURL(t, 0)
+	first := newTestMember(C.TypeVLESS, "first", dialUnreachable)
+	second := newTestMember(C.TypeVLESS, "second", dialUnreachable)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	paused := &testPause{}
+	group.watchPause(paused)
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	time.Sleep(localFailureGrace / 4)
+	paused.set(true)
+	time.Sleep(localFailureGrace / 4)
+	paused.set(false)
+	time.Sleep(2 * localFailureGrace)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"), "judged after the outage for a failure of its beginning")
+	require.Equal(t, "first", group.selectedOutboundTCP.Load().Tag())
+	require.Equal(t, int32(0), requests.Load())
+}
+
+// A dial that was on its way when the network went and came back fails after that with
+// an error of its own kind (a timeout, a reset): of the network that was, too.
+func TestURLTestFailureAcrossANetworkChange(t *testing.T) {
+	link, requests := testURL(t, 0)
+	paused := &testPause{}
+	first := newTestMember(C.TypeVLESS, "first", func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		paused.set(true)
+		paused.set(false)
+		return dialRefused(ctx, network, destination)
+	})
+	second := newTestMember(C.TypeVLESS, "second", dialWorking)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	group.watchPause(paused)
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	time.Sleep(50 * time.Millisecond)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"))
+	require.Equal(t, "first", group.selectedOutboundTCP.Load().Tag())
+	require.Equal(t, int32(0), requests.Load())
+}
+
+// Where the monitor never sees a default route (the routes are in another table) it
+// reports the network gone for good. A member that passes a URL test after that report
+// shows the network is there: the members are judged from their traffic again.
+func TestURLTestMonitorThatSeesNoRoute(t *testing.T) {
+	link, _ := testURL(t, 0)
+	first := newTestMember(C.TypeVLESS, "first", dialRefused)
+	second := newTestMember(C.TypeVLESS, "second", dialWorking)
+	urlTest, group := newTestURLTest(t, link, first, second)
+	paused := &testPause{}
+	paused.set(true)
+	group.watchPause(paused)
+
+	_, err := urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	time.Sleep(50 * time.Millisecond)
+	require.NotNil(t, group.history.LoadURLTestHistory("first"), "the report is believed until something refutes it")
+
+	// the round at start, or a test asked for by hand, passes
+	group.history.StoreURLTestHistory("second", &adapter.URLTestHistory{Time: time.Now(), Delay: 110})
+	require.False(t, group.networkPaused())
+	_, err = urlTest.DialContext(context.Background(), N.NetworkTCP, M.ParseSocksaddr("1.2.3.4:443"))
+	require.Error(t, err)
+	waitSelected(t, group, "second")
+	require.Nil(t, group.history.LoadURLTestHistory("first"))
+
+	// a report after that is believed again, until refuted again
+	paused.set(false)
+	paused.set(true)
+	require.True(t, group.networkPaused())
 }

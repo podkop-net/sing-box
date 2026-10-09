@@ -455,6 +455,15 @@ func (r *NetworkManager) UpdateWIFIState() {
 }
 
 func (r *NetworkManager) ResetNetwork() {
+	// Those that judge their members by what a failed dial says are told first: the
+	// reset ends the dials in flight, by the closing of connections below and then
+	// outbound by outbound, and a group that learns of it only at its own turn takes
+	// what failed before that for the members' failures (podkop-engine).
+	for _, outbound := range r.outbound.Outbounds() {
+		if group, isGroup := outbound.(interface{ NetworkReset() }); isGroup {
+			group.NetworkReset()
+		}
+	}
 	if r.connectionManager != nil {
 		r.connectionManager.CloseAll()
 	}
