@@ -10,10 +10,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sagernet/sing-box/common/interrupt"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/stretchr/testify/require"
@@ -31,13 +33,16 @@ const testSourceSet = `{"version":3,"rules":[{"domain_suffix":["example.com"]}]}
 // is read into memory.
 func TestRemoteRuleSetDeclaredTooLarge(t *testing.T) {
 	defer swapMaxSize(1 << 20)()
+	// far more than the socket buffers of both ends take in: a server whose answer is
+	// not read cannot have written all of it
+	const declared = 64 << 20
 	var sent int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", strconv.Itoa(2<<20))
+		w.Header().Set("Content-Length", strconv.Itoa(declared))
 		w.WriteHeader(http.StatusOK)
-		chunk := strings.Repeat("A", 64<<10)
-		for range 32 {
-			n, err := w.Write([]byte(chunk))
+		chunk := []byte(strings.Repeat("A", 64<<10))
+		for sent < declared {
+			n, err := w.Write(chunk)
 			sent += n
 			if err != nil {
 				return
@@ -51,7 +56,7 @@ func TestRemoteRuleSetDeclaredTooLarge(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "larger than 1 MB")
 	server.Close()
-	require.Less(t, sent, 2<<20, "the client must stop the transfer instead of reading it")
+	require.Less(t, sent, declared, "the client must stop the transfer instead of reading it")
 }
 
 // A page served with status 200 where a binary rule-set is expected is refused by its first
@@ -157,4 +162,16 @@ type recordingDialer struct {
 func (d *recordingDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	d.external = interrupt.IsExternalConnectionFromContext(ctx)
 	return d.testDialer.DialContext(ctx, network, destination)
+}
+
+// What a server sends reaches the log as one printable line of a bounded length.
+func TestRuleSetLogText(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "unexpected status: 404 Not?Found??[31m", logText(E.New("unexpected status: 404 Not\nFound\r\x1b[31m")))
+	require.Equal(t, "rules[0]: unknown rule type: x?y", logText(E.New("rules[0]: unknown rule type: x\x00y")))
+	long := logText(E.New(strings.Repeat("\u044f", 600)))
+	require.LessOrEqual(t, len(long), 515)
+	require.True(t, strings.HasSuffix(long, "..."))
+	require.True(t, utf8.ValidString(long))
+	require.NotContains(t, long, "?")
 }

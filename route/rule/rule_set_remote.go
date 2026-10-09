@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/interrupt"
@@ -134,7 +136,7 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 		if err != nil {
 			// Start with an empty rule-set instead of failing the whole start:
 			// loopUpdate keeps retrying until the first download succeeds.
-			s.logger.Error(E.Cause(err, "initial rule-set: ", s.options.Tag, ", starting empty and retrying"))
+			s.logger.Error("initial rule-set: ", s.options.Tag, ", starting empty and retrying: ", logText(err))
 		}
 	}
 	s.updateTicker = time.NewTicker(s.updateInterval)
@@ -295,13 +297,29 @@ func (s *RemoteRuleSet) fetchFailed(err error) {
 	switch {
 	case s.failures == 1:
 		s.failureLogged = time.Now()
-		s.logger.Error("fetch rule-set ", s.options.Tag, ": ", err)
+		s.logger.Error("fetch rule-set ", s.options.Tag, ": ", logText(err))
 	case time.Since(s.failureLogged) >= ruleSetFailureLogInterval:
 		s.failureLogged = time.Now()
-		s.logger.Error("fetch rule-set ", s.options.Tag, ": ", s.failures, " failed attempts, the last: ", err)
+		s.logger.Error("fetch rule-set ", s.options.Tag, ": ", s.failures, " failed attempts, the last: ", logText(err))
 	default:
-		s.logger.Debug("fetch rule-set ", s.options.Tag, ": ", err)
+		s.logger.Debug("fetch rule-set ", s.options.Tag, ": ", logText(err))
 	}
+}
+
+// logText makes one line of the error of a fetch. It may carry what the server sent: the
+// status line of the answer, the text of a rule that does not parse. That text is cut,
+// and what is not printable in it is replaced.
+func logText(err error) string {
+	text := err.Error()
+	if len(text) > 512 {
+		text = strings.ToValidUTF8(text[:512], "") + "..."
+	}
+	return strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return '?'
+		}
+		return r
+	}, text)
 }
 
 // A rule-set download must not hang the start (the inbounds listen only after every rule-set
