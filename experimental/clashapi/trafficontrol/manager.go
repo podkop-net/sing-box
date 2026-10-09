@@ -72,8 +72,12 @@ func (m *Manager) Leave(c Tracker) {
 	_, loaded := m.connections.LoadAndDelete(metadata.ID)
 	if loaded {
 		closedAt := time.Now()
-		metadata.ClosedAt = closedAt
+		// The time goes into the copy that is kept, not into the record of the connection
+		// itself: that one is being read by whoever lists the connections at this moment
+		// (the Clash API writes every record out), and the write raced with that read
+		// (podkop-engine).
 		metadataCopy := *metadata
+		metadataCopy.ClosedAt = closedAt
 		m.closedConnectionsAccess.Lock()
 		if m.closedConnections.Len() >= closedConnectionsLimit {
 			m.closedConnections.PopFront()
