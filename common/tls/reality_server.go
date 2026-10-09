@@ -104,6 +104,11 @@ func NewRealityServer(ctx context.Context, logger log.ContextLogger, options opt
 	} else {
 		for i, shortIDString := range options.Reality.ShortID {
 			var shortID [8]byte
+			// hex.Decode writes past a destination shorter than what it is given
+			// (podkop-engine)
+			if len(shortIDString) > 2*len(shortID) {
+				return nil, E.New("invalid short_id[", i, "]: ", shortIDString)
+			}
 			decodedLen, err := hex.Decode(shortID[:], []byte(shortIDString))
 			if err != nil {
 				return nil, E.Cause(err, "decode short_id[", i, "]: ", shortIDString)

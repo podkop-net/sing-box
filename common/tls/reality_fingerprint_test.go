@@ -383,3 +383,16 @@ func TestUTLSALPNHandshakeAgainAfterRelease(t *testing.T) {
 	})
 	require.True(t, conn.ConnectionState().HandshakeComplete)
 }
+
+// A short_id longer than eight bytes is an error of the configuration, not a crash:
+// hex.Decode writes past a destination shorter than its input.
+func TestRealityShortIDTooLong(t *testing.T) {
+	logger, _ := newWarnLogger(t)
+	options := realityOptionsForTest("chrome", true)
+	options.Reality.ShortID = "0123456789abcdef01"
+	_, err := NewClient(context.Background(), logger, "192.0.2.1", options)
+	require.ErrorContains(t, err, "invalid short_id")
+	options.Reality.ShortID = "0123456789abcdef"
+	_, err = NewClient(context.Background(), logger, "192.0.2.1", options)
+	require.NoError(t, err)
+}

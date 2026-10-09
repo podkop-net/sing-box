@@ -104,6 +104,10 @@ func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("invalid public_key")
 	}
 	var shortID [8]byte
+	// hex.Decode writes past a destination shorter than its input (podkop-engine)
+	if len(options.Reality.ShortID) > 2*len(shortID) {
+		return nil, E.New("invalid short_id")
+	}
 	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
 	if err != nil {
 		return nil, E.Cause(err, "decode short_id")
