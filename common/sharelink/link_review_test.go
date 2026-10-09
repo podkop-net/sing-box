@@ -3,6 +3,8 @@ package sharelink
 import (
 	"context"
 	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -177,4 +179,151 @@ func TestSmallLeniencies(t *testing.T) {
 	_, _, err := Decode(xhttpLink(`{"scMaxBufferedPosts":"many"}`, url.QueryEscape, ""))
 	require.ErrorContains(t, err, "scMaxBufferedPosts has a value of the wrong type")
 	require.NotContains(t, err.Error(), "xraySplitHTTP")
+}
+
+// A transport that speaks one protocol keeps the ALPN to itself, as with Xray: the list a
+// panel writes for every host does not reach it.
+func TestTransportALPN(t *testing.T) {
+	t.Parallel()
+	base := "vless://" + testUUID + "@example.org:443?security=tls&sni=example.org&alpn=h2%2Chttp%2F1.1"
+	for transport, want := range map[string][]string{
+		"&type=tcp":                               {"h2", "http/1.1"},
+		"":                                        {"h2", "http/1.1"},
+		"&type=ws&path=%2Fws":                     nil,
+		"&type=httpupgrade&path=%2Fhu":            nil,
+		"&type=grpc&serviceName=svc":              nil,
+		"&type=http&path=%2Fh":                    nil,
+		"&type=xhttp&path=%2Fx":                   {"h2", "http/1.1"},
+		"&type=ws&path=%2Fws&sb.tls.alpn=h2":      {"h2"},
+		"&type=grpc&serviceName=s&sb.tls.alpn=h2": {"h2"},
+	} {
+		require.Equal(t, want, []string(tlsOf(t, base+transport).ALPN), transport)
+	}
+	// with VMess and Trojan links too
+	require.Empty(t, tlsOf(t, "trojan://p@example.org:443?type=ws&alpn=h2%2Chttp%2F1.1").ALPN)
+	require.Empty(t, tlsOf(t, "vmess://"+b64(`{"v":"2","add":"example.org","port":443,"id":"`+testUUID+`","net":"ws","tls":"tls","alpn":"h2,http/1.1"}`)).ALPN)
+	require.Equal(t, []string{"h2", "http/1.1"}, []string(tlsOf(t, "vmess://"+b64(`{"v":"2","add":"example.org","port":443,"id":"`+testUUID+`","net":"tcp","tls":"tls","alpn":"h2,http/1.1"}`)).ALPN))
+}
+
+// The name of a gRPC service as Marzban writes that of a custom path.
+func TestGRPCServiceNameEscapedTwice(t *testing.T) {
+	t.Parallel()
+	base := "vless://" + testUUID + "@example.org:443?security=none&type=grpc&serviceName="
+	for given, want := range map[string]string{
+		"svc":              "svc",
+		"%252Fsvc%252FTun": "svc",
+		"my%2520svc":       "my%20svc",
+		"a%2Eb":            "a.b",
+		"%E2%9C%93":        "\u2713",
+		"%25E2%259C%2593":  "%E2%9C%93",
+	} {
+		content, _ := decodeJSON(t, base+given)
+		require.JSONEq(t, `{"type":"vless","server":"example.org","server_port":443,"uuid":"`+testUUID+`","transport":{"type":"grpc","service_name":"`+want+`"}}`, content, given)
+	}
+}
+
+// What sing-box would quote in its error when it refuses an outbound is checked by the
+// decoder first, with a text of its own: a user of the wrong shape may be a password.
+func TestRefusedBeforeSingBoxQuotes(t *testing.T) {
+	t.Parallel()
+	const canary = "CANARY0f6d2c"
+	for link, want := range map[string]string{
+		"tuic://" + canary + ":pass@example.org:443":                                             "the user of the link is not a UUID and a password",
+		"tuic://6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c1:" + canary + "@example.org:443":              "the user of the link is not a UUID and a password",
+		"ss://" + b64(canary+" x:pass") + "@example.org:443":                                     "the user of the link is not a method and a password",
+		"ss://" + canary + "%40x:pass@example.org:443":                                           "the user of the link is not a method and a password",
+		"hysteria2://pass@example.org:443?obfs=" + canary + "%20x&obfs-password=y":               "unsupported obfuscation of Hysteria 2",
+		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&sid=0123456789abcdef01": "the REALITY short id (sid)",
+		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&sid=abc":                "the REALITY short id (sid)",
+		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&sid=" + canary:          "the REALITY short id (sid)",
+	} {
+		outbound, _, err := Decode(link)
+		require.Nil(t, outbound, link)
+		require.ErrorContains(t, err, want, link)
+		require.NotContains(t, err.Error(), canary, link)
+	}
+	// and what is of the right shape passes
+	for _, link := range []string{
+		"tuic://" + testUUID + ":pass@example.org:443?alpn=h3",
+		"tuic://" + strings.ReplaceAll(testUUID, "-", "") + ":pass@example.org:443?alpn=h3",
+		"ss://" + b64("2022-blake3-chacha20-poly1305:"+canary) + "@example.org:443",
+		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&sid=",
+		"vless://" + testUUID + "@example.org:443?security=reality&pbk=K&sid=0123456789ABCDEF",
+	} {
+		_, warnings, err := Decode(link)
+		require.NoError(t, err, link)
+		require.Empty(t, warnings, link)
+	}
+	// a TUIC link without an ALPN is taken, with a word about it
+	_, warnings, err := Decode("tuic://" + testUUID + ":pass@example.org:443")
+	require.NoError(t, err)
+	require.Len(t, warnings, 1)
+	require.Contains(t, warnings[0], "names no ALPN")
+}
+
+// A Shadowsocks plugin has options of its own in one string, and v2ray-plugin reads the
+// file one of them names: not for a link to set, however the name is written.
+func TestPluginOptionThatIsAFile(t *testing.T) {
+	t.Parallel()
+	base := "ss://" + b64("aes-128-gcm:password") + "@example.org:443?"
+	for _, parameters := range []string{
+		"plugin=" + url.QueryEscape("v2ray-plugin;tls;cert=/etc/passwd"),
+		"plugin=" + url.QueryEscape("v2ray-plugin;cert=/dev/zero;tls"),
+		"plugin=" + url.QueryEscape(`v2ray-plugin;tls;c\ert=/dev/zero`),
+		"plugin=" + url.QueryEscape("v2ray-plugin;tls;cert"),
+		"sb.plugin=v2ray-plugin&sb.plugin_opts=" + url.QueryEscape("tls;cert=/dev/zero"),
+		"plugin=v2ray-plugin&sb.plugin_opts=" + url.QueryEscape("cert=/dev/zero"),
+	} {
+		require.Equal(t, "sb-denied", refusalID(t, base+parameters), parameters)
+	}
+	for _, parameters := range []string{
+		"plugin=" + url.QueryEscape("v2ray-plugin;tls;host=cdn.example.org;path=/ws;mux=0"),
+		"plugin=" + url.QueryEscape("v2ray-plugin;tls;certRaw=MIIB;host=cdn.example.org"),
+		"plugin=" + url.QueryEscape("obfs-local;obfs=http;obfs-host=cdn.example.org"),
+		"plugin=" + url.QueryEscape("simple-obfs;obfs=tls"),
+	} {
+		_, _, err := Decode(base + parameters)
+		require.NoError(t, err, parameters)
+	}
+	_, _, err := Decode(base + "plugin=" + url.QueryEscape("a plugin;x"))
+	require.ErrorContains(t, err, "the plugin of the link is not a name")
+
+	// every option the plugins of sing-box read is known here: a new one is looked at
+	// before a link may set it
+	pattern := regexp.MustCompile(`pluginOpts\.Get\("([^"]+)"\)`)
+	entries, err := os.ReadDir("../../transport/sip003")
+	require.NoError(t, err)
+	read := make(map[string]bool)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		content, err := os.ReadFile("../../transport/sip003/" + entry.Name())
+		require.NoError(t, err)
+		for _, match := range pattern.FindAllSubmatch(content, -1) {
+			read[string(match[1])] = true
+		}
+	}
+	require.NotEmpty(t, read)
+	for name := range read {
+		require.Contains(t, pluginOptions, name, "a plugin option of sing-box nobody has looked at")
+	}
+}
+
+// The ports a Hysteria link hops over are bounded: sing-box writes them out one by one.
+func TestPortListBound(t *testing.T) {
+	t.Parallel()
+	whole := strings.TrimSuffix(strings.Repeat("1-65535,", 2), ",")
+	for _, link := range []string{
+		"hysteria2://password@example.org:443?mport=" + whole,
+		"hysteria2://password@example.org:" + whole,
+		"hysteria2://password@example.org:443?sb.server_ports=" + url.QueryEscape("1:65535,1:65535"),
+		"hysteria2://password@example.org:443?sb.server_ports=" + url.QueryEscape(`["1:65535","2:2"]`),
+	} {
+		require.Equal(t, "ports", refusalID(t, link), link)
+	}
+	content, _ := decodeJSON(t, "hysteria2://password@example.org:443?mport=443,20000-50000")
+	require.Contains(t, content, `"server_ports":["443:443","20000:50000"]`)
+	_, _, err := Decode("hysteria2://password@example.org:443?sb.server_ports=" + url.QueryEscape("6000:5000"))
+	require.ErrorContains(t, err, "invalid port in the list of ports")
 }

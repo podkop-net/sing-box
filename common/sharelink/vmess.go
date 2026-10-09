@@ -153,7 +153,15 @@ func (d *decoder) vmessOptions(user string, server option.ServerOptions, alterID
 		return nil, err
 	}
 	security := strings.ToLower(d.query["encryption"])
-	if security == "" {
+	switch security {
+	case "", "auto":
+		security = "auto"
+	case "aes-128-gcm", "chacha20-poly1305":
+	default:
+		// As the client of Xray reads it: any other name is auto. Its server refuses a
+		// request with none, zero or aes-128-cfb since 2026, and every VMess server takes
+		// the two ciphers auto chooses from.
+		d.warn("the VMess security", shown(security), " is read as auto, as Xray does: its server refuses any other")
 		security = "auto"
 	}
 	options := option.VMessOutboundOptions{

@@ -2,10 +2,16 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/common/sharelink"
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 
 	"github.com/stretchr/testify/require"
@@ -71,6 +77,137 @@ func TestDecodeLinkCommand(t *testing.T) {
 	// an xhttp link whose options pass the check must not crash the command
 	status, _, _ := run("", link+"&extra=%7B%22xmux%22%3A%7B%22maxConnections%22%3A2%7D%7D")
 	require.Zero(t, status)
+}
+
+// A link is somebody else's text: the command reads no file for it, and what it says of
+// an outbound that cannot be built is one line that does not quote the link.
+func TestDecodeLinkReadsNoFile(t *testing.T) {
+	const marker = "MARKER-0f6d2c-not-a-certificate"
+	file := filepath.Join(t.TempDir(), "secret.txt")
+	require.NoError(t, os.WriteFile(file, []byte(marker+"\n"), 0o600))
+	base := "vless://6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11@example.org:443?security=tls&sni=example.org"
+	for name, parameter := range map[string]string{
+		"a group of options as JSON":   "sb.tls=" + url.QueryEscape(`{"enabled":true,"certificate_path":"`+file+`"}`),
+		"the ECH options as JSON":      "sb.tls.ech=" + url.QueryEscape(`{"enabled":true,"config_path":"`+file+`"}`),
+		"the option by its path":       "sb.tls.certificate_path=" + url.QueryEscape(file),
+		"the client key by its path":   "sb.tls.client_key_path=" + url.QueryEscape(file),
+		"a certificate that is no PEM": "cert=" + url.QueryEscape(marker+"\n"+marker),
+	} {
+		var output, errorOutput bytes.Buffer
+		status := decodeLink([]string{base + "&" + parameter}, strings.NewReader(""), &output, &errorOutput)
+		require.Equal(t, decodeLinkExitBadLink, status, name)
+		require.Empty(t, output.String(), name)
+		require.NotContains(t, errorOutput.String(), marker, name)
+		require.True(t, strings.HasPrefix(errorOutput.String(), "error: "), name)
+		require.Equal(t, 1, strings.Count(errorOutput.String(), "\n"), name)
+	}
+	// the plugin of Shadowsocks has an option that names a file
+	for name, link := range map[string]string{
+		"the plugin of the link":       "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ=@example.org:443?plugin=" + url.QueryEscape("v2ray-plugin;tls;cert="+file),
+		"the plugin options by a path": "ss://YWVzLTEyOC1nY206cGFzc3dvcmQ=@example.org:443?sb.plugin=v2ray-plugin&sb.plugin_opts=" + url.QueryEscape("tls;cert="+file),
+	} {
+		var output, errorOutput bytes.Buffer
+		status := decodeLink([]string{link}, strings.NewReader(""), &output, &errorOutput)
+		require.Equal(t, decodeLinkExitBadLink, status, name)
+		require.Empty(t, output.String(), name)
+		require.Contains(t, errorOutput.String(), "not for a link to set", name)
+		require.NotContains(t, errorOutput.String(), marker, name)
+	}
+	// and no secret of the link in what the outbound itself says
+	require.Equal(t, "invalid ...", plainMessage("invalid 6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11:\n\nmore", []string{"6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11"}))
+}
+
+// An error is one line, and says nothing of what the link keeps secret, whoever wrote
+// it: the decoder, or the outbound of sing-box when it is built.
+func TestDecodeLinkErrorsAreOneLine(t *testing.T) {
+	const canary = "CANARY0f6d2c"
+	const uuid = "6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11"
+	for name, link := range map[string]string{
+		"tuic, a user that is no UUID":           "tuic://" + canary + ":" + canary + "@example.org:443?alpn=h3",
+		"shadowsocks, no method":                 "ss://" + canary + "@example.org:443",
+		"shadowsocks, an unknown method":         "ss://" + base64.StdEncoding.EncodeToString([]byte("no-such-method:"+canary)) + "@example.org:443",
+		"shadowsocks 2022, a key of no length":   "ss://" + base64.StdEncoding.EncodeToString([]byte("2022-blake3-aes-128-gcm:"+canary)) + "@example.org:443",
+		"hysteria2, an unknown obfuscation":      "hysteria2://" + canary + "@example.org:443?obfs=no-such&obfs-password=" + canary,
+		"reality, a key that is none":            "vless://" + uuid + "@example.org:443?security=reality&pbk=" + canary + "&sid=01",
+		"reality, a short id too long":           "vless://" + uuid + "@example.org:443?security=reality&pbk=YBZ6SAP7KfiD5YJiyAGvD49eNYW-f-7IlhMarfyy4k0&sid=0123456789abcdef0123",
+		"a certificate that is none":             "trojan://" + canary + "@example.org:443?cert=" + canary,
+		"free text in an option set by its path": "vless://" + uuid + "@example.org:443?security=tls&sb.tls.min_version=" + canary + "%20%40x",
+		"a flow of several lines":                "vless://" + uuid + "@example.org:443?security=tls&type=ws&sb.flow=AAA%0A" + canary,
+		"a transport type of several lines":      "vless://" + uuid + "@example.org:443?security=tls&type=ws&sb.transport.type=x%0A" + canary + "&sb.transport.path=/p",
+		// these two are refused by sing-box, which quotes what it was given
+		"a transport type with a tab":      "vless://" + uuid + "@example.org:443?security=tls&type=ws&sb.transport.type=x%09" + canary,
+		"a transport type with a new line": "vless://" + uuid + "@example.org:443?security=tls&type=ws&sb.transport.type=x%0A" + canary,
+	} {
+		var output, errorOutput bytes.Buffer
+		status := decodeLink([]string{link}, strings.NewReader(""), &output, &errorOutput)
+		require.Equal(t, decodeLinkExitBadLink, status, "%s: %s", name, errorOutput.String())
+		require.Empty(t, output.String(), name)
+		require.True(t, strings.HasPrefix(errorOutput.String(), "error: "), "%s: %s", name, errorOutput.String())
+		require.Equal(t, 1, strings.Count(errorOutput.String(), "\n"), "%s: %s", name, errorOutput.String())
+		require.NotContains(t, errorOutput.String(), canary, name)
+		require.NotContains(t, errorOutput.String(), "goroutine", name)
+	}
+	// an outbound whose building fails outright is a link that cannot be used
+	require.Equal(t, `invalid "..."`, plainMessage(`invalid "a\"b\\c1"`, []string{`a"b\c1`}))
+	// what the link keeps secret is taken out as it stands in the message, then the
+	// message is made one line
+	require.Equal(t, "bad ... here", plainMessage("bad x\tSECRET here", []string{"x\tSECRET"}))
+	require.Equal(t, "bad ... here", plainMessage("bad x\nSECRET here\nmore", []string{"x\nSECRET"}))
+	require.Equal(t, "a b c", plainMessage("a\rb\tc", nil))
+}
+
+// A warning is one line too, whatever stands in the link in the place of a name.
+func TestDecodeLinkWarningsAreLines(t *testing.T) {
+	const canary = "CANARY0f6d2c"
+	const uuid = "6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11"
+	for name, link := range map[string]string{
+		"a name of several lines": "vless://" + uuid + "@example.org:443?security=tls&x%0Aerror%3A%20" + canary + "=1",
+		"another link for a name": "vless://" + uuid + "@example.org:443?security=tls&vless://" + canary + "@example.org:443?type=ws",
+		"an unknown name":         "vless://" + uuid + "@example.org:443?security=tls&NoSuchName=" + canary,
+	} {
+		var output, errorOutput bytes.Buffer
+		status := decodeLink([]string{link}, strings.NewReader(""), &output, &errorOutput)
+		require.Equal(t, 0, status, "%s: %s", name, errorOutput.String())
+		require.NotEmpty(t, output.String(), name)
+		lines := strings.Split(strings.TrimSuffix(errorOutput.String(), "\n"), "\n")
+		require.Len(t, lines, 1, "%s: %s", name, errorOutput.String())
+		require.True(t, strings.HasPrefix(lines[0], "warning: "), "%s: %s", name, errorOutput.String())
+		require.NotContains(t, errorOutput.String(), canary, name)
+	}
+	require.Equal(t, "a b c", oneLine("a\nb\tc"))
+}
+
+// An outbound that does not get built in time is a link that cannot be used.
+func TestDecodeLinkBuildTimeout(t *testing.T) {
+	timeout, build := decodeLinkBuildTimeout, buildDecoded
+	t.Cleanup(func() { decodeLinkBuildTimeout, buildDecoded = timeout, build })
+	decodeLinkBuildTimeout = 200 * time.Millisecond
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	buildDecoded = func([]byte) ([]string, error) {
+		close(entered)
+		<-release
+		return nil, nil
+	}
+	var output, errorOutput bytes.Buffer
+	start := time.Now()
+	status := decodeLink([]string{"vless://6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11@example.org:443"}, strings.NewReader(""), &output, &errorOutput)
+	require.Equal(t, decodeLinkExitBadLink, status)
+	require.Empty(t, output.String())
+	require.Equal(t, "error: this sing-box takes too long to build the outbound of the link\n", errorOutput.String())
+	require.Less(t, time.Since(start), 5*time.Second)
+	// the build that was left behind has taken its function: the variable is free again
+	<-entered
+	// and one whose building fails outright
+	buildDecoded = func([]byte) ([]string, error) {
+		var short [8]byte
+		index := 9
+		return nil, E.New(short[index%len(short)+index])
+	}
+	errorOutput.Reset()
+	status = decodeLink([]string{"vless://6f1c9a0e-3b52-4c1e-9a55-2d4a1b0f7c11@example.org:443"}, strings.NewReader(""), &output, &errorOutput)
+	require.Equal(t, decodeLinkExitBadLink, status)
+	require.Equal(t, "error: this sing-box cannot build the outbound of the link\n", errorOutput.String())
 }
 
 // Scripts read the features as whole names between commas, and ask for the ones they

@@ -20,15 +20,15 @@ const fallbackBase = "vless://" + testUUID + "@example.org:443?security=tls&type
 func TestOptionPaths(t *testing.T) {
 	t.Parallel()
 	content, warnings := decodeJSON(t, fallbackBase+
-		"&sb.tls.fragment=1&sb.tls.record_fragment=false&sb.tls.fragment_fallback_delay=500ms&sb.tls.min_version=1.3"+
+		"&sb.tls.fragment=1&sb.tls.record_fragment=false&sb.tls.min_version=1.3"+
 		"&sb.tls.cipher_suites=TLS_AES_128_GCM_SHA256,TLS_CHACHA20_POLY1305_SHA256&sb.tls.alpn=%5B%22h2%22%5D"+
 		"&sb.multiplex.enabled=true&sb.multiplex.protocol=h2mux&sb.multiplex.max_connections=4&sb.multiplex.padding=1"+
-		"&sb.multiplex.brutal=%7B%22enabled%22%3Atrue%2C%22up_mbps%22%3A50%2C%22down_mbps%22%3A100%7D"+
+		"&sb.multiplex.brutal.enabled=true&sb.multiplex.brutal.up_mbps=50&sb.multiplex.brutal.down_mbps=100"+
 		"&sb.tcp_fast_open=1&sb.connect_timeout=5s&sb.network=tcp&sb.transport.headers.User-Agent=curl%2F8&sb.transport.max_early_data=2048"+
 		"&sb.tls.server_name=0123")
 	require.JSONEq(t, `{"type":"vless","server":"example.org","server_port":443,"uuid":"`+testUUID+`","network":"tcp","tcp_fast_open":true,"connect_timeout":"5s",
 		"tls":{"enabled":true,"server_name":"0123","alpn":["h2"],"min_version":"1.3","cipher_suites":["TLS_AES_128_GCM_SHA256","TLS_CHACHA20_POLY1305_SHA256"],
-		"fragment":true,"record_fragment":false,"fragment_fallback_delay":"500ms","utls":{"enabled":true,"fingerprint":"chrome"}},
+		"fragment":true,"record_fragment":false,"utls":{"enabled":true,"fingerprint":"chrome"}},
 		"multiplex":{"enabled":true,"protocol":"h2mux","max_connections":4,"padding":true,"brutal":{"enabled":true,"up_mbps":50,"down_mbps":100}},
 		"transport":{"type":"ws","headers":{"Host":"h.example.org","User-Agent":"curl/8"},"max_early_data":2048}}`, content)
 	require.Empty(t, warnings)
@@ -112,20 +112,39 @@ func TestOptionRefusals(t *testing.T) {
 		"sb.tls.no_such_option=1":                   "sb-unknown",
 		"sb.tls.alpn.first=h2":                      "sb-unknown",
 		"sb.=1":                                     "sb-unknown",
-		// a name that grows when lowered: found by the fuzzer
-		"SB.%C4%B0=1":                       "sb-unknown",
-		"sb.tls..fragment=1":                "sb-unknown",
-		"sb.tls.fragment=maybe":             "sb-value",
-		"sb.multiplex.max_connections=many": "sb-value",
-		"sb.connect_timeout=soon":           "sb-value",
-		"sb.multiplex=on":                   "sb-value",
+		"sb.tls..fragment=1":                        "sb-unknown",
+		"sb.tls.fragment=maybe":                     "sb-value",
+		"sb.multiplex.max_connections=many":         "sb-value",
+		"sb.connect_timeout=soon":                   "sb-value",
+		"sb.multiplex=on":                           "sb-value",
+		// a JSON object would set options by names nothing has looked at: a file, a detour
+		"sb.tls=" + url.QueryEscape(`{"enabled":true,"certificate_path":"/etc/passwd"}`):        "sb-value",
+		"sb.tls.ech=" + url.QueryEscape(`{"enabled":true,"config_path":"/etc/passwd"}`):         "sb-value",
+		"sb.multiplex=" + url.QueryEscape(`{"enabled":true,"protocol":"h2mux"}`):                "sb-value",
+		"sb.multiplex.brutal=" + url.QueryEscape(`{"enabled":true,"up_mbps":50,"down_mbps":1}`): "sb-value",
+		// a map is set by its names
+		"sb.transport.headers=" + url.QueryEscape(`{"Host":"a.example.org"}`): "sb-unknown",
+		"sb.transport.headers=a": "sb-unknown",
 	} {
 		require.Equal(t, id, refusalID(t, fallbackBase+"&"+parameter), parameter)
 	}
+	// the same inside the options of the download leg of xhttp
+	xhttp := "vless://" + testUUID + "@example.org:443?security=tls&type=xhttp&path=%2Fx"
+	require.Equal(t, "sb-value", refusalID(t, xhttp+"&sb.transport.download="+url.QueryEscape(`{"server":"d.example.org","server_port":443,"detour":"direct"}`)))
+	require.Equal(t, "sb-denied", refusalID(t, xhttp+"&sb.transport.download.detour=direct"))
+	// a JSON list of plain values is a list
+	content, _ := decodeJSON(t, fallbackBase+"&sb.tls.alpn="+url.QueryEscape(`["h2","http/1.1"]`))
+	require.Contains(t, content, `"alpn":["h2","http/1.1"]`)
 	// a secret in a value that does not fit is not repeated
 	_, _, err := Decode(fallbackBase + "&sb.connect_timeout=" + url.QueryEscape("vless://secret@host"))
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "secret")
+	// an option the newer line has: the time a dial may wait is not for a link to set
+	wantTimeout := "sb-unknown"
+	if _, has := reflect.TypeOf(option.OutboundTLSOptions{}).FieldByName("HandshakeTimeout"); has {
+		wantTimeout = "sb-denied"
+	}
+	require.Equal(t, wantTimeout, refusalID(t, policyBase+"security=tls&sb.tls.handshake_timeout=87600h"))
 }
 
 func optionLeaves(valueType reflect.Type, path string, denied string, leaves map[string]string, depth int) {

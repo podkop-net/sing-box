@@ -56,19 +56,28 @@ const policyBase = "vless://" + testUUID + "@example.org:443?"
 func TestRefusals(t *testing.T) {
 	t.Parallel()
 	for link, id := range map[string]string{
-		"tor://example.org:9050":                                                                      "no-link-form",
-		"ssh://user:pass@example.org:22":                                                              "no-link-form",
-		"shadowtls://x@example.org:443":                                                               "no-link-form",
-		"snell://x@example.org:443":                                                                   "no-link-form",
-		policyBase + "security=xtls":                                                                  "security",
-		policyBase + "encryption=mlkem768x25519plus.native.0rtt.KEY":                                  "vless-encryption",
-		policyBase + "security=reality&pbk=K&flow=xtls-rprx-direct":                                   "flow",
-		policyBase + "security=tls&flow=xtls-rprx-vision&type=ws":                                     "flow-transport",
-		policyBase + "security=tls&flow=xtls-rprx-vision&type=grpc":                                   "flow-transport",
-		policyBase + "security=tls&flow=xtls-rprx-vision&type=http":                                   "flow-transport",
-		policyBase + "security=tls&flow=xtls-rprx-vision&type=httpupgrade":                            "flow-transport",
-		policyBase + "security=tls&flow=xtls-rprx-vision&type=xhttp":                                  "flow-transport",
-		policyBase + "security=none&flow=xtls-rprx-vision":                                            "flow-no-tls",
+		"tor://example.org:9050":                                           "no-link-form",
+		"ssh://user:pass@example.org:22":                                   "no-link-form",
+		"shadowtls://x@example.org:443":                                    "no-link-form",
+		"snell://x@example.org:443":                                        "no-link-form",
+		policyBase + "security=xtls":                                       "security",
+		policyBase + "encryption=mlkem768x25519plus.native.0rtt.KEY":       "vless-encryption",
+		policyBase + "security=reality&pbk=K&flow=xtls-rprx-direct":        "flow",
+		policyBase + "security=tls&flow=xtls-rprx-vision&type=ws":          "flow-transport",
+		policyBase + "security=tls&flow=xtls-rprx-vision&type=grpc":        "flow-transport",
+		policyBase + "security=tls&flow=xtls-rprx-vision&type=http":        "flow-transport",
+		policyBase + "security=tls&flow=xtls-rprx-vision&type=httpupgrade": "flow-transport",
+		policyBase + "security=tls&flow=xtls-rprx-vision&type=xhttp":       "flow-transport",
+		policyBase + "security=none&flow=xtls-rprx-vision":                 "flow-no-tls",
+		// the same when the flow, the transport or TLS is set by its path
+		policyBase + "security=tls&flow=xtls-rprx-vision&sb.transport.type=ws":                        "flow-transport",
+		policyBase + "security=tls&type=ws&sb.flow=xtls-rprx-vision":                                  "flow-transport",
+		policyBase + "security=tls&type=grpc&serviceName=s&sb.flow=xtls-rprx-vision":                  "flow-transport",
+		policyBase + "sb.flow=xtls-rprx-vision":                                                       "flow-no-tls",
+		policyBase + "security=tls&sni=s.example.org&sb.tls.spoof=w.example.org&sb.tcp_fast_open=1":   "spoof-fast-open",
+		policyBase + "security=tls&sni=s.example.org&tls_spoof=w.example.org&tfo=1":                   "spoof-fast-open",
+		"trojan://p@example.org:443?sni=s.example.org&sb.tls.spoof=w.example.org&tcp-fast-open=true":  "spoof-fast-open",
+		policyBase + "security=tls&flow=xtls-rprx-vision&sb.tls.enabled=0":                            "flow-no-tls",
 		policyBase + "security=reality&pbk=K&fp=netscape":                                             "fingerprint-reality",
 		policyBase + "security=tls&fm=%7B%22tcp%22%3A%5B%7B%22type%22%3A%22header-custom%22%7D%5D%7D": "finalmask",
 		policyBase + "security=tls&fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22salamander%22%7D%5D%7D":    "finalmask",
@@ -78,10 +87,13 @@ func TestRefusals(t *testing.T) {
 		policyBase + "type=grpc&serviceName=%2Fa%2Fb%2FTun":                                           "grpc-custom-path",
 		policyBase + "type=grpc&serviceName=%2Fsvc%2FOther":                                           "grpc-custom-path",
 		policyBase + "type=grpc&serviceName=%2Fsvc%2FTun&mode=multi":                                  "grpc-custom-path",
-		policyBase + "type=quic&quicSecurity=aes-128-gcm&key=k":                                       "quic-security",
-		policyBase + "type=quic&headerType=wechat-video":                                              "quic-header",
-		policyBase + "type=kcp&seed=s":                                                                "kcp",
-		"trojan://p@example.org:443?type=tcp&headerType=http":                                         "tcp-http-header-tls",
+		// the same paths as Marzban writes them: escaped once more, "/Tun" left out
+		policyBase + "type=grpc&serviceName=svc%252Fpath&mode=gun": "grpc-custom-path",
+		policyBase + "type=grpc&serviceName=%252Fsvc%252FOther":    "grpc-custom-path",
+		policyBase + "type=quic&quicSecurity=aes-128-gcm&key=k":    "quic-security",
+		policyBase + "type=quic&headerType=wechat-video":           "quic-header",
+		policyBase + "type=kcp&seed=s":                             "kcp",
+		"trojan://p@example.org:443?type=tcp&headerType=http":      "tcp-http-header-tls",
 	} {
 		require.Equal(t, id, refusalID(t, link), link)
 	}
@@ -116,6 +128,21 @@ func TestLeniencies(t *testing.T) {
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"http","host":["a.example.org","b.example.org"],"path":"/p"}}`,
 			nil,
 		},
+		"HTTP/2 without TLS": {
+			policyBase + "type=h2&path=%2Fp&host=h.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","transport":{"type":"http","host":"h.example.org","path":"/p"}}`,
+			[]string{"the HTTP/2 transport without TLS is spoken as HTTP/1.1"},
+		},
+		"the QUIC transport imitates no browser and offers the ALPN of both kinds of server": {
+			policyBase + "security=tls&sni=s.example.org&fp=chrome&type=quic&quicSecurity=none&headerType=none",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","alpn":["h3","h2","http/1.1"]},"transport":{"type":"quic"}}`,
+			nil,
+		},
+		"the QUIC transport with an ALPN of the link": {
+			policyBase + "security=tls&type=quic&alpn=h2",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"alpn":"h2"},"transport":{"type":"quic"}}`,
+			nil,
+		},
 		"ws without host takes the name of TLS": {
 			"vless://" + testUUID + "@192.0.2.1:443?security=tls&sni=cdn.example.org&type=ws&path=%2Fws",
 			`{"type":"vless","server":"192.0.2.1","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"cdn.example.org","utls":{"enabled":true,"fingerprint":"chrome"}},
@@ -146,7 +173,7 @@ func TestLeniencies(t *testing.T) {
 		},
 		"quic": {
 			policyBase + "security=tls&type=quic&quicSecurity=none&headerType=none",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}},"transport":{"type":"quic"}}`,
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"alpn":["h3","h2","http/1.1"]},"transport":{"type":"quic"}}`,
 			nil,
 		},
 		"finalmask of the client's own": {

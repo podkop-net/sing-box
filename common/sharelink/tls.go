@@ -173,6 +173,9 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 		if d.query["pbk"] == "" {
 			return nil, E.New("missing REALITY public key (pbk)")
 		}
+		if shortID := d.query["sid"]; len(shortID) > 16 || len(shortID)%2 != 0 || !isHex(shortID) {
+			return nil, E.New("the REALITY short id (sid) is not hexadecimal digits, up to 16 and an even number of them")
+		}
 		tlsOptions.Reality = &option.OutboundRealityOptions{
 			Enabled:   true,
 			PublicKey: d.query["pbk"],

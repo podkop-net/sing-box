@@ -63,15 +63,7 @@ func (d *decoder) vless() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if flow != "" && options.Transport != nil {
-		// Vision works on the TLS connection itself. Over ws, grpc and http sing-box has
-		// none to give it and fails every connection; over httpupgrade and xhttp an Xray
-		// server refuses the flow (over xhttp it takes one only with VLESS Encryption).
-		return nil, refuse("flow-transport", "flow ", flow, " is not supported over the ", options.Transport.Type, " transport")
-	}
-	if flow != "" && options.TLS == nil {
-		return nil, refuse("flow-no-tls", "flow ", flow, " needs TLS or REALITY")
-	}
+	// what a flow needs is looked at when every parameter has been read (consistent)
 	return options, nil
 }
 

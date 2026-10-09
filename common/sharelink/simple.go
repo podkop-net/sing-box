@@ -65,6 +65,10 @@ func (d *decoder) shadowsocks() (any, error) {
 	if renamed, isAlias := shadowsocksMethods[method]; isAlias {
 		method = renamed
 	}
+	if !plainWord(method) {
+		// sing-box names a method it does not know in its error
+		return nil, E.New("the user of the link is not a method and a password")
+	}
 	// Xray carries Shadowsocks over its transports and TLS; sing-box only as it is.
 	if network := strings.ToLower(d.query["type"]); network != "" && network != "tcp" && network != "raw" {
 		return nil, refuse("shadowsocks-transport", "Shadowsocks over the transport", shown(network), " is not supported")

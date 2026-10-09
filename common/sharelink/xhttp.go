@@ -140,8 +140,17 @@ func (d *decoder) readObject(name string, content []byte, target any) (map[strin
 		}
 	}
 	sort.Strings(unknown)
+	odd := false
 	for _, key := range unknown {
+		// a key is as free a text as the name of a parameter is
+		if !plainName(key) {
+			odd = true
+			continue
+		}
 		d.warn(name, ": ", key, " is not supported and is ignored")
+	}
+	if odd {
+		d.warn(name, ": a key that is not a name is ignored")
 	}
 	return present, nil
 }
@@ -351,7 +360,7 @@ func (d *decoder) xhttpBase(name string, settings *xraySplitHTTP) (option.V2RayX
 				if options.Host == "" {
 					options.Host = value
 				} else if options.Host != value {
-					d.warn(name, ": the Host header is ignored, the host is ", options.Host)
+					d.warn(name, ": the Host header is ignored, the host of the link is used", shown(options.Host))
 				}
 				continue
 			}
@@ -402,7 +411,7 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 	switch stream.Network {
 	case "", "xhttp", "splithttp":
 	default:
-		return nil, E.New(name, ": unsupported network: ", stream.Network)
+		return nil, E.New(name, ": unsupported network", shown(stream.Network))
 	}
 	options := &option.V2RayXHTTPDownloadOptions{
 		ServerOptions: option.ServerOptions{Server: stream.Address, ServerPort: stream.Port},
@@ -454,7 +463,7 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 			Reality:    &option.OutboundRealityOptions{Enabled: true, PublicKey: publicKey, ShortID: realitySettings.ShortID},
 		}
 	default:
-		return nil, E.New(name, ": unsupported security: ", stream.Security)
+		return nil, E.New(name, ": unsupported security", shown(stream.Security))
 	}
 	content = stream.XHTTPSettings
 	if len(content) == 0 || string(content) == "null" {

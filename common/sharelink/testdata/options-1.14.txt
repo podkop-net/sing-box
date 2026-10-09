@@ -46,8 +46,8 @@ anytls tls.ech.query_server_name sb
 anytls tls.enabled sb
 anytls tls.engine denied: the system
 anytls tls.fragment sb
-anytls tls.fragment_fallback_delay sb
-anytls tls.handshake_timeout sb
+anytls tls.fragment_fallback_delay denied: a limit of this host
+anytls tls.handshake_timeout denied: a limit of this host
 anytls tls.insecure sb
 anytls tls.kernel_rx denied: the system
 anytls tls.kernel_tx denied: the system
@@ -109,8 +109,8 @@ http tls.ech.query_server_name sb
 http tls.enabled sb
 http tls.engine denied: the system
 http tls.fragment sb
-http tls.fragment_fallback_delay sb
-http tls.handshake_timeout sb
+http tls.fragment_fallback_delay denied: a limit of this host
+http tls.handshake_timeout denied: a limit of this host
 http tls.insecure sb
 http tls.kernel_rx denied: the system
 http tls.kernel_tx denied: the system
@@ -188,8 +188,8 @@ hysteria tls.ech.query_server_name sb
 hysteria tls.enabled sb
 hysteria tls.engine denied: the system
 hysteria tls.fragment sb
-hysteria tls.fragment_fallback_delay sb
-hysteria tls.handshake_timeout sb
+hysteria tls.fragment_fallback_delay denied: a limit of this host
+hysteria tls.handshake_timeout denied: a limit of this host
 hysteria tls.insecure sb
 hysteria tls.kernel_rx denied: the system
 hysteria tls.kernel_tx denied: the system
@@ -271,8 +271,8 @@ hysteria2 tls.ech.query_server_name sb
 hysteria2 tls.enabled sb
 hysteria2 tls.engine denied: the system
 hysteria2 tls.fragment sb
-hysteria2 tls.fragment_fallback_delay sb
-hysteria2 tls.handshake_timeout sb
+hysteria2 tls.fragment_fallback_delay denied: a limit of this host
+hysteria2 tls.handshake_timeout denied: a limit of this host
 hysteria2 tls.insecure sb
 hysteria2 tls.kernel_rx denied: the system
 hysteria2 tls.kernel_tx denied: the system
@@ -339,8 +339,8 @@ naive tls.ech.query_server_name sb
 naive tls.enabled sb
 naive tls.engine denied: the system
 naive tls.fragment sb
-naive tls.fragment_fallback_delay sb
-naive tls.handshake_timeout sb
+naive tls.fragment_fallback_delay denied: a limit of this host
+naive tls.handshake_timeout denied: a limit of this host
 naive tls.insecure sb
 naive tls.kernel_rx denied: the system
 naive tls.kernel_tx denied: the system
@@ -483,8 +483,8 @@ trojan tls.ech.query_server_name sb
 trojan tls.enabled sb
 trojan tls.engine denied: the system
 trojan tls.fragment sb
-trojan tls.fragment_fallback_delay sb
-trojan tls.handshake_timeout sb
+trojan tls.fragment_fallback_delay denied: a limit of this host
+trojan tls.handshake_timeout denied: a limit of this host
 trojan tls.insecure sb
 trojan tls.kernel_rx denied: the system
 trojan tls.kernel_tx denied: the system
@@ -538,8 +538,8 @@ trojan transport.download.tls.ech.query_server_name sb
 trojan transport.download.tls.enabled sb
 trojan transport.download.tls.engine denied: the system
 trojan transport.download.tls.fragment sb
-trojan transport.download.tls.fragment_fallback_delay sb
-trojan transport.download.tls.handshake_timeout sb
+trojan transport.download.tls.fragment_fallback_delay denied: a limit of this host
+trojan transport.download.tls.handshake_timeout denied: a limit of this host
 trojan transport.download.tls.insecure sb
 trojan transport.download.tls.kernel_rx denied: the system
 trojan transport.download.tls.kernel_tx denied: the system
@@ -666,8 +666,8 @@ tuic tls.ech.query_server_name sb
 tuic tls.enabled sb
 tuic tls.engine denied: the system
 tuic tls.fragment sb
-tuic tls.fragment_fallback_delay sb
-tuic tls.handshake_timeout sb
+tuic tls.fragment_fallback_delay denied: a limit of this host
+tuic tls.handshake_timeout denied: a limit of this host
 tuic tls.insecure sb
 tuic tls.kernel_rx denied: the system
 tuic tls.kernel_tx denied: the system
@@ -742,8 +742,8 @@ vless tls.ech.query_server_name sb
 vless tls.enabled sb
 vless tls.engine denied: the system
 vless tls.fragment sb
-vless tls.fragment_fallback_delay sb
-vless tls.handshake_timeout sb
+vless tls.fragment_fallback_delay denied: a limit of this host
+vless tls.handshake_timeout denied: a limit of this host
 vless tls.insecure sb
 vless tls.kernel_rx denied: the system
 vless tls.kernel_tx denied: the system
@@ -797,8 +797,8 @@ vless transport.download.tls.ech.query_server_name sb
 vless transport.download.tls.enabled sb
 vless transport.download.tls.engine denied: the system
 vless transport.download.tls.fragment sb
-vless transport.download.tls.fragment_fallback_delay sb
-vless transport.download.tls.handshake_timeout sb
+vless transport.download.tls.fragment_fallback_delay denied: a limit of this host
+vless transport.download.tls.handshake_timeout denied: a limit of this host
 vless transport.download.tls.insecure sb
 vless transport.download.tls.kernel_rx denied: the system
 vless transport.download.tls.kernel_tx denied: the system
@@ -930,8 +930,8 @@ vmess tls.ech.query_server_name sb
 vmess tls.enabled sb
 vmess tls.engine denied: the system
 vmess tls.fragment sb
-vmess tls.fragment_fallback_delay sb
-vmess tls.handshake_timeout sb
+vmess tls.fragment_fallback_delay denied: a limit of this host
+vmess tls.handshake_timeout denied: a limit of this host
 vmess tls.insecure sb
 vmess tls.kernel_rx denied: the system
 vmess tls.kernel_tx denied: the system
@@ -985,8 +985,8 @@ vmess transport.download.tls.ech.query_server_name sb
 vmess transport.download.tls.enabled sb
 vmess transport.download.tls.engine denied: the system
 vmess transport.download.tls.fragment sb
-vmess transport.download.tls.fragment_fallback_delay sb
-vmess transport.download.tls.handshake_timeout sb
+vmess transport.download.tls.fragment_fallback_delay denied: a limit of this host
+vmess transport.download.tls.handshake_timeout denied: a limit of this host
 vmess transport.download.tls.insecure sb
 vmess transport.download.tls.kernel_rx denied: the system
 vmess transport.download.tls.kernel_tx denied: the system

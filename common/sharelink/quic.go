@@ -110,6 +110,9 @@ func (d *decoder) hysteria2() (any, error) {
 		options.ServerPorts = badoption.Listable[string](ranges)
 	}
 	if obfs := strings.ToLower(d.query["obfs"]); obfs != "" && obfs != "none" && obfs != "plain" {
+		if !plainWord(obfs) {
+			return nil, E.New("unsupported obfuscation of Hysteria 2")
+		}
 		options.Obfs = &option.Hysteria2Obfs{Type: obfs, Password: d.query["obfs-password"]}
 	}
 	err = d.hysteria2Mask(&options)
@@ -230,6 +233,14 @@ func (d *decoder) tuic() (any, error) {
 	if !hasPassword {
 		// TUIC v4 had a token here; sing-box speaks v5, with a UUID and a password
 		return nil, refuse("tuic-v4", "a TUIC link without a password is of TUIC v4, which is not supported")
+	}
+	if !isUUID(uuid) {
+		return nil, E.New("the user of the link is not a UUID and a password")
+	}
+	if d.query["alpn"] == "" {
+		// sing-box offers no ALPN of its own for TUIC, as it does for Hysteria; which
+		// servers take that is their configuration
+		d.warn("the link names no ALPN and none is offered: a TUIC server that has one set (h3, as a rule) refuses such a client, add alpn=h3 to the link then")
 	}
 	options := option.TUICOutboundOptions{
 		ServerOptions:     server,

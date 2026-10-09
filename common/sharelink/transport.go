@@ -1,6 +1,7 @@
 package sharelink
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -60,6 +61,17 @@ func (d *decoder) finalMask() error {
 	}
 	d.warn("fm (finalmask) is not supported and is ignored: what it sets is the client's own")
 	return nil
+}
+
+// ownALPN leaves the ALPN to a transport that speaks one protocol. Xray asks for
+// http/1.1 with WebSocket and HTTPUpgrade, and for h2 with gRPC and HTTP/2, whatever the
+// link says; sing-box asks for the same when no ALPN is set, and for what is set when
+// one is. Panels write one ALPN for every host ("h2,http/1.1"), and a server that is
+// offered both picks HTTP/2, over which no WebSocket handshake goes.
+func ownALPN(tlsOptions *option.OutboundTLSOptions) {
+	if tlsOptions != nil {
+		tlsOptions.ALPN = nil
+	}
 }
 
 // transport reads the transport of a link of the VLESS family. tls tells whether the
@@ -124,6 +136,7 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 		if host != "" {
 			options.Headers = badoption.HTTPHeader{"Host": {host}}
 		}
+		ownALPN(tlsOptions)
 		return &option.V2RayTransportOptions{Type: C.V2RayTransportTypeWebsocket, WebsocketOptions: options}, nil
 	case "grpc":
 		mode := strings.ToLower(d.query["mode"])
@@ -133,6 +146,14 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 			return nil, refuse("grpc-mode", "unsupported gRPC mode", shown(mode))
 		}
 		serviceName := d.query["servicename"]
+		// Marzban escapes the name of a custom path once more than a link does, and
+		// leaves "/Tun" out of it: an escaped slash in a name can only be that
+		if unescaped, err := url.PathUnescape(serviceName); err == nil && unescaped != serviceName && strings.Contains(unescaped, "/") {
+			if !strings.HasPrefix(unescaped, "/") {
+				unescaped = "/" + unescaped + "/Tun"
+			}
+			serviceName = unescaped
+		}
 		if strings.HasPrefix(serviceName, "/") {
 			// Xray reads a name that starts with "/" as a whole path with its own stream
 			// name (in the mode multi, the name of the other stream). sing-box makes the
@@ -159,11 +180,18 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 				d.warn("the gRPC authority is not supported: the server name of TLS is sent instead, and a reverse proxy that chooses the server by the authority may not find it")
 			}
 		}
+		ownALPN(tlsOptions)
 		return &option.V2RayTransportOptions{
 			Type:        C.V2RayTransportTypeGRPC,
 			GRPCOptions: option.V2RayGRPCOptions{ServiceName: serviceName},
 		}, nil
 	case "http", "h2":
+		if tlsOptions == nil {
+			// Xray speaks HTTP/2 there (h2c), sing-box HTTP/1.1; a server of sing-box
+			// takes both
+			d.warn("the HTTP/2 transport without TLS is spoken as HTTP/1.1: a server of Xray, which expects HTTP/2 there, does not answer")
+		}
+		ownALPN(tlsOptions)
 		return &option.V2RayTransportOptions{
 			Type:        C.V2RayTransportTypeHTTP,
 			HTTPOptions: option.V2RayHTTPOptions{Host: splitList(d.query["host"]), Path: d.query["path"], Method: d.query["method"]},
@@ -175,6 +203,7 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 		if earlyData > 0 {
 			d.warn("early data is not supported with the httpupgrade transport and is not sent")
 		}
+		ownALPN(tlsOptions)
 		return &option.V2RayTransportOptions{
 			Type:               C.V2RayTransportTypeHTTPUpgrade,
 			HTTPUpgradeOptions: option.V2RayHTTPUpgradeOptions{Host: d.query["host"], Path: path},
@@ -192,6 +221,16 @@ func (d *decoder) transport(tlsOptions *option.OutboundTLSOptions) (*option.V2Ra
 		}
 		if headerType := strings.ToLower(d.query["headertype"]); headerType != "" && headerType != "none" {
 			return nil, refuse("quic-header", "the packet header of the QUIC transport (headerType) is not supported")
+		}
+		if tlsOptions != nil {
+			// QUIC has TLS of its own, and no browser is imitated there: with uTLS in
+			// the options every connection fails ("unsupported usage for uTLS")
+			tlsOptions.UTLS = nil
+			if len(tlsOptions.ALPN) == 0 {
+				// with no ALPN named Xray offers h2 and http/1.1, and sing-box h3; a
+				// server of either kind takes only its own
+				tlsOptions.ALPN = []string{"h3", "h2", "http/1.1"}
+			}
 		}
 		return &option.V2RayTransportOptions{Type: C.V2RayTransportTypeQUIC}, nil
 	case "kcp", "mkcp":

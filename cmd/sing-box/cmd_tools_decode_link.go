@@ -7,7 +7,9 @@ import (
 	stdJSON "encoding/json"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/common/sharelink"
@@ -88,7 +90,7 @@ func decodeLink(args []string, input io.Reader, output io.Writer, errorOutput io
 	}
 	outbound, warnings, err := sharelink.Decode(link)
 	if err != nil {
-		io.WriteString(errorOutput, "error: "+err.Error()+"\n")
+		io.WriteString(errorOutput, "error: "+plainMessage(err.Error(), nil)+"\n")
 		return decodeLinkExitBadLink
 	}
 	content, err := json.Marshal(outbound)
@@ -98,11 +100,11 @@ func decodeLink(args []string, input io.Reader, output io.Writer, errorOutput io
 	}
 	notes, err := checkDecoded(content)
 	if err != nil {
-		io.WriteString(errorOutput, "error: "+err.Error()+"\n")
+		io.WriteString(errorOutput, "error: "+plainMessage(err.Error(), append(outbound.Secrets(), outbound.Unplain()...))+"\n")
 		return decodeLinkExitBadLink
 	}
 	for _, warning := range append(warnings, notes...) {
-		io.WriteString(errorOutput, "warning: "+warning+"\n")
+		io.WriteString(errorOutput, "warning: "+oneLine(warning)+"\n")
 	}
 	if !commandDecodeLinkFlagCompact {
 		var indented bytes.Buffer
@@ -118,6 +120,39 @@ func decodeLink(args []string, input io.Reader, output io.Writer, errorOutput io
 	return 0
 }
 
+// plainMessage makes one line of what the outbound said when it could not be built: the
+// first line of it, without what the link keeps secret and without its free text (the
+// values that are not plain names). Such a message is written by code that reports to a
+// log, and some of it quotes what it was given.
+func plainMessage(message string, secrets []string) string {
+	// first of all, while the message has them as they are: a value may be of several
+	// lines or have a tab in it
+	for _, secret := range secrets {
+		message = strings.ReplaceAll(message, secret, "...")
+		// as a message that quotes its input writes it
+		if quoted := strings.Trim(strconv.Quote(secret), `"`); quoted != secret {
+			message = strings.ReplaceAll(message, quoted, "...")
+		}
+	}
+	message, _, _ = strings.Cut(message, "\n")
+	message = oneLine(message)
+	message = strings.TrimRight(strings.TrimSpace(message), ":")
+	if message == "" {
+		message = "this sing-box does not take the outbound of the link"
+	}
+	return message
+}
+
+// oneLine keeps a message on the line it begins: a script reads the output by lines.
+func oneLine(message string) string {
+	return strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return ' '
+		}
+		return character
+	}, message)
+}
+
 // decodeLinkNotes collects what sing-box would report as deprecated while it builds the
 // outbound: the manager of a run prints such a note, and for one about to be removed
 // ends the process.
@@ -129,12 +164,46 @@ func (n *decodeLinkNotes) ReportDeprecated(feature deprecated.Note) {
 	n.notes = append(n.notes, feature.Message())
 }
 
-// checkDecoded builds the outbound the way "sing-box check" builds a configuration, as
+// decodeLinkBuildTimeout bounds the building of the outbound: milliseconds as a rule. One
+// that waits for something a link has made it wait for is a link that cannot be used.
+var decodeLinkBuildTimeout = 20 * time.Second
+
+// checkDecoded builds the outbound (buildDecoded) and takes what comes of it: the notes
+// of sing-box, its error, a failure of its code, or no end in time.
+func checkDecoded(outbound []byte) ([]string, error) {
+	type built struct {
+		notes []string
+		err   error
+	}
+	done := make(chan built, 1)
+	go func() {
+		var result built
+		// The outbounds are built here of what a link says, which their code was not
+		// written for: one that fails on it (a value longer than the place it is decoded
+		// into) is a link that cannot be used, not a crash of the command.
+		defer func() {
+			if recover() != nil {
+				result = built{nil, E.New("this sing-box cannot build the outbound of the link")}
+			}
+			done <- result
+		}()
+		result.notes, result.err = buildDecoded(outbound)
+	}()
+	select {
+	case result := <-done:
+		return result.notes, result.err
+	case <-time.After(decodeLinkBuildTimeout):
+		// what is still being built is left behind: the command ends
+		return nil, E.New("this sing-box takes too long to build the outbound of the link")
+	}
+}
+
+// buildDecoded builds the outbound the way "sing-box check" builds a configuration, as
 // the only outbound of one: what is printed is then an outbound this very sing-box
 // takes, with the protocols and the options it was built with. Nothing is opened, read
 // or dialed by it: an outbound from a link names no files, and connections are made
-// when it is used.
-func checkDecoded(outbound []byte) ([]string, error) {
+// when it is used. A variable: a test replaces it.
+var buildDecoded = func(outbound []byte) ([]string, error) {
 	notes := new(decodeLinkNotes)
 	ctx, cancel := context.WithCancel(service.ExtendContext(include.Context(service.ContextWith[deprecated.Manager](context.Background(), notes))))
 	defer cancel()

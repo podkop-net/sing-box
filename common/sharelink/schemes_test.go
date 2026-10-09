@@ -107,7 +107,7 @@ func TestSchemes(t *testing.T) {
 		"vmess of v2rayN, ws with TLS": {
 			"vmess://" + b64(`{"v":"2","ps":"имя","add":"example.org","port":"443","id":"`+testUUID+`","aid":"0","scy":"auto","net":"ws","type":"none","host":"h.example.org","path":"/ws?ed=2048","tls":"tls","sni":"s.example.org","alpn":"http/1.1","fp":"firefox"}`),
 			`{"type":"vmess","tag":"имя","server":"example.org","server_port":443,"uuid":"` + testUUID + `","security":"auto",
-			"tls":{"enabled":true,"server_name":"s.example.org","alpn":"http/1.1","utls":{"enabled":true,"fingerprint":"firefox"}},
+			"tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"firefox"}},
 			"transport":{"type":"ws","path":"/ws","headers":{"Host":"h.example.org"},"max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}}`, nil,
 		},
 		"vmess of v2rayN, numbers as numbers, grpc": {

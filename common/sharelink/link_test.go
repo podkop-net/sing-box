@@ -304,6 +304,8 @@ func FuzzDecode(f *testing.F) {
 	f.Add("vmess://" + b64(`{"add":"h","port":"1","id":"`+testUUID+`","net":"ws","tls":"tls","path":"/p?ed=1","host":"x","type":"none"}`))
 	f.Add("vmess://" + testUUID + "@h:1?type=grpc&mode=multi&serviceName=%2Fa%2FTun")
 	f.Add("https://u:p@h:1?sni=s&fp=chrome")
+	f.Add("vless://" + testUUID + "@h:1?security=tls&sb.tls=" + uriComponent(`{"enabled":true,"certificate_path":"/etc/passwd"}`) + "&sb.tls.alpn=" + uriComponent(`["h2"]`))
+	f.Add("vless://" + testUUID + "@h:1?security=tls&type=xhttp&sb.transport.download=" + uriComponent(`{"server":"a","server_port":1,"detour":"x"}`) + "&sb.flow=xtls-rprx-vision")
 	f.Add("hysteria://h:1?auth=a&obfs=xplus&obfsParam=p&mport=1-2")
 	f.Add("anytls://p@h/?sni=s&insecure=1")
 	f.Add("naive+https://u:p@h?extra-headers=A%3A%20b%0D%0AC%3A%20d")

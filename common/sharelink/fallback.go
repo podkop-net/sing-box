@@ -18,9 +18,10 @@ import (
 // A link names an option of the outbound by its path in the configuration, after "sb.":
 // "sb.tls.fragment=1", "sb.multiplex.protocol=h2mux", "sb.transport.headers.User-Agent=...".
 // The value is read by the type the option has in this very sing-box: a flag as 1 or 0,
-// a list by commas, anything else as the configuration writes it, in JSON when it begins
-// with a bracket. The names a few clients already use are read as the options they stand
-// for (linkAliases).
+// a list by commas or as a JSON list, anything else as the configuration writes it. A
+// path names one option: a JSON object, which would set several at once by names nothing
+// has looked at, is not taken. The names a few clients already use are read as the
+// options they stand for (linkAliases).
 //
 // A link is somebody else's text. It may tune how its own server is reached, and nothing
 // more: what points at other objects of the configuration, chooses the local route, reads
@@ -45,23 +46,22 @@ var optionTypes = map[string]reflect.Type{
 // tcp-fast-open (sing-box-extended), uot and udp-over-tcp (mihomo), the rest Throne's.
 // The bare "mux" and "fragment" are not among them: clients mean different things by each.
 var linkAliases = map[string]string{
-	"tfo":                         "tcp_fast_open",
-	"tcp-fast-open":               "tcp_fast_open",
-	"tcp_fast_open":               "tcp_fast_open",
-	"uot":                         "udp_over_tcp",
-	"udp-over-tcp":                "udp_over_tcp",
-	"tls_fragment":                "tls.fragment",
-	"tls_record_fragment":         "tls.record_fragment",
-	"tls_fragment_fallback_delay": "tls.fragment_fallback_delay",
-	"tls_spoof":                   "tls.spoof",
-	"tls_spoof_method":            "tls.spoof_method",
-	"mux_protocol":                "multiplex.protocol",
-	"mux_max_connections":         "multiplex.max_connections",
-	"mux_min_streams":             "multiplex.min_streams",
-	"mux_max_streams":             "multiplex.max_streams",
-	"mux_padding":                 "multiplex.padding",
-	"brutal_up_mbps":              "multiplex.brutal.up_mbps",
-	"brutal_down_mbps":            "multiplex.brutal.down_mbps",
+	"tfo":                 "tcp_fast_open",
+	"tcp-fast-open":       "tcp_fast_open",
+	"tcp_fast_open":       "tcp_fast_open",
+	"uot":                 "udp_over_tcp",
+	"udp-over-tcp":        "udp_over_tcp",
+	"tls_fragment":        "tls.fragment",
+	"tls_record_fragment": "tls.record_fragment",
+	"tls_spoof":           "tls.spoof",
+	"tls_spoof_method":    "tls.spoof_method",
+	"mux_protocol":        "multiplex.protocol",
+	"mux_max_connections": "multiplex.max_connections",
+	"mux_min_streams":     "multiplex.min_streams",
+	"mux_max_streams":     "multiplex.max_streams",
+	"mux_padding":         "multiplex.padding",
+	"brutal_up_mbps":      "multiplex.brutal.up_mbps",
+	"brutal_down_mbps":    "multiplex.brutal.down_mbps",
 }
 
 // The options a link does not set, by the name of the option at any depth.
@@ -75,6 +75,10 @@ var deniedNames = map[string]string{
 	"fallback_network_type": "the local route", "fallback_delay": "the local route",
 	// features of the system
 	"engine": "the system", "kernel_tx": "the system", "kernel_rx": "the system",
+	// how long a dial of this host may wait: a server that never answers a handshake
+	// would hold every connection for as long as its link says, and the pause between
+	// the pieces of a fragmented ClientHello is slept through whatever happens meanwhile
+	"handshake_timeout": "a limit of this host", "fragment_fallback_delay": "a limit of this host",
 	// the Hysteria realm: other servers are asked, and ports of the gateway opened
 	"realm": "another service",
 	// deprecated: a run ends at one about to be removed
@@ -198,13 +202,16 @@ func optionType(valueType reflect.Type, segments []string, node *object, walked 
 				}
 			}
 			if !found {
-				return nil, false, refuse("sb-unknown", "this sing-box has no option ", walked, " for the type ", node.text("type"))
+				return nil, false, refuse("sb-unknown", "this sing-box has no option ", walked, " for the type", shown(node.text("type")))
 			}
 		}
 		if reason := deniedOption(name, &chosen.field); reason != "" {
 			return nil, false, refuse("sb-denied", "the option ", walked, " is not for a link to set (", reason, ")")
 		}
-		if chosen.field.Type.Kind() == reflect.Map && len(segments) > 1 {
+		if chosen.field.Type.Kind() == reflect.Map {
+			if len(segments) == 1 {
+				return nil, false, refuse("sb-unknown", "the option ", walked, " is set by its names: ", walked, ".<name>")
+			}
 			// the next name is a key of the map
 			return optionType(chosen.field.Type, segments[2:], nil, walked+"."+segments[1])
 		}
@@ -325,14 +332,10 @@ func (d *decoder) fallback(outboundType string, options *object) error {
 		if strings.HasPrefix(key, "sb.") {
 			// the path with the case the link writes: a header has one
 			name := d.names[key]
-			path := name
-			if len(path) >= len("amp;") && strings.EqualFold(path[:len("amp;")], "amp;") {
-				path = path[len("amp;"):]
-			}
-			if len(path) < len("sb.") || !strings.EqualFold(path[:len("sb.")], "sb.") {
+			if len(name) < len("sb.") {
 				continue
 			}
-			settings = append(settings, setting{name, path[len("sb."):], text})
+			settings = append(settings, setting{name, name[len("sb."):], text})
 		}
 	}
 	if len(settings) == 0 {
@@ -378,10 +381,15 @@ func (d *decoder) fallback(outboundType string, options *object) error {
 		if !fit {
 			return refuse("sb-value", "the value of the link parameter ", entry.key, " does not fit the option")
 		}
+		if hasObject(value) {
+			// the names inside would pass by the list of what a link may not set
+			return refuse("sb-value", "the link parameter ", entry.key, " gives several options at once: each option is set by its own path")
+		}
 		path := lowerOptionNames(structType, segments)
 		if previous, exists := options.at(path); exists {
-			previousJSON, _ := json.Marshal(previous)
-			valueJSON, _ := json.Marshal(value)
+			// a list of one is the one: the configuration reads both the same way
+			previousJSON, _ := json.Marshal(single(previous))
+			valueJSON, _ := json.Marshal(single(value))
 			if string(previousJSON) != string(valueJSON) {
 				d.warn(entry.key, " replaces what the link sets otherwise")
 			}
@@ -390,6 +398,29 @@ func (d *decoder) fallback(outboundType string, options *object) error {
 	}
 	d.notEnabled(structType, options, "")
 	return nil
+}
+
+// single returns the item of a list of one, and any other value as it is.
+func single(value any) any {
+	if list, isList := value.([]any); isList && len(list) == 1 {
+		return list[0]
+	}
+	return value
+}
+
+// hasObject reports whether a value read from a link holds a JSON object at any depth.
+func hasObject(value any) bool {
+	switch typed := value.(type) {
+	case *object:
+		return true
+	case []any:
+		for _, item := range typed {
+			if hasObject(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // lowerOptionNames gives a path with the names of options in lower case, as the
