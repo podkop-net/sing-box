@@ -75,7 +75,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			// Vision needs the TLS connection itself; over XHTTP Xray has it only
 			// with VLESS Encryption, which sing-box does not have (podkop-engine).
 			return nil, E.New("flow ", options.Flow, " is not supported over the xhttp transport")
-		case C.V2RayTransportTypeWebsocket, C.V2RayTransportTypeGRPC, C.V2RayTransportTypeHTTP:
+		case C.V2RayTransportTypeWebsocket, C.V2RayTransportTypeGRPC, C.V2RayTransportTypeHTTP, C.V2RayTransportTypeQUIC:
 			// Not an error: a configuration with such an outbound starts today, with
 			// this one outbound dead, and must go on starting (podkop-engine).
 			logger.Warn("flow ", options.Flow, " does not work over the ", transportType, " transport: it needs the TLS connection itself, every connection of this outbound will fail")
