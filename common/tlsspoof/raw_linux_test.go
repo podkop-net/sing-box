@@ -20,7 +20,9 @@ func dialLocalWith(t *testing.T, dialControl func(fd int)) (*net.TCPConn, chan [
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	require.NoError(t, err)
 	received := make(chan []byte, 1)
+	served := make(chan struct{})
 	go func() {
+		defer close(served)
 		conn, err := listener.Accept()
 		if err != nil {
 			return
@@ -39,9 +41,11 @@ func dialLocalWith(t *testing.T, dialControl func(fd int)) (*net.TCPConn, chan [
 	}}
 	client, err := dialer.DialContext(context.Background(), "tcp4", listener.Addr().String())
 	require.NoError(t, err)
+	// the server's side is closed before the next test counts descriptors
 	t.Cleanup(func() {
 		client.Close()
 		listener.Close()
+		<-served
 	})
 	return client.(*net.TCPConn), received
 }
@@ -160,4 +164,67 @@ func TestIntegrationWrongTimestampNeedsTimestamps(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, other.Close())
 	require.Equal(t, []byte("real"), <-received)
+}
+
+// The forged segment leaves with the time to live of the connection's own segments, not
+// with the 64 written into its header.
+func TestIntegrationSpooferTakesTheHopLimit(t *testing.T) {
+	requireRoot(t)
+	client, _ := dialLocalWith(t, func(fd int) {
+		require.NoError(t, unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_TTL, 65))
+	})
+	created, err := newRawSpoofer(client, MethodWrongSequence)
+	require.NoError(t, err)
+	spoofer := created.(*linuxSpoofer)
+	require.NoError(t, spoofer.open())
+	defer spoofer.Close()
+	require.Equal(t, 65, spoofer.hopLimit)
+	frame, err := buildSpoofFrame(spoofer.method, spoofer.src, spoofer.dst, spoofer.sendNext, spoofer.receiveNext, 0, nil, []byte("hello"))
+	require.NoError(t, err)
+	require.Equal(t, byte(64), frame[8], "the header as it is built")
+	spoofer.likeConnection(frame)
+	require.Equal(t, byte(65), frame[8])
+
+	// the system's own, when the socket has none set
+	plain, _ := dialLocalWith(t, nil)
+	created, err = newRawSpoofer(plain, MethodWrongSequence)
+	require.NoError(t, err)
+	spoofer = created.(*linuxSpoofer)
+	require.NoError(t, spoofer.open())
+	defer spoofer.Close()
+	require.Greater(t, spoofer.hopLimit, 0)
+}
+
+// A connection that has carried data is not one just dialed to the TLS server (a tunnel
+// of a detour or of a proxy outbound has made its handshake): nothing is forged into it,
+// and it goes on.
+func TestIntegrationSpooferLeavesAConnectionThatCarriedData(t *testing.T) {
+	requireRoot(t)
+	client, received := dialLocalWith(t, nil)
+	_, err := client.Write([]byte("the handshake of a tunnel"))
+	require.NoError(t, err)
+	// until the server has acknowledged it
+	require.Eventually(t, func() bool {
+		var acknowledged uint64
+		require.NoError(t, control.Conn(client, func(fd uintptr) error {
+			info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+			if err != nil {
+				return err
+			}
+			acknowledged = info.Bytes_acked
+			return nil
+		}))
+		return acknowledged > 1
+	}, time.Second, 5*time.Millisecond)
+	before := segmentsSent(t, client)
+	created, err := newRawSpoofer(client, MethodWrongSequence)
+	require.NoError(t, err)
+	spoofer := created.(*linuxSpoofer)
+	require.ErrorIs(t, spoofer.open(), errCarriedData)
+	require.NoError(t, spoofer.Close())
+	require.NoError(t, created.Inject([]byte("forged")))
+	require.Equal(t, -1, spoofer.rawFD, "no raw socket is left open")
+	require.Equal(t, before, segmentsSent(t, client))
+	require.NoError(t, client.Close())
+	require.Equal(t, "the handshake of a tunnel", string(<-received))
 }
