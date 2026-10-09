@@ -559,6 +559,13 @@ match:
 			routeOptions = &action.RuleActionRouteOptions
 		case *R.RuleActionRouteOptions:
 			routeOptions = action
+		case *R.RuleActionBypass:
+			// Of the route options of a bypass action this line applies none; tls_spoof
+			// is new here and is applied as on 1.14 (podkop-engine).
+			if action.Outbound != "" && action.TLSSpoof != "" {
+				metadata.TLSSpoof = action.TLSSpoof
+				metadata.TLSSpoofMethod = action.TLSSpoofMethod
+			}
 		}
 		if routeOptions != nil {
 			// TODO: add nat
