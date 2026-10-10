@@ -156,6 +156,16 @@ func TestXHTTPCloseReachesRetiredClients(t *testing.T) {
 // An upload whose headers are larger than the server takes fails its own
 // session, with the setting named, and nothing else: the connection stays in
 // service and other sessions of the outbound are not made to wait.
+//
+// The HTTP/2 client can refuse such a request only once it has read the
+// settings of the server, which carry the limit. Until then it sends the
+// request, and a Go server, Xray among them, answers a header block of more
+// than twice its limit by ending the connection (GOAWAY, PROTOCOL_ERROR). That
+// takes the first write of a session on a new connection to be over the limit,
+// and the pool opens a connection for each of its first three sessions: with a
+// write right after the dial it is a race, which this test lost in most runs.
+// So the upload here waits for the answer to the download: it comes on the
+// same connection after the settings.
 func TestXHTTPHeadersTooLarge(t *testing.T) {
 	size := option.V2RayXHTTPRange{From: 16384, To: 16384}
 	options := option.V2RayXHTTPOptions{Mode: modePacketUp, V2RayXHTTPBaseOptions: option.V2RayXHTTPBaseOptions{
@@ -176,11 +186,16 @@ func TestXHTTPHeadersTooLarge(t *testing.T) {
 			for round := 0; round < 3; round++ {
 				conn, err := client.DialContext(context.Background())
 				require.NoError(t, err, "round %d", round)
+				select {
+				case <-conn.(*session).downloadReady:
+				case <-time.After(5 * time.Second):
+					t.Fatal("no answer to the download, round ", round)
+				}
 				_, err = conn.Write(randomBytes(16384))
 				if err == nil {
 					_, err = conn.Read(make([]byte, 1))
 				}
-				require.ErrorContains(t, err, "sc_max_each_post_bytes")
+				require.ErrorContains(t, err, "sc_max_each_post_bytes", "round %d", round)
 				conn.Close()
 			}
 			// small uploads of other sessions pass at once, through the same connection
