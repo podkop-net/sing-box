@@ -175,16 +175,38 @@ func TestCapTTL(t *testing.T) {
 }
 
 // The logger formats only strings, numbers, errors and Stringers and panics on anything
-// else: every message of the fallback goes through a real one here.
+// else: every message of the fallback goes through a real one here. It is at the warn
+// level: a message of the fallback written below that level would be missing.
 func TestFallbackLogs(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	factory := log.NewDefaultFactory(context.Background(), log.Formatter{BaseTime: time.Now(), DisableColors: true}, &output, "", nil, false)
-	factory.SetLevel(log.LevelTrace)
+	factory.SetLevel(log.LevelWarn)
 	if err := factory.Start(); err != nil {
 		t.Fatal(err)
 	}
 	logger := factory.NewLogger("dns")
+	var dump struct {
+		Interface []netifdInterface `json:"interface"`
+	}
+	if err := json.Unmarshal([]byte(testUbusDump), &dump); err != nil {
+		t.Fatal(err)
+	}
+	readDump := func(ctx context.Context) ([]netifdInterface, error) { return dump.Interface, nil }
+
+	// the decision, with the provider's servers read for it
+	qualifies := &fallbackServer{
+		options:   option.RemoteDNSServerOptions{DNSServerAddressOptions: option.DNSServerAddressOptions{Server: "77.88.8.8"}},
+		providers: &providerSet{read: readDump},
+	}
+	if !qualifies.decide(context.Background(), logger, "dns-server") {
+		t.Error("a server at a public address does not qualify")
+	}
+	(&fallbackServer{}).decide(nil, logger, "dns-server") //nolint:staticcheck
+	(&providerSet{read: readDump}).refresh(logger, "eth9")
+	(&providerSet{read: func(ctx context.Context) ([]netifdInterface, error) { return nil, E.New("no ubus in tests") }}).refresh(logger, "")
+
+	// the server fails, the provider fails, the server is back
 	state := &fallbackServer{providers: &providerSet{
 		servers: []M.Socksaddr{M.ParseSocksaddrHostPort("10.99.0.53", 53), M.ParseSocksaddrHostPort("fe80::1%eth1", 53)},
 		readAt:  time.Now(),
@@ -199,11 +221,19 @@ func TestFallbackLogs(t *testing.T) {
 	if state.usable(context.Background(), logger) {
 		t.Error("fallback still usable after the provider failed")
 	}
-	(&fallbackServer{}).decide(nil, logger, "dns-server") //nolint:staticcheck
+	transport, setAside, _ := newFallbackTest()
+	setAside.down = true
+	probeServer(context.Background(), logger, transport, setAside, freshTestQuery())
+
 	for _, message := range []string{
+		"provider DNS for the fallback on wan0 (wan, wan6): 10.99.0.53, 10.99.0.54, fe80::1%wan0, 2a00::53",
+		"server dns-server falls back to provider DNS when it fails",
+		"no provider DNS fallback for server dns-server: no context",
+		"no provider DNS for the fallback on eth9",
+		"no provider DNS for the fallback: no ubus in tests",
 		"failed 2 times in a row (timeout), answering from provider DNS 10.99.0.53, fe80::1%eth1 until it is back",
 		"provider DNS does not answer for server dns-server (timeout), no fallback for it for 1m0s",
-		"no provider DNS fallback for server dns-server: no context",
+		"server dns-server answers again, provider DNS no longer used",
 	} {
 		if !strings.Contains(output.String(), message) {
 			t.Errorf("missing %q in:\n%s", message, output.String())

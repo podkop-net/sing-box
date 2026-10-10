@@ -158,9 +158,9 @@ func (p *providerSet) refresh(logger logger.ContextLogger, device string) []M.So
 			case err != nil:
 				logger.Warn("no provider DNS for the fallback: ", err)
 			case len(servers) == 0:
-				logger.Info("no provider DNS for the fallback on ", device)
+				logger.Warn("no provider DNS for the fallback on ", device)
 			default:
-				logger.Info("provider DNS for the fallback on ", device, " (", strings.Join(names, ", "), "): ", joinServers(servers))
+				logger.Warn("provider DNS for the fallback on ", device, " (", strings.Join(names, ", "), "): ", joinServers(servers))
 			}
 		}
 	}

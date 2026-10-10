@@ -48,6 +48,10 @@ import (
 // twice in a row, the fallback is off for that server for a minute. A network reset
 // starts the counts over and makes the provider usable again; a server that is set aside
 // stays so but is probed with the next query, see reset.
+//
+// Everything the fallback writes to the log is a warning: whether a server has it, the
+// provider's servers and every change of state are there in a log that is not at the
+// info level.
 var fallbackEnabled = os.Getenv("SING_BOX_DNS_FALLBACK") != ""
 
 const (
@@ -173,7 +177,7 @@ func probeServer(ctx context.Context, logger logger.ContextLogger, transport ada
 	state.failures = 0
 	state.access.Unlock()
 	if wasDown && logger != nil {
-		logger.InfoContext(ctx, "server ", transport.Tag(), " answers again, provider DNS no longer used")
+		logger.WarnContext(ctx, "server ", transport.Tag(), " answers again, provider DNS no longer used")
 	}
 }
 
@@ -201,9 +205,9 @@ func (s *fallbackServer) decide(ctx context.Context, logger logger.ContextLogger
 			return
 		}
 		if s.eligible {
-			logger.Info("server ", tag, " falls back to provider DNS when it fails")
+			logger.Warn("server ", tag, " falls back to provider DNS when it fails")
 		} else {
-			logger.Info("no provider DNS fallback for server ", tag, ": ", reason)
+			logger.Warn("no provider DNS fallback for server ", tag, ": ", reason)
 		}
 	})
 	return s.eligible
