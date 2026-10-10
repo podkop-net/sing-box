@@ -651,6 +651,7 @@ vless detour denied: another object
 vless disable_tcp_keep_alive sb
 vless domain_resolver denied: another object
 vless domain_strategy denied: deprecated
+vless encryption sb
 vless fallback_delay denied: the local route
 vless fallback_network_type denied: the local route
 vless flow sb

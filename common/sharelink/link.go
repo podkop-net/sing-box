@@ -16,6 +16,7 @@ import (
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/vless/encryption"
 	"github.com/sagernet/sing-box/transport/sip003"
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -191,6 +192,18 @@ func consistent(outboundType string, options *object) error {
 	if outboundType != C.TypeVLESS {
 		return nil
 	}
+	// VLESS Encryption, from the parameter of the link or set by its path: a setting Xray
+	// would not take is not passed on
+	encryptionSetting := options.text("encryption")
+	if encryptionSetting == "none" {
+		encryptionSetting = ""
+	}
+	if encryptionSetting != "" {
+		_, err := encryption.NewClient(encryptionSetting)
+		if err != nil {
+			return refuse("vless-encryption", "invalid VLESS encryption: ", err.Error())
+		}
+	}
 	flow := options.text("flow")
 	if flow == "" {
 		return nil
@@ -199,6 +212,11 @@ func consistent(outboundType string, options *object) error {
 	// repeated as it is
 	if flow != "xtls-rprx-vision" {
 		return refuse("flow", "unsupported flow", shown(flow))
+	}
+	if encryptionSetting != "" {
+		// with VLESS Encryption Vision works on that layer, over any transport and
+		// without TLS, as in Xray
+		return nil
 	}
 	if transport, hasTransport := options.values["transport"].(*object); hasTransport && transport.text("type") != "" {
 		// Vision works on the TLS connection itself. Over ws, grpc and http sing-box has

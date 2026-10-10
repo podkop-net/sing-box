@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/vless/encryption"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -16,13 +17,16 @@ func (d *decoder) vless() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// VLESS Encryption changes the protocol itself. Its values begin with the name of the
-	// key exchange; anything else in the parameter cannot stand for it, and Xray itself
-	// refuses such a configuration.
-	switch encryption := d.query["encryption"]; {
-	case encryption == "" || encryption == "none":
-	case strings.HasPrefix(encryption, "mlkem768x25519plus"):
-		return nil, refuse("vless-encryption", "VLESS encryption is not supported")
+	// VLESS Encryption is a layer of its own under VLESS, and a server that has it set
+	// takes no client without it. Its setting begins with the name of the key exchange
+	// and is passed as it is written; anything else in the parameter cannot stand for
+	// it, and Xray itself refuses such a configuration.
+	var encryptionSetting string
+	switch setting := d.query["encryption"]; {
+	case setting == "" || setting == "none":
+	case strings.HasPrefix(setting, encryption.Prefix):
+		// whether it is one Xray takes is looked at with the whole outbound (consistent)
+		encryptionSetting = setting
 	default:
 		d.warn("encryption has a value that is not VLESS encryption, it is read as none")
 	}
@@ -44,6 +48,7 @@ func (d *decoder) vless() (any, error) {
 		ServerOptions: server,
 		UUID:          uuid,
 		Flow:          flow,
+		Encryption:    encryptionSetting,
 	}
 	if packetEncoding := d.first("packetencoding", "packet-encoding"); packetEncoding != "" {
 		switch packetEncoding {
