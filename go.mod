@@ -167,3 +167,5 @@ require (
 )
 
 replace github.com/sagernet/sing-vmess => github.com/FiyeroT/sing-vmess v0.2.8-pdk13.2
+
+replace github.com/sagernet/sing-quic => github.com/FiyeroT/sing-quic v0.6.5-pdk13.1
