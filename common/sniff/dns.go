@@ -49,8 +49,14 @@ func StreamDomainNameQuery(readCtx context.Context, metadata *adapter.InboundCon
 func DomainNameQuery(ctx context.Context, metadata *adapter.InboundContext, packet []byte) error {
 	var msg mDNS.Msg
 	err := msg.Unpack(packet)
-	if err != nil || msg.Response || len(msg.Question) == 0 || len(msg.Answer) > 0 || len(msg.Ns) > 0 {
+	if err != nil {
 		return err
+	}
+	// Not a query: an error, so that the sniffers after this one get the packet. Twelve
+	// bytes are enough for a message to unpack, and the first record of a DTLS handshake
+	// or an NTP request has zeros where DNS keeps its counts.
+	if msg.Response || len(msg.Question) == 0 || len(msg.Answer) > 0 || len(msg.Ns) > 0 {
+		return os.ErrInvalid
 	}
 	metadata.Protocol = C.ProtocolDNS
 	return nil
