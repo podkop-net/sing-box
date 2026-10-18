@@ -1,30 +1,36 @@
-// Package domainset builds the domain matcher of sing (common/domain) with far less memory
-// than domain.NewMatcher: the matcher is the same, bit for bit.
+// Package domainset reads lists of domains and builds of them the domain matcher of sing
+// (common/domain), the same matcher byte for byte as domain.NewMatcher builds, with a
+// fraction of its memory and time. It reads the rule sets of the source format, JSON, in
+// one pass (ReadSource), and takes lists of strings (NewMatcher).
+//
+// The rules it keeps:
+//
+//   - What it builds is what sing-box builds of the same input: the same matcher, byte for
+//     byte, and the same rules around it. Input it cannot read so is left to the code of
+//     sing-box (ReadSource), or refused with the reason (NewMatcher): it never guesses.
+//     Where sing stops the process (an empty suffix, a name and a suffix of the same key)
+//     it gives an error instead.
+//   - A name is not copied: a key of the trie is where the name is in the text it was
+//     read from, read from its end. Only a name written with escapes, or not ASCII, is
+//     copied, once.
+//   - The keys are not sorted by comparing them: the trie is built a level at a time, the
+//     keys of a node parted by their next byte (a radix sort in the order of the trie),
+//     so that a key is looked at once a byte. Repeated names, and a name that is a suffix
+//     too, are dealt with as the trie is built, with no map.
+//   - The trie is handed to sing as a rule set in the binary format carries it
+//     (domain.ReadMatcher): the matcher is sing's own.
 //
 // domain.NewMatcher keeps the queue of its breadth-first walk of the trie whole until the
-// trie is built, an entry of 24 bytes for every node, and the queue grows by doubling: a
-// list of 100000 varied names, about two million nodes, takes it to the peak of a hundred
-// megabytes and more, which a router with 128 MB does not have (D28 of the podkop 0.8
-// review). Here the walk keeps one level of the trie and the next, at most an entry a
-// name each, and the trie is handed to sing in the form a rule set in the binary format
-// carries it (domain.ReadMatcher).
+// trie is built, an entry of 24 bytes for every node, and its map of names: a list of
+// 100000 varied names, about two million nodes, takes it to a peak of a hundred
+// megabytes and more, which a router with 128 MB does not have.
 package domainset
 
 import (
 	"bytes"
-	"encoding/binary"
-	"slices"
 	"unicode/utf8"
 
 	"github.com/sagernet/sing/common/domain"
-	"github.com/sagernet/sing/common/varbin"
-)
-
-// the labels of sing (common/domain/matcher.go): a key that ends a suffix, and one that
-// ends a name and its subdomains
-const (
-	prefixLabel = '\r'
-	rootLabel   = '\n'
 )
 
 // NewMatcher is domain.NewMatcher: the names matched as they are (domains) and with their
@@ -35,134 +41,63 @@ func NewMatcher(domains []string, domainSuffix []string, generateLegacy bool) (*
 		// as sing has it, whatever that does with nothing to match
 		return domain.NewMatcher(domains, domainSuffix, generateLegacy), nil
 	}
-	return domain.ReadMatcher(bytes.NewReader(Encode(domains, domainSuffix, generateLegacy)))
+	if generateLegacy || !validNames(domains, domainSuffix) {
+		return domain.ReadMatcher(bytes.NewReader(encodeSorted(domains, domainSuffix, generateLegacy)))
+	}
+	collector, err := collect(domains, domainSuffix)
+	if err != nil {
+		return nil, err
+	}
+	return collector.Matcher()
 }
 
 // Encode is the matcher of NewMatcher as domain.Matcher.Write writes it, the form a rule set
 // in the binary format carries.
-func Encode(domains []string, domainSuffix []string, generateLegacy bool) []byte {
-	return Build(keys(domains, domainSuffix, generateLegacy))
+func Encode(domains []string, domainSuffix []string, generateLegacy bool) ([]byte, error) {
+	if generateLegacy || !validNames(domains, domainSuffix) {
+		return encodeSorted(domains, domainSuffix, generateLegacy), nil
+	}
+	collector, err := collect(domains, domainSuffix)
+	if err != nil {
+		return nil, err
+	}
+	return collector.Encode()
 }
 
-// keys are the keys of the trie, as domain.NewMatcher makes them: a name reversed, with a
-// label for how it matches, each once, in order. A name of domains that is a suffix too is
-// the suffix only, as there.
-func keys(domains []string, domainSuffix []string, generateLegacy bool) []string {
-	seen := make(map[string]bool, len(domainSuffix)+len(domains))
-	list := make([]string, 0, len(domains)+len(domainSuffix))
-	for _, name := range domainSuffix {
-		if seen[name] {
-			continue
+func collect(domains []string, domainSuffix []string) (*Collector, error) {
+	size := 0
+	for _, list := range [][]string{domains, domainSuffix} {
+		for _, name := range list {
+			size += len(name)
 		}
-		seen[name] = true
-		switch {
-		case name[0] == '.':
-			list = append(list, reverse(string(prefixLabel)+name))
-		case generateLegacy:
-			list = append(list, reverse(name))
-			suffix := "." + name
-			if !seen[suffix] {
-				seen[suffix] = true
-				list = append(list, reverse(string(prefixLabel)+suffix))
-			}
-		default:
-			list = append(list, reverse(string(rootLabel)+name))
+	}
+	collector := NewCollector(nil)
+	collector.buffers[1] = make([]byte, 0, size)
+	collector.refs = make([]ref, 0, len(domains)+len(domainSuffix))
+	for _, name := range domainSuffix {
+		err := collector.AddString(name, true)
+		if err != nil {
+			return nil, err
 		}
 	}
 	for _, name := range domains {
-		if seen[name] {
-			continue
+		err := collector.AddString(name, false)
+		if err != nil {
+			return nil, err
 		}
-		seen[name] = true
-		list = append(list, reverse(name))
 	}
-	// the map is no longer needed: a big list should not keep it while the trie is built
-	seen = nil
-	slices.Sort(list)
-	return list
+	return collector, nil
 }
 
-// reverse is reverseDomain of sing: the runes in the other order.
-func reverse(name string) string {
-	length := len(name)
-	reversed := make([]byte, length)
-	for index := 0; index < length; {
-		character, size := utf8.DecodeRuneInString(name[index:])
-		index += size
-		utf8.EncodeRune(reversed[length-index:], character)
-	}
-	return string(reversed)
-}
-
-// span is a node of the trie as the walk sees it: the keys from start to end that share
-// their first column bytes.
-type span struct {
-	start, end, column int32
-}
-
-// Build makes the succinct set of sorted keys, the trie of newSuccinctSet of sing, written
-// as succinctSet.Write writes it. The walk goes a level at a time: the nodes of a level
-// are a span each, and a level has at most as many nodes as there are keys.
-func Build(keys []string) []byte {
-	var (
-		leaves, labelBitmap []uint64
-		labels              []byte
-	)
-	setBit := func(words *[]uint64, index int) {
-		for index>>6 >= len(*words) {
-			*words = append(*words, 0)
-		}
-		(*words)[index>>6] |= 1 << uint(index&63)
-	}
-	bit := 0
-	node := 0
-	level := []span{{0, int32(len(keys)), 0}}
-	var next []span
-	for len(level) > 0 {
-		next = next[:0]
-		for _, item := range level {
-			start := int(item.start)
-			column := int(item.column)
-			if column == len(keys[start]) {
-				// a key ends here: a leaf
-				start++
-				setBit(&leaves, node)
+// validNames tells that every name is valid UTF-8. sing reverses a name that is not into
+// bytes that depend on what is around them; such a list is built the way sing builds it.
+func validNames(lists ...[]string) bool {
+	for _, list := range lists {
+		for _, name := range list {
+			if !utf8.ValidString(name) {
+				return false
 			}
-			for index := start; index < int(item.end); {
-				first := index
-				for index < int(item.end) && keys[index][column] == keys[first][column] {
-					index++
-				}
-				next = append(next, span{int32(first), int32(index), int32(column + 1)})
-				labels = append(labels, keys[first][column])
-				// a zero bit for each label
-				bit++
-			}
-			setBit(&labelBitmap, bit)
-			bit++
-			node++
 		}
-		level, next = next, level
 	}
-	var content bytes.Buffer
-	content.Grow(16 + 8*(len(leaves)+len(labelBitmap)) + len(labels))
-	content.WriteByte(0)
-	writeWords(&content, leaves)
-	writeWords(&content, labelBitmap)
-	writeLength(&content, len(labels))
-	content.Write(labels)
-	return content.Bytes()
-}
-
-func writeLength(content *bytes.Buffer, length int) {
-	_, _ = varbin.WriteUvarint(content, uint64(length))
-}
-
-func writeWords(content *bytes.Buffer, words []uint64) {
-	writeLength(content, len(words))
-	var word [8]byte
-	for _, value := range words {
-		binary.BigEndian.PutUint64(word[:], value)
-		content.Write(word[:])
-	}
+	return true
 }

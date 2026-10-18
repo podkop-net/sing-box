@@ -10,13 +10,13 @@ import (
 
 	"github.com/sagernet/fswatch"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/domainset"
 	"github.com/sagernet/sing-box/common/srs"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
-	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service/filemanager"
@@ -120,7 +120,7 @@ func (s *LocalRuleSet) reloadFile(path string) error {
 		if err != nil {
 			return err
 		}
-		ruleSet, err = json.UnmarshalExtended[option.PlainRuleSetCompat](content)
+		ruleSet, err = domainset.ReadSource(content)
 		if err != nil {
 			return err
 		}

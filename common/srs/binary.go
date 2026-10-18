@@ -326,7 +326,12 @@ func writeDefaultRule(writer varbin.Writer, rule option.DefaultHeadlessRule, gen
 			return err
 		}
 		// what domain.NewMatcher(...).Write writes, built with a fraction of its memory
-		_, err = writer.Write(domainset.Encode(rule.Domain, rule.DomainSuffix, generateVersion == C.RuleSetVersion1))
+		var matcher []byte
+		matcher, err = domainset.Encode(rule.Domain, rule.DomainSuffix, generateVersion == C.RuleSetVersion1)
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(matcher)
 		if err != nil {
 			return err
 		}

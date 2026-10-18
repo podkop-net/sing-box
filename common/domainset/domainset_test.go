@@ -60,7 +60,9 @@ func TestSameAsSing(t *testing.T) {
 			suffixes = append(suffixes, "."+strings.TrimPrefix(domains[0], "."))
 			for _, lists := range [][2][]string{{domains, suffixes}, {domains, nil}, {nil, suffixes}} {
 				want := singBytes(t, lists[0], lists[1], legacy)
-				require.Equal(t, want, Encode(lists[0], lists[1], legacy), "%d names, legacy %v", count, legacy)
+				encoded, err := Encode(lists[0], lists[1], legacy)
+				require.NoError(t, err)
+				require.Equal(t, want, encoded, "%d names, legacy %v", count, legacy)
 				matcher, err := NewMatcher(lists[0], lists[1], legacy)
 				require.NoError(t, err)
 				var written bytes.Buffer
@@ -74,8 +76,73 @@ func TestSameAsSing(t *testing.T) {
 		{{"example.com"}, nil}, {nil, {"example.com"}}, {nil, {".example.com"}},
 		{{"a.b.c", "b.c"}, {"c", ".b.c"}}, {{"x"}, {"x"}},
 	} {
-		require.Equal(t, singBytes(t, lists[0], lists[1], false), Encode(lists[0], lists[1], false), "%v", lists)
+		encoded, err := Encode(lists[0], lists[1], false)
+		require.NoError(t, err)
+		require.Equal(t, singBytes(t, lists[0], lists[1], false), encoded, "%v", lists)
 	}
+}
+
+// Names sing takes that a list of a rule set hardly has: empty, in capitals, with the
+// labels of the trie inside them, of one byte, a name that is a suffix of another in
+// every way; and names that are not valid UTF-8, which go the way sing builds them.
+func TestSameAsSingOddNames(t *testing.T) {
+	for _, lists := range [][2][]string{
+		{{""}, nil},
+		{{"", "a"}, {"a"}},
+		{{"Example.COM", "example.com"}, {"EXAMPLE.com"}},
+		{{"a\nb", "a\rb", "\nx"}, {"b\ra", ".\n"}},
+		{{"a", "b", "c"}, {"a", ".a", "b"}},
+		{{".a", "a."}, {".a", "a."}},
+		{{"x.y.z", "y.z", "z"}, {"y.z", ".z", "x.y.z"}},
+		{{"ab\xffcd"}, {"ef\xfegh"}},
+		{{"пример.рф", "例子.测试"}, {".рф", "测试"}},
+	} {
+		encoded, err := Encode(lists[0], lists[1], false)
+		require.NoError(t, err)
+		require.Equal(t, singBytes(t, lists[0], lists[1], false), encoded, "%q", lists)
+	}
+	random := rand.New(rand.NewSource(3))
+	alphabet := []string{"a", "b", ".", "\n", "\r", "я", "-"}
+	for range 2000 {
+		var lists [2][]string
+		for side := range lists {
+			for range random.Intn(8) {
+				var name strings.Builder
+				for range random.Intn(6) {
+					name.WriteString(alphabet[random.Intn(len(alphabet))])
+				}
+				lists[side] = append(lists[side], name.String())
+			}
+		}
+		if len(lists[0])+len(lists[1]) == 0 {
+			continue
+		}
+		var want []byte
+		func() {
+			defer func() {
+				if recover() != nil {
+					want = nil
+				}
+			}()
+			want = singBytes(t, lists[0], lists[1], false)
+		}()
+		encoded, err := Encode(lists[0], lists[1], false)
+		if want == nil {
+			// sing stops the process: an empty suffix, a name and a suffix of one key
+			require.Error(t, err, "%q", lists)
+			continue
+		}
+		require.NoError(t, err, "%q", lists)
+		require.Equal(t, want, encoded, "%q", lists)
+	}
+}
+
+// What sing cannot build is an error here, where sing stops the process.
+func TestRefused(t *testing.T) {
+	_, err := NewMatcher(nil, []string{"a", ""}, false)
+	require.ErrorIs(t, err, ErrEmptySuffix)
+	_, err = NewMatcher([]string{"\na"}, []string{"a"}, false)
+	require.ErrorIs(t, err, errSameKey)
 }
 
 // What a list of 100000 names of no pattern costs to build: here and in sing.
