@@ -66,6 +66,10 @@ func NewDefaultHeadlessRule(ctx context.Context, options option.DefaultHeadlessR
 		item := NewRawDomainItem(options.DomainMatcher)
 		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
+	} else if options.DomainSet != nil {
+		item := NewDomainSetItem(options.DomainSet)
+		rule.destinationAddressItems = append(rule.destinationAddressItems, item)
+		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.DomainKeyword) > 0 {
 		item := NewDomainKeywordItem(options.DomainKeyword)

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sagernet/sing-box/common/domainset/succinct"
 	"github.com/sagernet/sing/common/domain"
 
 	"github.com/stretchr/testify/require"
@@ -63,10 +64,13 @@ func TestSameAsSing(t *testing.T) {
 				encoded, err := Encode(lists[0], lists[1], legacy)
 				require.NoError(t, err)
 				require.Equal(t, want, encoded, "%d names, legacy %v", count, legacy)
-				matcher, err := NewMatcher(lists[0], lists[1], legacy)
+				if legacy {
+					continue
+				}
+				matcher, err := NewSet(lists[0], lists[1])
 				require.NoError(t, err)
 				var written bytes.Buffer
-				require.NoError(t, matcher.Write(&written))
+				require.NoError(t, matcher.(*succinct.Set).Write(&written))
 				require.Equal(t, want, written.Bytes())
 			}
 		}
@@ -139,9 +143,9 @@ func TestSameAsSingOddNames(t *testing.T) {
 
 // What sing cannot build is an error here, where sing stops the process.
 func TestRefused(t *testing.T) {
-	_, err := NewMatcher(nil, []string{"a", ""}, false)
+	_, err := NewSet(nil, []string{"a", ""})
 	require.ErrorIs(t, err, ErrEmptySuffix)
-	_, err = NewMatcher([]string{"\na"}, []string{"a"}, false)
+	_, err = NewSet([]string{"\na"}, []string{"a"})
 	require.ErrorIs(t, err, errSameKey)
 }
 
@@ -151,7 +155,7 @@ func BenchmarkBuild(b *testing.B) {
 	b.Run("domainset", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
-			if _, err := NewMatcher(nil, list, false); err != nil {
+			if _, err := NewSet(nil, list); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -162,4 +166,46 @@ func BenchmarkBuild(b *testing.B) {
 			domain.NewMatcher(nil, list, false)
 		}
 	})
+}
+
+// The set matches what the matcher of sing matches: the names of the lists, their
+// subdomains, the names a suffix is cut from, names in capitals, not of ASCII, empty,
+// words; and it tells of itself what route/rule told of a domain item.
+func TestSetMatchesAsSing(t *testing.T) {
+	random := rand.New(rand.NewSource(7))
+	for _, count := range []int{1, 2, 5, 50, 3000} {
+		for round := range 20 {
+			domains, suffixes := names(random, count), names(random, count)
+			if round%3 == 1 {
+				domains = nil
+			} else if round%3 == 2 {
+				suffixes = nil
+			}
+			matcher, err := NewSet(domains, suffixes)
+			require.NoError(t, err)
+			want := domain.NewMatcher(domains, suffixes, false)
+			var queries []string
+			for _, name := range append(append([]string(nil), domains...), suffixes...) {
+				bare := strings.TrimPrefix(name, ".")
+				queries = append(queries, name, bare, "a."+bare, "x.y."+bare, strings.ToUpper(bare), bare[1:], bare+".", "."+bare)
+				if dot := strings.IndexByte(bare, '.'); dot >= 0 {
+					queries = append(queries, bare[dot+1:], bare[dot:])
+				}
+			}
+			queries = append(queries, "", ".", "com", "рф", "localhost", "\n", "\r", "a\nb")
+			for _, query := range queries {
+				require.Equal(t, want.Match(query), matcher.Match(query), "%q in %d names", query, count)
+			}
+			require.Equal(t, Describe(domains[:min(3, len(domains))], len(domains), suffixes[:min(3, len(suffixes))], len(suffixes)),
+				matcher.(*succinct.Set).String())
+		}
+	}
+}
+
+// A trie that is not one is refused, as domain.ReadMatcher refuses it.
+func TestSetRefusesMalformed(t *testing.T) {
+	_, err := succinct.New(nil, []uint64{0b10}, []byte("ab"), "")
+	require.Error(t, err)
+	_, err = succinct.New(nil, nil, nil, "")
+	require.Error(t, err)
 }

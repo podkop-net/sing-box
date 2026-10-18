@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/domain"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/varbin"
 
 	"github.com/stretchr/testify/require"
 )
@@ -213,15 +215,10 @@ func (g sourceText) set() string {
 	return text
 }
 
-// written is a matcher as a rule set carries it after it was read once: a matcher that
-// domain.ReadMatcher made pads its leaves.
-func written(t testing.TB, matcher *domain.Matcher) []byte {
+// written is a trie as a rule set carries it.
+func written(t testing.TB, matcher interface{ Write(varbin.Writer) error }) []byte {
 	var content bytes.Buffer
 	require.NoError(t, matcher.Write(&content))
-	read, err := domain.ReadMatcher(bytes.NewReader(content.Bytes()))
-	require.NoError(t, err)
-	content.Reset()
-	require.NoError(t, read.Write(&content))
 	return content.Bytes()
 }
 
@@ -241,7 +238,11 @@ func sameAsStock(t testing.TB, text []byte) bool {
 	require.Equal(t, len(stock.Options.Rules), len(fast.Options.Rules), "%s", text)
 	for index := range stock.Options.Rules {
 		mine, theirs := &fast.Options.Rules[index].DefaultOptions, &stock.Options.Rules[index].DefaultOptions
-		if mine.DomainMatcher == nil {
+		if slices.Contains(theirs.Domain, "") || slices.Contains(theirs.DomainSuffix, "") {
+			// route/rule refuses an empty name: the rule must reach it as lists
+			require.Nil(t, mine.DomainSet, "an empty name built here:\n%s", text)
+		}
+		if mine.DomainSet == nil {
 			continue
 		}
 		require.True(t, len(theirs.Domain)+len(theirs.DomainSuffix) > 0, "%s", text)
@@ -255,8 +256,10 @@ func sameAsStock(t testing.TB, text []byte) bool {
 			want = domain.NewMatcher(theirs.Domain, theirs.DomainSuffix, false)
 		}()
 		require.NotNil(t, want, "sing stops on these names, readSource built them:\n%s", text)
-		require.Equal(t, written(t, want), written(t, mine.DomainMatcher), "%s", text)
-		mine.DomainMatcher = nil
+		require.Equal(t, written(t, want), written(t, mine.DomainSet), "%s", text)
+		require.Equal(t, Describe(theirs.Domain[:min(3, len(theirs.Domain))], len(theirs.Domain),
+			theirs.DomainSuffix[:min(3, len(theirs.DomainSuffix))], len(theirs.DomainSuffix)), mine.DomainSet.String(), "%s", text)
+		mine.DomainSet = nil
 		theirs.Domain, theirs.DomainSuffix = nil, nil
 	}
 	require.True(t, reflect.DeepEqual(stock, fast), "%s\nsing-box: %#v\nhere: %#v", text, stock, fast)
@@ -372,7 +375,7 @@ func BenchmarkReadSource(b *testing.B) {
 					b.Fatal(err)
 				}
 				rule := compat.Options.Rules[0].DefaultOptions
-				_, err = NewMatcher(rule.Domain, rule.DomainSuffix, false)
+				_, err = NewSet(rule.Domain, rule.DomainSuffix)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -382,7 +385,7 @@ func BenchmarkReadSource(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
 				compat, err := ReadSource(text)
-				if err != nil || compat.Options.Rules[0].DefaultOptions.DomainMatcher == nil {
+				if err != nil || compat.Options.Rules[0].DefaultOptions.DomainSet == nil {
 					b.Fatal(err)
 				}
 			}

@@ -2,14 +2,15 @@ package domainset
 
 import (
 	"encoding/binary"
-	"io"
+	"runtime"
+	"slices"
 
-	"github.com/sagernet/sing/common/domain"
+	"github.com/sagernet/sing-box/common/domainset/succinct"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
 // trie is the succinct set of sing (common/domain/set.go) as its Write writes it, without
-// the indexes ReadMatcher makes.
+// the indexes succinct.New makes.
 type trie struct {
 	leaves, labelBitmap []uint64
 	labels              []byte
@@ -19,16 +20,34 @@ type trie struct {
 // counts them by their next byte.
 const smallSpan = 24
 
-// Matcher builds the matcher of the names gathered: domain.NewMatcher of sing for the
-// same names, byte for byte. The collector is spent: its keys are let go before sing
-// reads the trie.
-func (c *Collector) Matcher() (*domain.Matcher, error) {
+// Set builds the trie of the names gathered: the one domain.NewMatcher of sing builds of
+// the same names, byte for byte, as a set of its own, so that it is not copied. The
+// collector is spent: its keys are let go first. The description is what the set tells
+// of itself (Describe).
+func (c *Collector) Set(description string) (*succinct.Set, error) {
 	built, err := c.build()
 	c.release()
 	if err != nil {
 		return nil, err
 	}
-	return domain.ReadMatcher(built.reader())
+	// the buffers were made for the most the trie could take; a trie of names that share
+	// much takes far less, and the set is kept as long as its rule set. A big trie is
+	// made smaller by a copy, with the garbage of the build collected first, so that the
+	// copy does not come on top of it: a million names (x86) peak at +40-46 MB and keep
+	// 43 MB of heap so, at +41-44 MB and 52 MB with no copy, at +58-64 MB and 43 MB with
+	// a copy on top of the garbage.
+	if len(built.labels) > 1<<20 && cap(built.labels)-len(built.labels) > len(built.labels)/8 {
+		runtime.GC()
+	}
+	return succinct.New(fit(built.leaves), fit(built.labelBitmap), fit(built.labels), description)
+}
+
+// fit is a slice without the room it was made with beyond an eighth of what it holds.
+func fit[T any](items []T) []T {
+	if cap(items)-len(items) > len(items)/8 {
+		return slices.Clone(items)
+	}
+	return items
 }
 
 // Encode is the matcher of the names gathered as domain.Matcher.Write writes it, the form
@@ -213,31 +232,4 @@ func (t trie) parts() ([]byte, []byte) {
 	}
 	head = binary.AppendUvarint(head, uint64(len(t.labels)))
 	return head, t.labels
-}
-
-// reader hands the trie to domain.ReadMatcher without a copy of the labels.
-func (t trie) reader() *twoParts {
-	head, labels := t.parts()
-	return &twoParts{head, labels}
-}
-
-// twoParts reads one slice of bytes, then another.
-type twoParts [2][]byte
-
-func (p *twoParts) Read(buffer []byte) (int, error) {
-	for len(p[0]) == 0 {
-		if len(p[1]) == 0 {
-			return 0, io.EOF
-		}
-		p[0], p[1] = p[1], nil
-	}
-	read := copy(buffer, p[0])
-	p[0] = p[0][read:]
-	return read, nil
-}
-
-func (p *twoParts) ReadByte() (byte, error) {
-	var one [1]byte
-	_, err := p.Read(one[:])
-	return one[0], err
 }

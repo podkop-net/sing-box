@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/sagernet/sing-box/common/domainset/succinct"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/domain"
@@ -209,6 +210,7 @@ type DefaultHeadlessRule struct {
 	Invert bool `json:"invert,omitempty"`
 
 	DomainMatcher *domain.Matcher `json:"-"`
+	DomainSet     *succinct.Set   `json:"-"` // domain and domain_suffix as common/domainset builds them
 	SourceIPSet   *netipx.IPSet   `json:"-"`
 	IPSet         *netipx.IPSet   `json:"-"`
 

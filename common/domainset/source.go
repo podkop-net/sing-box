@@ -16,9 +16,9 @@ import (
 // ReadSource reads a rule set of the source format, JSON, into what
 // json.UnmarshalExtended[option.PlainRuleSetCompat] reads of it, in one pass and without
 // a copy of the names where it can. The rules differ in one way: the names of a rule of
-// the default type (domain, domain_suffix) come as its matcher (DomainMatcher, as a rule
-// set of the binary format has them), not as lists of strings; the matcher is the one
-// route/rule builds of those lists.
+// the default type (domain, domain_suffix) come as their trie (DomainSet), not as lists
+// of strings; the trie, and what it tells of itself, are what route/rule builds of those
+// lists.
 //
 // What it reads so is JSON of a strict shape: the object of the rule set with "version"
 // (a digit) and "rules", nothing around it but white space. In a rule it reads the lists of
@@ -187,6 +187,9 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 		seen, full uint
 		lists      [fieldCount][]string
 		names      *Collector
+		// the first names of domain and domain_suffix, and how many there are
+		first  [2][]string
+		counts [2]int
 		// the other members, as their text
 		rest [][]byte
 	)
@@ -216,7 +219,9 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 					if names == nil {
 						names = NewCollector(r.text)
 					}
-					count, ok = r.names(names, field == fieldDomainSuffix)
+					side := field - fieldDomain
+					count, ok = r.names(names, field == fieldDomainSuffix, &first[side])
+					counts[side] = count
 				} else {
 					lists[field], ok = r.strings()
 					count = len(lists[field])
@@ -278,11 +283,11 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 	fields.SourceIPCIDR = badoption.Listable[string](lists[fieldSourceIPCIDR])
 	fields.IPCIDR = badoption.Listable[string](lists[fieldIPCIDR])
 	if names != nil && names.Len() > 0 {
-		matcher, err := names.Matcher()
+		set, err := names.Set(Describe(first[0], counts[0], first[1], counts[1]))
 		if err != nil {
 			return rule, false, false
 		}
-		fields.DomainMatcher = matcher
+		fields.DomainSet = set
 	}
 	return rule, full == 0 && restEmpty, true
 }
@@ -337,20 +342,38 @@ func (r *reader) defaultType() bool {
 }
 
 // names reads a value of domain or domain_suffix into the collector: a string, an array
-// of strings or null. It tells how many names it read.
-func (r *reader) names(names *Collector, suffix bool) (int, bool) {
+// of strings or null. It tells how many names it read, and keeps the first three of them
+// for the description of the rule. An empty name is route/rule's to refuse: the rule goes
+// to sing-box.
+func (r *reader) names(names *Collector, suffix bool, first *[]string) (int, bool) {
 	names.Grow(r.countStrings())
 	count := 0
 	ok := r.each(func(start int, end int, plain bool) bool {
+		if start == end {
+			return false
+		}
 		count++
+		var err error
+		var name string
 		if plain {
-			return names.Add(start, end, suffix) == nil
+			err = names.Add(start, end, suffix)
+		} else if text, unescaped := r.unescaped(start, end); unescaped {
+			err = names.AddBytes(text, suffix)
+		} else {
+			var ok bool
+			name, ok = r.unquote(start, end)
+			if !ok || name == "" {
+				return false
+			}
+			err = names.AddString(name, suffix)
 		}
-		if text, ok := r.unescaped(start, end); ok {
-			return names.AddBytes(text, suffix) == nil
+		if len(*first) < 3 {
+			if name == "" {
+				name = string(r.text[start:end])
+			}
+			*first = append(*first, name)
 		}
-		value, ok := r.unquote(start, end)
-		return ok && names.AddString(value, suffix) == nil
+		return err == nil
 	})
 	return count, ok
 }

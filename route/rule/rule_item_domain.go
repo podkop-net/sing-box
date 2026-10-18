@@ -6,6 +6,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/domainset"
+	"github.com/sagernet/sing-box/common/domainset/succinct"
 	"github.com/sagernet/sing/common/domain"
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -13,7 +14,7 @@ import (
 var _ RuleItem = (*DomainItem)(nil)
 
 type DomainItem struct {
-	matcher     *domain.Matcher
+	matcher     domainset.Matcher
 	description string
 }
 
@@ -24,36 +25,15 @@ func NewDomainItem(domains []string, domainSuffixes []string) (*DomainItem, erro
 	if slices.Contains(domainSuffixes, "") {
 		return nil, E.New("domain_suffix: empty item is not allowed")
 	}
-	var description string
-	if dLen := len(domains); dLen > 0 {
-		if dLen == 1 {
-			description = "domain=" + domains[0]
-		} else if dLen > 3 {
-			description = "domain=[" + strings.Join(domains[:3], " ") + "...]"
-		} else {
-			description = "domain=[" + strings.Join(domains, " ") + "]"
-		}
-	}
-	if dsLen := len(domainSuffixes); dsLen > 0 {
-		if len(description) > 0 {
-			description += " "
-		}
-		if dsLen == 1 {
-			description += "domain_suffix=" + domainSuffixes[0]
-		} else if dsLen > 3 {
-			description += "domain_suffix=[" + strings.Join(domainSuffixes[:3], " ") + "...]"
-		} else {
-			description += "domain_suffix=[" + strings.Join(domainSuffixes, " ") + "]"
-		}
-	}
-	// the matcher of sing built with a fraction of the memory domain.NewMatcher takes
-	matcher, err := domainset.NewMatcher(domains, domainSuffixes, false)
+	// the trie of sing built with a fraction of the memory domain.NewMatcher takes, and
+	// the description of the lists (domainset.Describe)
+	matcher, err := domainset.NewSet(domains, domainSuffixes)
 	if err != nil {
 		return nil, err
 	}
 	return &DomainItem{
 		matcher,
-		description,
+		domainset.Describe(domains[:min(3, len(domains))], len(domains), domainSuffixes[:min(3, len(domainSuffixes))], len(domainSuffixes)),
 	}, nil
 }
 
@@ -61,6 +41,14 @@ func NewRawDomainItem(matcher *domain.Matcher) *DomainItem {
 	return &DomainItem{
 		matcher,
 		"domain/domain_suffix=<binary>",
+	}
+}
+
+// NewDomainSetItem is the item of a trie common/domainset built of the lists of a rule.
+func NewDomainSetItem(set *succinct.Set) *DomainItem {
+	return &DomainItem{
+		set,
+		set.String(),
 	}
 }
 
