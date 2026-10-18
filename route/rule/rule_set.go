@@ -30,7 +30,7 @@ func extractIPSetFromRule(rawRule adapter.HeadlessRule) []*netipx.IPSet {
 		return common.FlatMap(rule.destinationIPCIDRItems, func(rawItem RuleItem) []*netipx.IPSet {
 			switch item := rawItem.(type) {
 			case *IPCIDRItem:
-				return []*netipx.IPSet{item.ipSet}
+				return []*netipx.IPSet{item.netipxSet()}
 			default:
 				return nil
 			}
@@ -67,5 +67,5 @@ func isWIFIHeadlessRule(rule option.DefaultHeadlessRule) bool {
 }
 
 func isIPCIDRHeadlessRule(rule option.DefaultHeadlessRule) bool {
-	return len(rule.IPCIDR) > 0 || rule.IPSet != nil
+	return len(rule.IPCIDR) > 0 || rule.IPSet != nil || rule.IPRanges != nil
 }

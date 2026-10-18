@@ -95,6 +95,10 @@ func NewDefaultHeadlessRule(ctx context.Context, options option.DefaultHeadlessR
 		item := NewRawIPCIDRItem(true, options.SourceIPSet)
 		rule.sourceAddressItems = append(rule.sourceAddressItems, item)
 		rule.allItems = append(rule.allItems, item)
+	} else if options.SourceIPRanges != nil {
+		item := NewCIDRSetItem(true, options.SourceIPRanges)
+		rule.sourceAddressItems = append(rule.sourceAddressItems, item)
+		rule.allItems = append(rule.allItems, item)
 	}
 	if len(options.IPCIDR) > 0 {
 		item, err := NewIPCIDRItem(false, options.IPCIDR)
@@ -105,6 +109,10 @@ func NewDefaultHeadlessRule(ctx context.Context, options option.DefaultHeadlessR
 		rule.allItems = append(rule.allItems, item)
 	} else if options.IPSet != nil {
 		item := NewRawIPCIDRItem(false, options.IPSet)
+		rule.destinationIPCIDRItems = append(rule.destinationIPCIDRItems, item)
+		rule.allItems = append(rule.allItems, item)
+	} else if options.IPRanges != nil {
+		item := NewCIDRSetItem(false, options.IPRanges)
 		rule.destinationIPCIDRItems = append(rule.destinationIPCIDRItems, item)
 		rule.allItems = append(rule.allItems, item)
 	}

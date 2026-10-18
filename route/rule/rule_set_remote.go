@@ -200,7 +200,7 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 			return err
 		}
 	case C.RuleSetFormatBinary:
-		ruleSet, err = srs.Read(bytes.NewReader(content), false)
+		ruleSet, err = srs.ReadSets(bytes.NewReader(content))
 		if err != nil {
 			return err
 		}

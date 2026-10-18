@@ -4,18 +4,22 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sagernet/sing-box/common/cidrset"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/domain"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/json/badoption"
 	"github.com/sagernet/sing/common/varbin"
 
 	"github.com/stretchr/testify/require"
+	"go4.org/netipx"
 )
 
 // sourceText makes the text of rule sets of the source format of every shape sing-box
@@ -120,7 +124,13 @@ func (g sourceText) rule(depth int) string {
 	add := func(key string, value string) {
 		members = append(members, g.member(key, value))
 	}
-	cidr := func() string { return g.one("10.0.0.0/8", "192.0.2.1", "2001:db8::/32", "bad") }
+	cidr := func() string {
+		if g.random.Intn(3) == 0 {
+			return fmt.Sprintf("10.%d.%d.%d/%d", g.random.Intn(4), g.random.Intn(256), g.random.Intn(256), 16+g.random.Intn(17))
+		}
+		return g.one("10.0.0.0/8", "192.0.2.1", "192.0.2.0/24", "2001:db8::/32", "::ffff:192.0.2.1", "::ffff:192.0.2.0/120",
+			"0.0.0.0/0", "255.255.255.255", "fe80::1%eth0", "01.2.3.4", "1.2.3.4/033", "bad")
+	}
 	word := func() string { return g.one("ex", "ample", "^a.*$", "q") }
 	for range 1 + g.random.Intn(4) {
 		switch g.random.Intn(22) {
@@ -242,28 +252,58 @@ func sameAsStock(t testing.TB, text []byte) bool {
 			// route/rule refuses an empty name: the rule must reach it as lists
 			require.Nil(t, mine.DomainSet, "an empty name built here:\n%s", text)
 		}
-		if mine.DomainSet == nil {
-			continue
-		}
-		require.True(t, len(theirs.Domain)+len(theirs.DomainSuffix) > 0, "%s", text)
-		var want *domain.Matcher
-		func() {
-			defer func() {
-				if recover() != nil {
-					want = nil
-				}
+		sameCIDR(t, text, true, &mine.SourceIPRanges, &theirs.SourceIPCIDR)
+		sameCIDR(t, text, false, &mine.IPRanges, &theirs.IPCIDR)
+		if mine.DomainSet != nil {
+			require.True(t, len(theirs.Domain)+len(theirs.DomainSuffix) > 0, "%s", text)
+			var want *domain.Matcher
+			func() {
+				defer func() {
+					if recover() != nil {
+						want = nil
+					}
+				}()
+				want = domain.NewMatcher(theirs.Domain, theirs.DomainSuffix, false)
 			}()
-			want = domain.NewMatcher(theirs.Domain, theirs.DomainSuffix, false)
-		}()
-		require.NotNil(t, want, "sing stops on these names, readSource built them:\n%s", text)
-		require.Equal(t, written(t, want), written(t, mine.DomainSet), "%s", text)
-		require.Equal(t, Describe(theirs.Domain[:min(3, len(theirs.Domain))], len(theirs.Domain),
-			theirs.DomainSuffix[:min(3, len(theirs.DomainSuffix))], len(theirs.DomainSuffix)), mine.DomainSet.String(), "%s", text)
-		mine.DomainSet = nil
-		theirs.Domain, theirs.DomainSuffix = nil, nil
+			require.NotNil(t, want, "sing stops on these names, readSource built them:\n%s", text)
+			require.Equal(t, written(t, want), written(t, mine.DomainSet), "%s", text)
+			require.Equal(t, Describe(theirs.Domain[:min(3, len(theirs.Domain))], len(theirs.Domain),
+				theirs.DomainSuffix[:min(3, len(theirs.DomainSuffix))], len(theirs.DomainSuffix)), mine.DomainSet.String(), "%s", text)
+			mine.DomainSet = nil
+			theirs.Domain, theirs.DomainSuffix = nil, nil
+		}
 	}
 	require.True(t, reflect.DeepEqual(stock, fast), "%s\nsing-box: %#v\nhere: %#v", text, stock, fast)
 	return true
+}
+
+// sameCIDR checks the set of a CIDR list read here against the list sing-box read: the
+// ranges and the description NewIPCIDRItem makes of it. A list with an item netip refuses
+// must reach route/rule as it is. Both are then put aside.
+func sameCIDR(t testing.TB, text []byte, source bool, mine **cidrset.Set, theirs *badoption.Listable[string]) {
+	var reference netipx.IPSetBuilder
+	takes := true
+	for _, item := range *theirs {
+		if prefix, err := netip.ParsePrefix(item); err == nil {
+			reference.AddPrefix(prefix)
+		} else if address, err := netip.ParseAddr(item); err == nil {
+			reference.Add(address)
+		} else {
+			takes = false
+		}
+	}
+	if !takes {
+		require.Nil(t, *mine, "a list cidrset does not take, built here:\n%s", text)
+	}
+	if *mine == nil {
+		return
+	}
+	require.NotEmpty(t, *theirs, "%s", text)
+	want, err := reference.IPSet()
+	require.NoError(t, err)
+	require.Equal(t, want.Ranges(), (*mine).Ranges(), "%s", text)
+	require.Equal(t, cidrset.Describe(source, (*theirs)[:min(3, len(*theirs))], len(*theirs)), (*mine).String(), "%s", text)
+	*mine, *theirs = nil, nil
 }
 
 // What the source format reads here is what sing-box reads, for a hundred thousand rule

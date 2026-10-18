@@ -3,9 +3,11 @@ package domainset
 import (
 	"bytes"
 	"context"
+	"net/netip"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/sagernet/sing-box/common/cidrset"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
@@ -16,9 +18,10 @@ import (
 // ReadSource reads a rule set of the source format, JSON, into what
 // json.UnmarshalExtended[option.PlainRuleSetCompat] reads of it, in one pass and without
 // a copy of the names where it can. The rules differ in one way: the names of a rule of
-// the default type (domain, domain_suffix) come as their trie (DomainSet), not as lists
-// of strings; the trie, and what it tells of itself, are what route/rule builds of those
-// lists.
+// the default type (domain, domain_suffix) come as their trie (DomainSet), and its CIDR
+// lists (source_ip_cidr, ip_cidr) as their sets (SourceIPRanges, IPRanges), not as lists
+// of strings; the trie and the sets, and what they tell of themselves, are what
+// route/rule builds of those lists.
 //
 // What it reads so is JSON of a strict shape: the object of the rule set with "version"
 // (a digit) and "rules", nothing around it but white space. In a rule it reads the lists of
@@ -190,6 +193,10 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 		// the first names of domain and domain_suffix, and how many there are
 		first  [2][]string
 		counts [2]int
+		// the ranges of source_ip_cidr and ip_cidr, their first items, how many there are
+		cidrs      [2]cidrset.Builder
+		cidrFirst  [2][]string
+		cidrCounts [2]int
 		// the other members, as their text
 		rest [][]byte
 	)
@@ -222,6 +229,10 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 					side := field - fieldDomain
 					count, ok = r.names(names, field == fieldDomainSuffix, &first[side])
 					counts[side] = count
+				} else if field == fieldSourceIPCIDR || field == fieldIPCIDR {
+					side := field - fieldSourceIPCIDR
+					count, ok = r.cidrs(&cidrs[side], &cidrFirst[side])
+					cidrCounts[side] = count
 				} else {
 					lists[field], ok = r.strings()
 					count = len(lists[field])
@@ -280,8 +291,12 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 	fields := &rule.DefaultOptions
 	fields.DomainKeyword = badoption.Listable[string](lists[fieldDomainKeyword])
 	fields.DomainRegex = badoption.Listable[string](lists[fieldDomainRegex])
-	fields.SourceIPCIDR = badoption.Listable[string](lists[fieldSourceIPCIDR])
-	fields.IPCIDR = badoption.Listable[string](lists[fieldIPCIDR])
+	if cidrCounts[0] > 0 {
+		fields.SourceIPRanges = cidrs[0].Set(cidrset.Describe(true, cidrFirst[0], cidrCounts[0]))
+	}
+	if cidrCounts[1] > 0 {
+		fields.IPRanges = cidrs[1].Set(cidrset.Describe(false, cidrFirst[1], cidrCounts[1]))
+	}
 	if names != nil && names.Len() > 0 {
 		set, err := names.Set(Describe(first[0], counts[0], first[1], counts[1]))
 		if err != nil {
@@ -374,6 +389,47 @@ func (r *reader) names(names *Collector, suffix bool, first *[]string) (int, boo
 			*first = append(*first, name)
 		}
 		return err == nil
+	})
+	return count, ok
+}
+
+// cidrs reads a value of source_ip_cidr or ip_cidr into the builder: a string, an array of
+// strings or null. A canonical IPv4 prefix is read from its text, any other by netip as
+// NewIPCIDRItem reads it; one netip refuses is NewIPCIDRItem's to tell: the rule goes to
+// sing-box. It tells how many items it read, and keeps the first three of them for the
+// description of the rule.
+func (r *reader) cidrs(builder *cidrset.Builder, first *[]string) (int, bool) {
+	builder.Grow(r.countStrings())
+	count := 0
+	ok := r.each(func(start int, end int, plain bool) bool {
+		count++
+		var text string
+		if plain {
+			if from, to, ok := cidrset.Parse4(r.text[start:end]); ok {
+				builder.Add4(from, to)
+				if len(*first) < 3 {
+					*first = append(*first, string(r.text[start:end]))
+				}
+				return true
+			}
+			text = string(r.text[start:end])
+		} else {
+			var ok bool
+			text, ok = r.unquote(start, end)
+			if !ok {
+				return false
+			}
+		}
+		if len(*first) < 3 {
+			*first = append(*first, text)
+		}
+		if prefix, err := netip.ParsePrefix(text); err == nil {
+			return builder.AddPrefix(prefix)
+		}
+		if address, err := netip.ParseAddr(text); err == nil {
+			return builder.AddAddr(address)
+		}
+		return false
 	})
 	return count, ok
 }

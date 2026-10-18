@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/sagernet/sing-box/common/cidrset"
 	"github.com/sagernet/sing-box/common/domainset/succinct"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
@@ -213,6 +214,11 @@ type DefaultHeadlessRule struct {
 	DomainSet     *succinct.Set   `json:"-"` // domain and domain_suffix as common/domainset builds them
 	SourceIPSet   *netipx.IPSet   `json:"-"`
 	IPSet         *netipx.IPSet   `json:"-"`
+
+	// the lists of source_ip_cidr and ip_cidr as common/cidrset builds them, in place of
+	// the lists (common/domainset.ReadSource) or of the sets above (srs.ReadSets)
+	SourceIPRanges *cidrset.Set `json:"-"`
+	IPRanges       *cidrset.Set `json:"-"`
 
 	AdGuardDomain        badoption.Listable[string] `json:"-"`
 	AdGuardDomainMatcher *domain.AdGuardMatcher     `json:"-"`
