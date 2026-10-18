@@ -2,6 +2,7 @@ package domainset
 
 import (
 	"math"
+	"slices"
 	"unicode/utf8"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -74,6 +75,12 @@ func NewCollector(text []byte) *Collector {
 // Len is the number of names gathered, repeated ones included.
 func (c *Collector) Len() int {
 	return len(c.refs)
+}
+
+// Grow makes room for count more names, so that a big list is gathered without the copies
+// a growing slice makes.
+func (c *Collector) Grow(count int) {
+	c.refs = slices.Grow(c.refs, count)
 }
 
 // Add takes text[start:end] as a name, a domain or a suffix. The name must be ASCII: the

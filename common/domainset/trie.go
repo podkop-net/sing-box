@@ -15,20 +15,16 @@ type trie struct {
 	labels              []byte
 }
 
-// span is a node of the trie as the build sees it: the keys at start to end of a level,
-// which share their first bytes, as many as the level is deep.
-type span struct {
-	start, end int32
-}
-
 // smallSpan is the most keys a node parts by sorting them in place; a node of more keys
 // counts them by their next byte.
 const smallSpan = 24
 
 // Matcher builds the matcher of the names gathered: domain.NewMatcher of sing for the
-// same names, byte for byte.
+// same names, byte for byte. The collector is spent: its keys are let go before sing
+// reads the trie.
 func (c *Collector) Matcher() (*domain.Matcher, error) {
 	built, err := c.build()
+	c.release()
 	if err != nil {
 		return nil, err
 	}
@@ -36,9 +32,10 @@ func (c *Collector) Matcher() (*domain.Matcher, error) {
 }
 
 // Encode is the matcher of the names gathered as domain.Matcher.Write writes it, the form
-// a rule set in the binary format carries.
+// a rule set in the binary format carries. The collector is spent.
 func (c *Collector) Encode() ([]byte, error) {
 	built, err := c.build()
+	c.release()
 	if err != nil {
 		return nil, err
 	}
@@ -46,11 +43,18 @@ func (c *Collector) Encode() ([]byte, error) {
 	return append(head, labels...), nil
 }
 
+func (c *Collector) release() {
+	c.refs = nil
+	c.buffers = [2][]byte{}
+}
+
 // build makes the trie newSuccinctSet of sing makes of the sorted keys. The keys are not
 // sorted first: the trie is built a level at a time, in the order of sing's walk, and
 // the keys of each node are parted by their byte at the depth of the level into the
 // nodes of the next one (a radix sort, done in the order of the trie). The keys of a
-// node that end at it are its leaf: one key, however many times it was gathered; a name
+// level are kept one after another, the keys that ended left out, and a bit marks where
+// each node of the level begins: a level costs a bit a key besides the keys. The keys of
+// a node that end at it are its leaf: one key, however many times it was gathered; a name
 // that is also a suffix is the suffix only, as the map of domain.NewMatcher has it.
 func (c *Collector) build() (trie, error) {
 	count := len(c.refs)
@@ -67,18 +71,28 @@ func (c *Collector) build() (trie, error) {
 		labelBitmap: make([]uint64, 0, (2*most+1)/64+1),
 	}
 	from, to := c.refs, make([]ref, count)
-	level, next := make([]span, 1, count), make([]span, 0, count)
-	level[0] = span{0, int32(count)}
+	starts, nextStarts := make([]uint64, count/64+1), make([]uint64, count/64+1)
+	// the root: one node of all keys
+	starts[0] = 1
+	active := count
 	var scratch []uint16
 	node, bit := 0, 0
-	for column := 0; len(level) > 0; column++ {
-		next = next[:0]
-		for _, item := range level {
-			start, end := int(item.start), int(item.end)
+	for column := 0; active > 0; column++ {
+		clear(nextStarts[:active/64+1])
+		out := 0
+		// a group of keys that share their byte at column: a node of the next level
+		group := func(first int, bucket int) {
+			nextStarts[first>>6] |= 1 << uint(first&63)
+			built.labels = append(built.labels, byte(bucket-1))
+			bit++
+		}
+		for start := 0; start < active; {
+			end := start + 1
+			for end < active && starts[end>>6]&(1<<uint(end&63)) == 0 {
+				end++
+			}
 			var enderDomain, enderSuffix, sameName bool
-			// the keys of the node, by their next byte, into to[start:end]: first the ones
-			// that end here (bucket 0), then the others in the order of their byte
-			// (bucket 1 + the byte)
+			// where a key goes at column: 0 when it ends there, 1 + its byte otherwise
 			look := func(key ref) int {
 				length := key.length()
 				kind := key.kind()
@@ -100,42 +114,41 @@ func (c *Collector) build() (trie, error) {
 				}
 				return 0
 			}
-			size := end - start
-			switch {
+			switch size := end - start; {
 			case size == 1:
 				key := from[start]
 				if bucket := look(key); bucket != 0 {
-					to[start] = key
-					next = append(next, span{int32(start), int32(end)})
-					built.labels = append(built.labels, byte(bucket-1))
-					bit++
+					group(out, bucket)
+					to[out] = key
+					out++
 				}
 			case size <= smallSpan:
-				var buckets [smallSpan]uint16
-				for index := start; index < end; index++ {
-					key := from[index]
+				var (
+					keys    [smallSpan]ref
+					buckets [smallSpan]uint16
+				)
+				for index := 0; index < size; index++ {
+					key := from[start+index]
 					bucket := uint16(look(key))
-					place := index - start
+					place := index
 					for place > 0 && buckets[place-1] > bucket {
 						buckets[place] = buckets[place-1]
-						to[start+place] = to[start+place-1]
+						keys[place] = keys[place-1]
 						place--
 					}
 					buckets[place] = bucket
-					to[start+place] = key
+					keys[place] = key
 				}
-				for place := 0; place < size; {
+				for place := 0; place < size; place++ {
 					bucket := buckets[place]
-					first := place
-					for place < size && buckets[place] == bucket {
-						place++
-					}
 					if bucket == 0 {
 						continue
 					}
-					next = append(next, span{int32(start + first), int32(start + place)})
-					built.labels = append(built.labels, byte(bucket-1))
-					bit++
+					if place == 0 || buckets[place-1] != bucket {
+						group(out, int(bucket))
+					}
+					to[out] = keys[place]
+					out++
 				}
 			default:
 				if scratch == nil {
@@ -147,24 +160,21 @@ func (c *Collector) build() (trie, error) {
 					scratch[index] = uint16(bucket)
 					counts[bucket]++
 				}
-				place := int32(start)
-				for bucket := range counts {
+				place := int32(out)
+				for bucket := 1; bucket < len(counts); bucket++ {
 					places[bucket] = place
+					if counts[bucket] > 0 {
+						group(int(place), bucket)
+					}
 					place += counts[bucket]
 				}
 				for index := start; index < end; index++ {
-					bucket := scratch[index]
-					to[places[bucket]] = from[index]
-					places[bucket]++
-				}
-				for bucket := 1; bucket < len(counts); bucket++ {
-					if counts[bucket] == 0 {
-						continue
+					if bucket := scratch[index]; bucket != 0 {
+						to[places[bucket]] = from[index]
+						places[bucket]++
 					}
-					next = append(next, span{places[bucket] - counts[bucket], places[bucket]})
-					built.labels = append(built.labels, byte(bucket-1))
-					bit++
 				}
+				out = int(place)
 			}
 			if enderDomain && enderSuffix {
 				return trie{}, errSameKey
@@ -175,9 +185,11 @@ func (c *Collector) build() (trie, error) {
 			setBit(&built.labelBitmap, bit)
 			bit++
 			node++
+			start = end
 		}
-		level, next = next, level
 		from, to = to, from
+		starts, nextStarts = nextStarts, starts
+		active = out
 	}
 	return built, nil
 }

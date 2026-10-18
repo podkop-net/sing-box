@@ -339,6 +339,7 @@ func (r *reader) defaultType() bool {
 // names reads a value of domain or domain_suffix into the collector: a string, an array
 // of strings or null. It tells how many names it read.
 func (r *reader) names(names *Collector, suffix bool) (int, bool) {
+	names.Grow(r.countStrings())
 	count := 0
 	ok := r.each(func(start int, end int, plain bool) bool {
 		count++
@@ -409,6 +410,31 @@ func (r *reader) each(take func(start int, end int, plain bool) bool) bool {
 		}
 	}
 	return false
+}
+
+// countStrings counts the strings of the array the reader is at, without reading it: a
+// list is gathered into room made once. Anything else counts none.
+func (r *reader) countStrings() int {
+	if r.at >= len(r.text) || r.text[r.at] != '[' {
+		return 0
+	}
+	count := 0
+	for index := r.at + 1; index < len(r.text); index++ {
+		switch r.text[index] {
+		case '"':
+			count++
+			for index++; index < len(r.text) && r.text[index] != '"'; index++ {
+				if r.text[index] == '\\' {
+					index++
+				}
+			}
+		case ']':
+			return count
+		case '[', '{':
+			return 0
+		}
+	}
+	return 0
 }
 
 // unescaped is the text of a string that has no escape and is valid UTF-8: the string
