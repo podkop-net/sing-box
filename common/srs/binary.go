@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"unsafe"
 
+	"github.com/sagernet/sing-box/common/domainset"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -324,7 +325,8 @@ func writeDefaultRule(writer varbin.Writer, rule option.DefaultHeadlessRule, gen
 		if err != nil {
 			return err
 		}
-		err = domain.NewMatcher(rule.Domain, rule.DomainSuffix, generateVersion == C.RuleSetVersion1).Write(writer)
+		// what domain.NewMatcher(...).Write writes, built with a fraction of its memory
+		_, err = writer.Write(domainset.Encode(rule.Domain, rule.DomainSuffix, generateVersion == C.RuleSetVersion1))
 		if err != nil {
 			return err
 		}
