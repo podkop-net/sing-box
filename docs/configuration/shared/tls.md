@@ -201,6 +201,11 @@ no mutually supported protocol.
 
 See [Application-Layer Protocol Negotiation](https://en.wikipedia.org/wiki/Application-Layer_Protocol_Negotiation).
 
+!!! note ""
+
+    With REALITY the ClientHello carries the ALPN list of the uTLS fingerprint: `alpn` is
+    used only with the fingerprint `randomized`.
+
 #### min_version
 
 The minimum TLS version that is acceptable.

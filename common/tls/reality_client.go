@@ -221,14 +221,10 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		return nil, err
 	}
 
-	if len(uConfig.NextProtos) > 0 {
-		for _, extension := range uConn.Extensions {
-			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
-				alpnExtension.AlpnProtocols = uConfig.NextProtos
-				break
-			}
-		}
-	}
+	// The ALPN of the ClientHello is the fingerprint's: BuildHandshakeState has already put
+	// its list in uConfig.NextProtos, and changing the extension here would not reach the
+	// wire before the session ID is sealed below anyway. Only "randomized" reads the
+	// configured ALPN, when it builds its spec.
 
 	hello := uConn.HandshakeState.Hello
 	hello.SessionId = make([]byte, 32)

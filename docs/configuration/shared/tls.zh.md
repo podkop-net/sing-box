@@ -200,6 +200,10 @@ TLS 版本值：
 
 参阅 [Application-Layer Protocol Negotiation](https://en.wikipedia.org/wiki/Application-Layer_Protocol_Negotiation)。
 
+!!! note ""
+
+    使用 REALITY 时，ClientHello 携带 uTLS 指纹自带的 ALPN 列表：仅 `randomized` 指纹使用 `alpn`。
+
 #### min_version
 
 可接受的最低 TLS 版本。
