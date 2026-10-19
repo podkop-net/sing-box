@@ -49,7 +49,10 @@ type HTTPSTransport struct {
 	transportAccess  sync.Mutex
 	transport        *HTTPSTransportWrapper
 	transportResetAt time.Time
-	answeredStartAt  atomic.Int64 // unix nanoseconds: the latest start among the answered exchanges
+	// answeredStartAt is the latest start among the answered exchanges, in nanoseconds since
+	// createdAt: time.Sub reads the monotonic clock, which a clock set back does not move
+	answeredStartAt atomic.Int64
+	createdAt       time.Time
 }
 
 func NewHTTPS(ctx context.Context, logger log.ContextLogger, tag string, options option.RemoteHTTPSDNSServerOptions) (adapter.DNSTransport, error) {
@@ -127,6 +130,7 @@ func NewHTTPSRaw(
 	}
 	return &HTTPSTransport{
 		TransportAdapter: adapter,
+		createdAt:        time.Now(),
 		logger:           logger,
 		dialer:           dialer,
 		destination:      destination,
@@ -179,7 +183,7 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 			// A query that began after this one was answered: the connection is alive
 			// and the timeout is about this query alone (a slow upstream for one name).
 			// A reset would open a new connection and leave the old one open.
-			if t.answeredStartAt.Load() > startAt.UnixNano() {
+			if t.answeredStartAt.Load() > t.sinceCreated(startAt) {
 				return nil, err
 			}
 			t.transportAccess.Lock()
@@ -193,13 +197,19 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		}
 		return nil, err
 	}
-	for started := startAt.UnixNano(); ; {
+	for started := t.sinceCreated(startAt); ; {
 		latest := t.answeredStartAt.Load()
 		if started <= latest || t.answeredStartAt.CompareAndSwap(latest, started) {
 			break
 		}
 	}
 	return response, nil
+}
+
+// sinceCreated is a time of this transport as nanoseconds since it was made, by the
+// monotonic clock.
+func (t *HTTPSTransport) sinceCreated(at time.Time) int64 {
+	return int64(at.Sub(t.createdAt))
 }
 
 func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
