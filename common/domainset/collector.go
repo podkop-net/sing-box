@@ -134,7 +134,7 @@ func appendRunes[T string | []byte](own []byte, name T) []byte {
 
 func (c *Collector) add(buffer int, start int, end int, suffix bool) error {
 	length := end - start
-	if length > lengthMask || start > math.MaxUint32 || len(c.refs) >= math.MaxInt32 {
+	if length > lengthMask || uint64(start) > math.MaxUint32 || len(c.refs) >= math.MaxInt32 {
 		return errTooLong
 	}
 	kind := uint32(kindDomain)
