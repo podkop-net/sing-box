@@ -197,8 +197,10 @@ func (s *session) startDownload(client *poolClient, request *http.Request) {
 // (stream-up). Its response carries only the server's keep-alive padding.
 //
 // Unlike Xray's client, which does not look at the answer to this request, a
-// failure or an error status ends the session: without its upload it could
-// only wait.
+// failure, an error status or an answer cut short ends the session: without its
+// upload it could only wait. An answer that ends is the server ending the
+// upload, as Xray does when the connection is over: the HTTP client closes the
+// request body then, and a later write finds it closed (ioError).
 func (s *session) startStreamUpload(client *poolClient, request *http.Request) {
 	go func() {
 		// the server ends its answer once it has read the upload to its end
@@ -213,13 +215,19 @@ func (s *session) startStreamUpload(client *poolClient, request *http.Request) {
 			s.fail(E.New("xhttp: upload: unexpected status ", response.Status))
 			return
 		}
-		discardBody(response.Body)
+		err = discardBody(response.Body)
+		if err != nil && !s.closed.Load() {
+			s.fail(E.Cause(err, "xhttp: upload"))
+		}
 	}()
 }
 
-func discardBody(body io.ReadCloser) {
-	io.Copy(io.Discard, body)
+// discardBody reads a body to its end and closes it; the error is the one of the
+// read, nil for a body that ended.
+func discardBody(body io.ReadCloser) error {
+	_, err := io.Copy(io.Discard, body)
 	body.Close()
+	return err
 }
 
 // setDownload sets the download body, or the error that stands for it, once;
@@ -255,6 +263,16 @@ func (s *session) fail(err error) {
 // ioError turns an error of the HTTP machinery into the error the session
 // reports: net.ErrClosed once closed here, the failure that ended the session,
 // and otherwise an error that does not carry the HTTP/2 error types.
+//
+// io.ErrClosedPipe is a write after the HTTP client closed the body of the
+// request that carries the upload (stream-up, stream-one): the client does that
+// when the request is over, the server having ended its answer. That is the end
+// of the connection, as a closed socket is, not an error to report: a request
+// that failed fails the session first, and its failure is reported instead. The
+// HTTP client closes that body when a request fails too (a lost connection, a
+// reset stream): a write that comes before the failure is known reads as closed
+// as well, and the connection ends with no error reported unless the download
+// reports the cause first.
 func (s *session) ioError(err error) error {
 	if err == nil {
 		return nil
@@ -267,6 +285,9 @@ func (s *session) ioError(err error) error {
 	}
 	if failure := s.failure.Load(); failure != nil {
 		return failure.err
+	}
+	if err == io.ErrClosedPipe {
+		return net.ErrClosed
 	}
 	return hideHTTPError(err)
 }

@@ -35,6 +35,13 @@ type testServer struct {
 	maxPacket int
 	// abortUploads resets every upload request (RST_STREAM on HTTP/2).
 	abortUploads bool
+	// endUploadAfterData ends the answer to a stream-up upload once its first
+	// data is read, as Xray does when the connection ends, while the download
+	// stays; resetUploadAfterData resets that upload instead. endStreamOneAfterData
+	// ends a stream-one request once its first data is echoed.
+	endUploadAfterData    bool
+	resetUploadAfterData  bool
+	endStreamOneAfterData bool
 	// received counts the upload bytes of all sessions.
 	received atomic.Int64
 
@@ -307,6 +314,12 @@ func (s *testServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			if n > 0 {
 				s.received.Add(int64(n))
 				session.push(append([]byte(nil), buffer[:n]...))
+				if s.resetUploadAfterData {
+					panic(http.ErrAbortHandler)
+				}
+				if s.endUploadAfterData {
+					return
+				}
 			}
 			if err != nil {
 				return
@@ -369,6 +382,9 @@ func (s *testServer) serveStreamOne(w http.ResponseWriter, r *http.Request) {
 					downloadOver = true
 				} else {
 					w.(http.Flusher).Flush()
+				}
+				if s.endStreamOneAfterData {
+					return
 				}
 			}
 		}
