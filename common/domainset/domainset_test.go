@@ -88,7 +88,8 @@ func TestSameAsSing(t *testing.T) {
 
 // Names sing takes that a list of a rule set hardly has: empty, in capitals, with the
 // labels of the trie inside them, of one byte, a name that is a suffix of another in
-// every way; and names that are not valid UTF-8, which go the way sing builds them.
+// every way; and names that are not valid UTF-8, which go the way sing builds them. The
+// random lists go every way: with a name that is not valid UTF-8 or not, legacy or not.
 func TestSameAsSingOddNames(t *testing.T) {
 	for _, lists := range [][2][]string{
 		{{""}, nil},
@@ -121,23 +122,35 @@ func TestSameAsSingOddNames(t *testing.T) {
 		if len(lists[0])+len(lists[1]) == 0 {
 			continue
 		}
-		var want []byte
-		func() {
-			defer func() {
-				if recover() != nil {
-					want = nil
+		// a name that is not valid UTF-8 takes the list to the build of sorted keys, as
+		// the legacy way does (two bytes before the bad one: sing's reverse of a name puts
+		// U+FFFD, three bytes, where that byte goes and needs room for it)
+		odd := append(append([]string(nil), lists[0]...), "ab\xffcd")
+		for _, domains := range [][]string{lists[0], odd} {
+			for _, legacy := range []bool{false, true} {
+				var want []byte
+				func() {
+					defer func() {
+						if recover() != nil {
+							want = nil
+						}
+					}()
+					want = singBytes(t, domains, lists[1], legacy)
+				}()
+				encoded, err := Encode(domains, lists[1], legacy)
+				if want == nil {
+					// sing stops the process: an empty suffix, a key made twice
+					require.Error(t, err, "%q %q legacy %v", domains, lists[1], legacy)
+				} else {
+					require.NoError(t, err, "%q %q legacy %v", domains, lists[1], legacy)
+					require.Equal(t, want, encoded, "%q %q legacy %v", domains, lists[1], legacy)
 				}
-			}()
-			want = singBytes(t, lists[0], lists[1], false)
-		}()
-		encoded, err := Encode(lists[0], lists[1], false)
-		if want == nil {
-			// sing stops the process: an empty suffix, a name and a suffix of one key
-			require.Error(t, err, "%q", lists)
-			continue
+				if !legacy {
+					_, err = NewSet(domains, lists[1])
+					require.Equal(t, want == nil, err != nil, "%q %q", domains, lists[1])
+				}
+			}
 		}
-		require.NoError(t, err, "%q", lists)
-		require.Equal(t, want, encoded, "%q", lists)
 	}
 }
 
@@ -147,6 +160,17 @@ func TestRefused(t *testing.T) {
 	require.ErrorIs(t, err, ErrEmptySuffix)
 	_, err = NewSet([]string{"\na"}, []string{"a"})
 	require.ErrorIs(t, err, errSameKey)
+	// the build of sorted keys: the legacy way, a name that is not valid UTF-8
+	_, err = Encode(nil, []string{"a", ""}, true)
+	require.ErrorIs(t, err, ErrEmptySuffix)
+	_, err = Encode([]string{"\r.a"}, []string{"a"}, true)
+	require.ErrorIs(t, err, errSameKey)
+	_, err = Encode([]string{"\na", "ab\xffcd"}, []string{"a"}, false)
+	require.ErrorIs(t, err, errSameKey)
+	_, err = NewSet([]string{"\na", "ab\xffcd"}, []string{"a"})
+	require.ErrorIs(t, err, errSameKey)
+	_, err = NewSet([]string{"ab\xffcd"}, []string{"a", ""})
+	require.ErrorIs(t, err, ErrEmptySuffix)
 }
 
 // What a list of 100000 names of no pattern costs to build: here and in sing.

@@ -46,6 +46,11 @@ type Matcher interface {
 // around them.
 func NewSet(domains []string, domainSuffix []string) (Matcher, error) {
 	if !validNames(domains, domainSuffix) {
+		// the keys are made first for what stops sing's build
+		_, err := keys(domains, domainSuffix, false)
+		if err != nil {
+			return nil, err
+		}
 		return domain.NewMatcher(domains, domainSuffix, false), nil
 	}
 	collector, err := collect(domains, domainSuffix)
@@ -87,7 +92,7 @@ func Describe(domains []string, domainCount int, domainSuffix []string, domainSu
 // writes it, the form a rule set in the binary format carries.
 func Encode(domains []string, domainSuffix []string, generateLegacy bool) ([]byte, error) {
 	if generateLegacy || !validNames(domains, domainSuffix) {
-		return encodeSorted(domains, domainSuffix, generateLegacy), nil
+		return encodeSorted(domains, domainSuffix, generateLegacy)
 	}
 	collector, err := collect(domains, domainSuffix)
 	if err != nil {

@@ -20,17 +20,25 @@ const (
 // map and sorted: for the legacy way of rule sets of version 1 (a suffix is two keys,
 // one of them for a name that is not in the list) and for names that are not valid UTF-8.
 // Only the walk of the trie is the lean one of Collector.build, one level at a time.
-func encodeSorted(domains []string, domainSuffix []string, generateLegacy bool) []byte {
-	return buildSorted(keys(domains, domainSuffix, generateLegacy))
+func encodeSorted(domains []string, domainSuffix []string, generateLegacy bool) ([]byte, error) {
+	list, err := keys(domains, domainSuffix, generateLegacy)
+	if err != nil {
+		return nil, err
+	}
+	return buildSorted(list), nil
 }
 
 // keys are the keys of the trie, as domain.NewMatcher makes them: a name reversed, with a
 // label for how it matches, each once, in order. A name of domains that is a suffix too is
-// the suffix only, as there.
-func keys(domains []string, domainSuffix []string, generateLegacy bool) []string {
+// the suffix only, as there. What stops the process there is an error: an empty suffix,
+// and a key made twice (a name that begins with "\n" or "\r" and a suffix).
+func keys(domains []string, domainSuffix []string, generateLegacy bool) ([]string, error) {
 	seen := make(map[string]bool, len(domainSuffix)+len(domains))
 	list := make([]string, 0, len(domains)+len(domainSuffix))
 	for _, name := range domainSuffix {
+		if name == "" {
+			return nil, ErrEmptySuffix
+		}
 		if seen[name] {
 			continue
 		}
@@ -59,7 +67,12 @@ func keys(domains []string, domainSuffix []string, generateLegacy bool) []string
 	// the map is no longer needed: a big list should not keep it while the trie is built
 	seen = nil
 	slices.Sort(list)
-	return list
+	for index := 1; index < len(list); index++ {
+		if list[index] == list[index-1] {
+			return nil, errSameKey
+		}
+	}
+	return list, nil
 }
 
 // reverse is reverseDomain of sing: the runes in the other order.
