@@ -59,6 +59,7 @@ func TestPodkopConfigurationLoads(t *testing.T) {
 			{"type": "hysteria2", "tag": "hy2-out", ` + testServerTLS + `, "password": "p"},
 			{"type": "tuic", "tag": "tuic-out", ` + testServerTLS + `, ` + testUUID + `},
 			{"type": "selector", "tag": "select", "outbounds": ["direct-out", "vless-out"]},
+			{"type": "http", "tag": "http-out", ` + testServer + `},
 			{"type": "urltest", "tag": "auto", "outbounds": ["vless-out", "hy2-out"]}
 		]
 	}`)
@@ -87,7 +88,6 @@ func TestPodkopSlimStubs(t *testing.T) {
 // (a real constructor may still reject the test options, but never with a stub message).
 func TestPodkopFullOutbounds(t *testing.T) {
 	for _, outbound := range []string{
-		`{"type": "http", ` + testServer + `}`,
 		`{"type": "vmess", ` + testServer + `, ` + testUUID + `}`,
 		`{"type": "naive", ` + testServerTLS + `, "username": "u", "password": "p"}`,
 		`{"type": "tor"}`,

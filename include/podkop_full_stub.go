@@ -10,7 +10,6 @@ import (
 const notIncludedFull = notIncludedSlim + ", install podkop-engine-full or rebuild with -tags podkop_full"
 
 func registerFullOutbounds(registry *outbound.Registry) {
-	stubOutbound(registry, C.TypeHTTP, notIncludedFull)
 	stubOutbound(registry, C.TypeVMess, notIncludedFull)
 	stubOutbound(registry, C.TypeNaive, notIncludedFull)
 	stubOutbound(registry, C.TypeTor, notIncludedFull)
