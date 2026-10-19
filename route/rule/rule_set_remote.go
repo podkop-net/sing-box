@@ -519,12 +519,22 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 		response.Body.Close()
 		return describe(err)
 	}
+	// a rule-set closed while its list came in does not parse it: the parse of a big list
+	// is the most an update costs, and a box that replaces this one fetches its own
+	if s.ctx.Err() != nil {
+		response.Body.Close()
+		return s.ctx.Err()
+	}
 	err = s.loadBytes(content)
 	if err != nil {
 		response.Body.Close()
 		return E.Cause(err, "read rule-set (", describeRuleSetBody(response, int64(len(content)), content), ")")
 	}
 	response.Body.Close()
+	if s.ctx.Err() != nil {
+		// closed during the parse: its cache file is closed too
+		return s.ctx.Err()
+	}
 	s.fetchLoaded = true
 	eTagHeader := response.Header.Get("Etag")
 	if eTagHeader != "" {
