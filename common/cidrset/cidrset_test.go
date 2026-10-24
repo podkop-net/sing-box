@@ -214,3 +214,14 @@ func BenchmarkBuild(b *testing.B) {
 		builder.Set("")
 	}
 }
+
+// Ranges4 are the IPv4 ranges of Ranges, packed, and nothing of IPv6.
+func TestRanges4(t *testing.T) {
+	var builder Builder
+	builder.Add4(0x0a000000, 0x0affffff)
+	builder.AddPrefix(netip.MustParsePrefix("192.0.2.0/24"))
+	builder.AddPrefix(netip.MustParsePrefix("2001:db8::/32"))
+	set := builder.Set("")
+	require.Equal(t, []uint64{0x0a000000<<32 | 0x0affffff, 0xc0000200<<32 | 0xc00002ff}, set.Ranges4())
+	require.Nil(t, (*Set)(nil).Ranges4())
+}

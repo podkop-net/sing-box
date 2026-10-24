@@ -130,6 +130,16 @@ func (s *Set) Ranges() []netipx.IPRange {
 	return ranges
 }
 
+// Ranges4 are the ranges of IPv4 of the set, in order, each its first address in the high
+// 32 bits and its last in the low ones: the slice the set keeps, not a copy, for those who
+// hand the ranges on as they are (a firewall). It is not to be changed.
+func (s *Set) Ranges4() []uint64 {
+	if s == nil {
+		return nil
+	}
+	return s.v4
+}
+
 // Prefixes are the prefixes that make up the set, in order, as netipx.IPSet.Prefixes has
 // them.
 func (s *Set) Prefixes() []netip.Prefix {
