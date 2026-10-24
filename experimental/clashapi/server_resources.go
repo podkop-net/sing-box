@@ -77,11 +77,7 @@ func (s *Server) downloadExternalUI() error {
 	if response.StatusCode != http.StatusOK {
 		return E.New("download external ui failed: ", response.Status)
 	}
-	err = s.downloadZIP(response.Body, s.externalUI)
-	if err != nil {
-		removeAllInDirectory(s.externalUI)
-	}
-	return err
+	return s.downloadZIP(response.Body, s.externalUI)
 }
 
 func (s *Server) downloadZIP(body io.Reader, output string) error {
@@ -95,13 +91,42 @@ func (s *Server) downloadZIP(body io.Reader, output string) error {
 	if err != nil {
 		return err
 	}
-	reader, err := zip.OpenReader(tempFile.Name())
+	return extractExternalUI(s.ctx, tempFile.Name(), output)
+}
+
+// externalUIStaging is the directory inside the external UI directory that an archive is
+// unpacked into before its files replace those served.
+const externalUIStaging = ".external-ui-update"
+
+// extractExternalUI unpacks the archive into a directory of its own inside output, and puts
+// what it unpacked in place of the other files of output only when all of it is there: an
+// archive that fails to unpack (no space left, a broken or an empty archive) leaves the
+// files that were served. The directory is inside output to be on its file system, a mount
+// point or a symbolic link included: the files are moved into place, not copied.
+func extractExternalUI(ctx context.Context, archive string, output string) error {
+	reader, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-	trimDir := zipIsInSingleDirectory(reader.File)
-	for _, file := range reader.File {
+	staging := filepath.Join(output, externalUIStaging)
+	// left by an update that did not end
+	err = os.RemoveAll(staging)
+	if err != nil {
+		return err
+	}
+	err = unpackZIP(ctx, reader.File, staging)
+	if err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+	return replaceWithStaging(output, staging)
+}
+
+func unpackZIP(ctx context.Context, files []*zip.File, output string) error {
+	trimDir := zipIsInSingleDirectory(files)
+	var unpacked int
+	for _, file := range files {
 		if file.FileInfo().IsDir() {
 			continue
 		}
@@ -109,21 +134,54 @@ func (s *Server) downloadZIP(body io.Reader, output string) error {
 		if trimDir {
 			pathElements = pathElements[1:]
 		}
-		saveDirectory := output
-		if len(pathElements) > 1 {
-			saveDirectory = filepath.Join(saveDirectory, filepath.Join(pathElements[:len(pathElements)-1]...))
+		name := filepath.Join(pathElements...)
+		if !filepath.IsLocal(name) || pathElements[0] == externalUIStaging {
+			return E.New("invalid path in archive: ", file.Name)
 		}
-		err = os.MkdirAll(saveDirectory, 0o755)
+		savePath := filepath.Join(output, name)
+		err := os.MkdirAll(filepath.Dir(savePath), 0o755)
 		if err != nil {
 			return err
 		}
-		savePath := filepath.Join(saveDirectory, pathElements[len(pathElements)-1])
-		err = downloadZIPEntry(s.ctx, file, savePath)
+		err = downloadZIPEntry(ctx, file, savePath)
+		if err != nil {
+			return err
+		}
+		unpacked++
+	}
+	if unpacked == 0 {
+		return E.New("no files in archive")
+	}
+	return nil
+}
+
+// replaceWithStaging puts the files of staging, a directory inside directory, in place of
+// the other files of directory.
+func replaceWithStaging(directory string, staging string) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == externalUIStaging {
+			continue
+		}
+		err = os.RemoveAll(filepath.Join(directory, entry.Name()))
 		if err != nil {
 			return err
 		}
 	}
-	return nil
+	entries, err = os.ReadDir(staging)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		err = os.Rename(filepath.Join(staging, entry.Name()), filepath.Join(directory, entry.Name()))
+		if err != nil {
+			return err
+		}
+	}
+	return os.Remove(staging)
 }
 
 func downloadZIPEntry(ctx context.Context, zipFile *zip.File, savePath string) error {
@@ -138,16 +196,6 @@ func downloadZIPEntry(ctx context.Context, zipFile *zip.File, savePath string) e
 	}
 	defer reader.Close()
 	return common.Error(io.Copy(saveFile, reader))
-}
-
-func removeAllInDirectory(directory string) {
-	dirEntries, err := os.ReadDir(directory)
-	if err != nil {
-		return
-	}
-	for _, dirEntry := range dirEntries {
-		os.RemoveAll(filepath.Join(directory, dirEntry.Name()))
-	}
 }
 
 func zipIsInSingleDirectory(files []*zip.File) bool {
