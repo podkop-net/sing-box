@@ -58,6 +58,14 @@ type CacheFile interface {
 	SaveRuleSet(tag string, set *SavedBinary) error
 }
 
+// RuleSetCheckCache is a cache file that keeps the time a remote rule set was last found
+// up to date apart from its content (podkop-engine): an answer "not modified" writes the
+// time alone, not the whole list again.
+type RuleSetCheckCache interface {
+	LoadRuleSetChecked(tag string) time.Time
+	StoreRuleSetChecked(tag string, at time.Time) error
+}
+
 type SavedBinary struct {
 	Content     []byte
 	LastUpdated time.Time

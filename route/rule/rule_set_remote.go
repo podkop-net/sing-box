@@ -128,6 +128,12 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 			} else {
 				s.lastUpdated = savedSet.LastUpdated
 				s.lastEtag = savedSet.LastEtag
+				// found up to date since the content was saved
+				if checks, kept := s.cacheFile.(adapter.RuleSetCheckCache); kept {
+					if checked := checks.LoadRuleSetChecked(s.options.Tag); checked.After(s.lastUpdated) {
+						s.lastUpdated = checked
+					}
+				}
 			}
 		}
 	}
@@ -512,7 +518,15 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, startContext *adapter.HTTPSta
 	case http.StatusOK:
 	case http.StatusNotModified:
 		s.lastUpdated = time.Now()
-		if s.cacheFile != nil {
+		if checks, kept := s.cacheFile.(adapter.RuleSetCheckCache); kept {
+			// the time alone: a save of the set writes the whole list again, at every
+			// update_interval, to a cache file that may be on flash
+			err = checks.StoreRuleSetChecked(s.options.Tag, s.lastUpdated)
+			if err != nil {
+				s.logger.Error("save rule-set updated time: ", err)
+				return nil
+			}
+		} else if s.cacheFile != nil {
 			savedRuleSet := s.cacheFile.LoadRuleSet(s.options.Tag)
 			if savedRuleSet != nil {
 				savedRuleSet.LastUpdated = s.lastUpdated
