@@ -66,14 +66,27 @@ var (
 	foldNames = append(fieldNames[:], "type")
 )
 
+// ReadSourceAddresses is ReadSource for those who want the addresses of a rule set and the
+// shape of its rules, not its matcher: the names of domain and domain_suffix are counted,
+// not gathered, and a rule keeps the first three of each as its lists (Domain,
+// DomainSuffix) in place of the trie. Everything else is read as ReadSource reads it.
+func ReadSourceAddresses(content []byte) (option.PlainRuleSetCompat, error) {
+	compat, ok := readSourceText(&reader{text: content, ctx: context.Background(), addresses: true})
+	if ok {
+		return compat, nil
+	}
+	return json.UnmarshalExtended[option.PlainRuleSetCompat](content)
+}
+
 // reader is the text of a rule set and where it is read. It stops once ctx is done, and
-// err tells why.
+// err tells why. addresses: the names of domains are not gathered (ReadSourceAddresses).
 type reader struct {
-	text  []byte
-	at    int
-	ctx   context.Context
-	items int
-	err   error
+	text      []byte
+	at        int
+	ctx       context.Context
+	items     int
+	err       error
+	addresses bool
 }
 
 // stopped tells, every stopEvery items, whether the reading is to stop.
@@ -251,11 +264,15 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 				seen |= 1 << field
 				var count int
 				if field == fieldDomain || field == fieldDomainSuffix {
-					if names == nil {
-						names = NewCollectorContext(r.ctx, r.text)
-					}
 					side := field - fieldDomain
-					count, ok = r.names(names, field == fieldDomainSuffix, &first[side])
+					if r.addresses {
+						count, ok = r.firstNames(&first[side])
+					} else {
+						if names == nil {
+							names = NewCollectorContext(r.ctx, r.text)
+						}
+						count, ok = r.names(names, field == fieldDomainSuffix, &first[side])
+					}
 					counts[side] = count
 				} else if field == fieldSourceIPCIDR || field == fieldIPCIDR {
 					side := field - fieldSourceIPCIDR
@@ -331,6 +348,14 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 			return rule, false, false
 		}
 		fields.DomainSet = set
+	}
+	if r.addresses {
+		if counts[0] > 0 {
+			fields.Domain = first[0]
+		}
+		if counts[1] > 0 {
+			fields.DomainSuffix = first[1]
+		}
 	}
 	return rule, full == 0 && restEmpty, true
 }
@@ -417,6 +442,33 @@ func (r *reader) names(names *Collector, suffix bool, first *[]string) (int, boo
 			*first = append(*first, name)
 		}
 		return err == nil
+	})
+	return count, ok
+}
+
+// firstNames reads a value of domain or domain_suffix without gathering it: how many names
+// there are, and the first three of them. An empty name is route/rule's to refuse, as in
+// names.
+func (r *reader) firstNames(first *[]string) (int, bool) {
+	count := 0
+	ok := r.each(func(start int, end int, plain bool) bool {
+		if start == end {
+			return false
+		}
+		count++
+		if len(*first) >= 3 {
+			return true
+		}
+		name := string(r.text[start:end])
+		if !plain {
+			var ok bool
+			name, ok = r.unquote(start, end)
+			if !ok || name == "" {
+				return false
+			}
+		}
+		*first = append(*first, name)
+		return true
 	})
 	return count, ok
 }
