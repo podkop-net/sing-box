@@ -24,8 +24,9 @@ import (
 //
 // When a DNS server that sing-box reaches directly through the WAN fails to answer
 // (timeout, refused or reset connection, TLS or HTTP error), the query is sent to the
-// provider's servers: the DNS servers that netifd knows for the output device of sing-box
-// (see client_fallback_provider.go). Setting SING_BOX_DNS_FALLBACK turns this on; the
+// provider's servers: the DNS servers that netifd knows for the output device of sing-box,
+// or for every uplink when sing-box binds no socket, each asked through its uplink (see
+// client_fallback_provider.go). Setting SING_BOX_DNS_FALLBACK turns this on; the
 // init script of podkop-engine does it when podkop is installed.
 //
 // Which servers qualify is decided once, from the configuration: a plain socket (no
@@ -77,6 +78,10 @@ type fallbackServer struct {
 	decideOnce sync.Once
 	eligible   bool
 	dialer     N.Dialer
+	// ctx is the one of the box (decide); bound are the dialers of the server bound to the
+	// devices of uplinks (dialerFor)
+	ctx   context.Context
+	bound map[string]N.Dialer
 
 	access        sync.Mutex
 	failures      int
@@ -87,7 +92,7 @@ type fallbackServer struct {
 	probeEvery    time.Duration
 	unusableUntil time.Time
 
-	providers *providerSet // shared by all servers
+	providers *providerSet // the box's, shared by all its servers (decide)
 }
 
 // newFallbackServer returns the fallback state of a remote server, nil when the fallback
@@ -96,7 +101,7 @@ func newFallbackServer(options option.RemoteDNSServerOptions) *fallbackServer {
 	if !fallbackEnabled {
 		return nil
 	}
-	return &fallbackServer{options: options, providers: fallbackProviders}
+	return &fallbackServer{options: options}
 }
 
 func fallbackFor(transport adapter.DNSTransport) *fallbackServer {
@@ -196,8 +201,11 @@ func (s *fallbackServer) decide(ctx context.Context, logger logger.ContextLogger
 			if err != nil {
 				reason = err.Error()
 			} else {
-				s.dialer = dialer
+				s.dialer, s.ctx = dialer, ctx
 				s.eligible = true
+				if s.providers == nil {
+					s.providers = providersFrom(ctx)
+				}
 				s.providers.list(ctx, logger) // at once: the first query may need them
 			}
 		}
@@ -306,6 +314,32 @@ func localName(name string) bool {
 		}
 	}
 	return false
+}
+
+// dialerFor is the dialer of a query to a server of the provider: the server's own, or for
+// a server of an uplink one like it bound to the device of that uplink, made once. Only a
+// plain socket qualifies (fallbackExclusion): the detour to a direct outbound is left out.
+func (s *fallbackServer) dialerFor(device string) N.Dialer {
+	if device == "" || s.ctx == nil {
+		return s.dialer
+	}
+	s.access.Lock()
+	defer s.access.Unlock()
+	if dialer, made := s.bound[device]; made {
+		return dialer
+	}
+	options := s.options
+	options.DialerOptions.Detour = ""
+	options.DialerOptions.BindInterface = device
+	dialer, err := NewRemoteDialer(s.ctx, options)
+	if err != nil {
+		dialer = s.dialer
+	}
+	if s.bound == nil {
+		s.bound = make(map[string]N.Dialer)
+	}
+	s.bound[device] = dialer
+	return dialer
 }
 
 func (s *fallbackServer) isDown() bool {

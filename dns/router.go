@@ -38,6 +38,8 @@ type Router struct {
 	defaultDomainStrategy C.DomainStrategy
 	dnsReverseMapping     freelru.Cache[netip.Addr, string]
 	platformInterface     adapter.PlatformInterface
+	// providers are the provider's servers of the fallback of this box (podkop-engine)
+	providers *providerSet
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOptions) *Router {
@@ -48,6 +50,11 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		outbound:              service.FromContext[adapter.OutboundManager](ctx),
 		rules:                 make([]adapter.DNSRule, 0, len(options.Rules)),
 		defaultDomainStrategy: C.DomainStrategy(options.Strategy),
+		providers:             newProviderSet(),
+	}
+	// the transports of this box find the provider's servers of its fallback here
+	if service.RegistryFromContext(ctx) != nil {
+		service.MustRegister[*providerSet](ctx, router.providers)
 	}
 	router.client = NewClient(ClientOptions{
 		Context:          ctx,
@@ -463,5 +470,7 @@ func (r *Router) ResetNetwork() {
 			state.reset()
 		}
 	}
-	ResetFallbackProviders() // the output device may have changed
+	if r.providers != nil {
+		r.providers.forget() // the output device may have changed
+	}
 }

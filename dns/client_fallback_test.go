@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,7 +68,7 @@ func TestFallbackExclusion(t *testing.T) {
 // A dump of `ubus call network.interface dump` with a tunnel, a LAN with DNS set by hand
 // and a backup modem next to the WAN.
 const testUbusDump = `{"interface":[
-{"interface":"awg","up":true,"l3_device":"awg0","dns-server":["10.9.0.1"],"route":[]},
+{"interface":"awg","up":true,"proto":"amneziawg","l3_device":"awg0","dns-server":["10.9.0.1"],"route":[{"target":"0.0.0.0","mask":0,"metric":5}]},
 {"interface":"lan","up":true,"l3_device":"br-lan","dns-server":["1.1.1.1"],"route":[]},
 {"interface":"loopback","up":true,"l3_device":"lo","dns-server":[],"route":[]},
 {"interface":"modem","up":true,"l3_device":"wwan0","dns-server":["100.64.5.1"],"route":[{"target":"0.0.0.0","mask":0,"metric":20}]},
@@ -83,16 +85,28 @@ func TestProvidersOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		device, wantDevice, wantNames, wantServers string
+		device, wantNames, wantServers, wantDevices string
 	}{
-		{"wan0", "wan0", "wan, wan6", "10.99.0.53, 10.99.0.54, fe80::1%wan0, 2a00::53"}, // at most 4
-		{"", "wan0", "wan, wan6", "10.99.0.53, 10.99.0.54, fe80::1%wan0, 2a00::53"},     // the default route with the lowest metric
-		{"wwan0", "wwan0", "modem", "100.64.5.1"},
-		{"eth9", "eth9", "", ""},
+		// sing-box binds its sockets to a device: its servers, asked as the server is
+		{"wan0", "wan; wan6", "10.99.0.53, 10.99.0.54, fe80::1%wan0, 2a00::53", ""}, // at most 4
+		{"wwan0", "modem", "100.64.5.1", ""},
+		{"eth9", "", "", ""},
+		// it binds none: every uplink, each server bound to its uplink, the uplinks by the
+		// metric of their default route; the tunnel and the interfaces without a default
+		// route are left out
+		{"", "wan on wan0: 10.99.0.53, 10.99.0.54; modem on wwan0: 100.64.5.1; wan6 on wan0: fe80::1%wan0, 2a00::53",
+			"10.99.0.53, 10.99.0.54, 100.64.5.1, fe80::1%wan0, 2a00::53", "wan0, wan0, wwan0, wan0, wan0"},
 	} {
-		servers, names, device := providersOn(dump.Interface, test.device)
-		if device != test.wantDevice || strings.Join(names, ", ") != test.wantNames || joinServers(servers) != test.wantServers {
-			t.Errorf("device %q: got %q %q %q, want %q %q %q", test.device, device, strings.Join(names, ", "), joinServers(servers), test.wantDevice, test.wantNames, test.wantServers)
+		servers, devices, names := providersOn(dump.Interface, test.device)
+		var bound []string
+		for _, server := range servers {
+			if device := devices[server]; device != "" {
+				bound = append(bound, device)
+			}
+		}
+		if strings.Join(names, "; ") != test.wantNames || joinServers(servers) != test.wantServers || strings.Join(bound, ", ") != test.wantDevices {
+			t.Errorf("device %q: got %q %q %q, want %q %q %q", test.device, strings.Join(names, "; "), joinServers(servers), strings.Join(bound, ", "),
+				test.wantNames, test.wantServers, test.wantDevices)
 		}
 	}
 }
@@ -204,6 +218,7 @@ func TestFallbackLogs(t *testing.T) {
 	}
 	(&fallbackServer{}).decide(nil, logger, "dns-server") //nolint:staticcheck
 	(&providerSet{read: readDump}).refresh(logger, "eth9")
+	(&providerSet{read: readDump}).refresh(logger, "wan0")
 	(&providerSet{read: func(ctx context.Context) ([]netifdInterface, error) { return nil, E.New("no ubus in tests") }}).refresh(logger, "")
 
 	// the server fails, the provider fails, the server is back
@@ -227,6 +242,7 @@ func TestFallbackLogs(t *testing.T) {
 
 	for _, message := range []string{
 		"provider DNS for the fallback on wan0 (wan, wan6): 10.99.0.53, 10.99.0.54, fe80::1%wan0, 2a00::53",
+		"provider DNS for the fallback, each through its uplink: wan on wan0: 10.99.0.53, 10.99.0.54; modem on wwan0: 100.64.5.1; wan6 on wan0: fe80::1%wan0, 2a00::53",
 		"server dns-server falls back to provider DNS when it fails",
 		"no provider DNS fallback for server dns-server: no context",
 		"no provider DNS for the fallback on eth9",
@@ -238,5 +254,66 @@ func TestFallbackLogs(t *testing.T) {
 		if !strings.Contains(output.String(), message) {
 			t.Errorf("missing %q in:\n%s", message, output.String())
 		}
+	}
+}
+
+// recordingDialer dials as the system does and tells which servers it was asked for.
+type recordingDialer struct {
+	N.Dialer
+	access sync.Mutex
+	asked  []string
+}
+
+func (d *recordingDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	d.access.Lock()
+	d.asked = append(d.asked, destination.String())
+	d.access.Unlock()
+	return d.Dialer.ListenPacket(ctx, destination)
+}
+
+func (d *recordingDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	d.access.Lock()
+	d.asked = append(d.asked, destination.String())
+	d.access.Unlock()
+	return d.Dialer.DialContext(ctx, network, destination)
+}
+
+func (d *recordingDialer) told() []string {
+	d.access.Lock()
+	defer d.access.Unlock()
+	return slices.Clone(d.asked)
+}
+
+// A server of an uplink is asked through the dialer bound to the device of that uplink, a
+// server without one through the dialer of the server.
+func TestProviderOfAnUplinkThroughIt(t *testing.T) {
+	t.Parallel()
+	ofUplink, ofServer := testResolver(t, mDNS.RcodeSuccess), testResolver(t, -1)
+	own, bound := &recordingDialer{Dialer: N.SystemDialer}, &recordingDialer{Dialer: N.SystemDialer}
+	state := &fallbackServer{
+		dialer: own,
+		ctx:    context.Background(),
+		bound:  map[string]N.Dialer{"wan9": bound},
+		providers: &providerSet{
+			servers: []M.Socksaddr{ofUplink, ofServer},
+			devices: map[M.Socksaddr]string{ofUplink: "wan9"},
+			readAt:  time.Now(),
+		},
+	}
+	message := new(mDNS.Msg)
+	message.SetQuestion("example.com.", mDNS.TypeA)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := state.exchangeAll(ctx, state.providers.servers, message); err != nil {
+		t.Fatal(err)
+	}
+	if got := bound.told(); len(got) != 1 || got[0] != ofUplink.String() {
+		t.Errorf("the dialer of wan9 was asked for %v, want %v", got, ofUplink)
+	}
+	if got := own.told(); len(got) != 1 || got[0] != ofServer.String() {
+		t.Errorf("the dialer of the server was asked for %v, want %v", got, ofServer)
+	}
+	if state.dialerFor("") != own {
+		t.Error("a server without a device is not asked through the dialer of the server")
 	}
 }
