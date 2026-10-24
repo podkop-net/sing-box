@@ -32,7 +32,17 @@ import (
 // when the shape of the set is as above, or the whole text. So does any error: the error
 // is then sing-box's own.
 func ReadSource(content []byte) (option.PlainRuleSetCompat, error) {
-	compat, ok := readSource(content)
+	return ReadSourceContext(context.Background(), content)
+}
+
+// ReadSourceContext is ReadSource that stops with the error of ctx once it is done: a rule
+// set closed while it reads a big list does not read it to the end. The decoding of
+// sing-box, for a text of another shape, is not stopped.
+func ReadSourceContext(ctx context.Context, content []byte) (option.PlainRuleSetCompat, error) {
+	compat, ok, err := readSource(ctx, content)
+	if err != nil {
+		return compat, err
+	}
 	if ok {
 		return compat, nil
 	}
@@ -56,15 +66,33 @@ var (
 	foldNames = append(fieldNames[:], "type")
 )
 
-// reader is the text of a rule set and where it is read.
+// reader is the text of a rule set and where it is read. It stops once ctx is done, and
+// err tells why.
 type reader struct {
-	text []byte
-	at   int
+	text  []byte
+	at    int
+	ctx   context.Context
+	items int
+	err   error
 }
 
-func readSource(text []byte) (option.PlainRuleSetCompat, bool) {
+// stopped tells, every stopEvery items, whether the reading is to stop.
+func (r *reader) stopped() bool {
+	r.items++
+	if r.items&stopEvery == 0 && r.ctx.Err() != nil {
+		r.err = r.ctx.Err()
+	}
+	return r.err != nil
+}
+
+func readSource(ctx context.Context, text []byte) (option.PlainRuleSetCompat, bool, error) {
+	compat, ok := readSourceText(&reader{text: text, ctx: ctx})
+	return compat, ok, ctx.Err()
+}
+
+func readSourceText(r *reader) (option.PlainRuleSetCompat, bool) {
 	var compat option.PlainRuleSetCompat
-	r := reader{text: text}
+	text := r.text
 	r.space()
 	begin := r.at
 	if !r.take('{') {
@@ -224,7 +252,7 @@ func (r *reader) rule() (option.HeadlessRule, bool, bool) {
 				var count int
 				if field == fieldDomain || field == fieldDomainSuffix {
 					if names == nil {
-						names = NewCollector(r.text)
+						names = NewCollectorContext(r.ctx, r.text)
 					}
 					side := field - fieldDomain
 					count, ok = r.names(names, field == fieldDomainSuffix, &first[side])
@@ -477,7 +505,7 @@ func (r *reader) each(take func(start int, end int, plain bool) bool) bool {
 		}
 		for {
 			start, end, plain, ok := r.str()
-			if !ok || !take(start, end, plain) {
+			if !ok || r.stopped() || !take(start, end, plain) {
 				return false
 			}
 			r.space()

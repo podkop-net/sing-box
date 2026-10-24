@@ -195,12 +195,12 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 	)
 	switch s.options.Format {
 	case C.RuleSetFormatSource:
-		ruleSet, err = domainset.ReadSource(content)
+		ruleSet, err = domainset.ReadSourceContext(s.ctx, content)
 		if err != nil {
 			return err
 		}
 	case C.RuleSetFormatBinary:
-		ruleSet, err = srs.ReadSets(bytes.NewReader(content))
+		ruleSet, err = srs.ReadSets(contextReader{s.ctx, bytes.NewReader(content)})
 		if err != nil {
 			return err
 		}
@@ -213,6 +213,9 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 	}
 	rules := make([]adapter.HeadlessRule, len(plainRuleSet.Rules))
 	for i, ruleOptions := range plainRuleSet.Rules {
+		if s.ctx.Err() != nil {
+			return s.ctx.Err()
+		}
 		rules[i], err = NewHeadlessRule(s.ctx, ruleOptions)
 		if err != nil {
 			return E.Cause(err, "parse rule_set.rules.[", i, "]")
@@ -229,6 +232,20 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 		callback(s)
 	}
 	return nil
+}
+
+// contextReader ends with the error of ctx once it is done: a rule set of the binary
+// format closed while it is read stops at the next read.
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func (s *RemoteRuleSet) loopUpdate() {

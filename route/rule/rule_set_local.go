@@ -120,7 +120,7 @@ func (s *LocalRuleSet) reloadFile(path string) error {
 		if err != nil {
 			return err
 		}
-		ruleSet, err = domainset.ReadSource(content)
+		ruleSet, err = domainset.ReadSourceContext(s.ctx, content)
 		if err != nil {
 			return err
 		}
@@ -131,7 +131,7 @@ func (s *LocalRuleSet) reloadFile(path string) error {
 			return err
 		}
 		defer setFile.Close()
-		ruleSet, err = srs.ReadSets(setFile)
+		ruleSet, err = srs.ReadSets(contextReader{s.ctx, setFile})
 		if err != nil {
 			return err
 		}

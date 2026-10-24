@@ -2,6 +2,7 @@ package domainset
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math/rand"
 	"net/netip"
@@ -237,7 +238,7 @@ func written(t testing.TB, matcher interface{ Write(varbin.Writer) error }) []by
 // whether readSource read the text.
 func sameAsStock(t testing.TB, text []byte) bool {
 	stock, stockErr := json.UnmarshalExtended[option.PlainRuleSetCompat](text)
-	fast, ok := readSource(text)
+	fast, ok, _ := readSource(context.Background(), text)
 	if stockErr != nil {
 		require.False(t, ok, "sing-box refuses it (%v), readSource read it:\n%s", stockErr, text)
 		return false

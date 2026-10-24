@@ -16,6 +16,10 @@ type trie struct {
 	labels              []byte
 }
 
+// stopEvery is how many nodes, or items read, go between two looks at the context of a
+// build: a mask, a power of two less one.
+const stopEvery = 1<<12 - 1
+
 // smallSpan is the most keys a node parts by sorting them in place; a node of more keys
 // counts them by their next byte.
 const smallSpan = 24
@@ -205,6 +209,9 @@ func (c *Collector) build() (trie, error) {
 			bit++
 			node++
 			start = end
+			if node&stopEvery == 0 && c.ctx != nil && c.ctx.Err() != nil {
+				return trie{}, c.ctx.Err()
+			}
 		}
 		from, to = to, from
 		starts, nextStarts = nextStarts, starts

@@ -1,6 +1,7 @@
 package domainset
 
 import (
+	"context"
 	"math"
 	"slices"
 	"unicode/utf8"
@@ -65,11 +66,20 @@ type Collector struct {
 	refs    []ref
 	// the bytes of all keys, labels included: the most labels the trie can have
 	keyBytes int
+	// ctx stops the build of the trie once it is done (NewCollectorContext)
+	ctx context.Context
 }
 
 // NewCollector makes a collector of names found in text.
 func NewCollector(text []byte) *Collector {
 	return &Collector{buffers: [2][]byte{text, nil}}
+}
+
+// NewCollectorContext is NewCollector whose Set and Encode stop with the error of ctx once
+// it is done: the trie of a big list is the most a rule set costs to read, and the rule
+// set may be closed meanwhile.
+func NewCollectorContext(ctx context.Context, text []byte) *Collector {
+	return &Collector{buffers: [2][]byte{text, nil}, ctx: ctx}
 }
 
 // Len is the number of names gathered, repeated ones included.
