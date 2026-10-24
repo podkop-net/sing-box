@@ -428,7 +428,7 @@ func (s *Box) PreStart() error {
 }
 
 func (s *Box) Start() error {
-	err := s.start()
+	err := s.StartWithoutClose()
 	if err != nil {
 		// TODO: remove catch error
 		defer func() {
@@ -440,6 +440,16 @@ func (s *Box) Start() error {
 			}
 		}()
 		s.Close()
+	}
+	return err
+}
+
+// StartWithoutClose is Start that leaves a box whose start failed as it is: the caller
+// closes it, and may bound how long that takes (podkop-engine). Start closes it at once,
+// and a component whose Close does not return holds Start with it.
+func (s *Box) StartWithoutClose() error {
+	err := s.start()
+	if err != nil {
 		return err
 	}
 	s.logger.Info("sing-box started (", F.Seconds(time.Since(s.createdAt).Seconds()), "s)")
