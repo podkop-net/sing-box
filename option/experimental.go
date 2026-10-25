@@ -12,13 +12,13 @@ type ExperimentalOptions struct {
 }
 
 // UTLSFallbackOptions turn the uTLS fingerprint fallback of TLS clients on or off for the
-// whole configuration (podkop-engine): when the ClientHello of a connection with a uTLS
-// fingerprint gets no acknowledgment, the connection is made again with the next
-// fingerprint of the list. Without the option the environment decides
-// (SING_BOX_UTLS_FALLBACK, a list of fingerprints; none: no fallback). With it the
-// environment is not read: enabled false is no fallback, and enabled true takes the
-// fingerprints of the option, or safari, randomized, edge, firefox, chrome when it names
-// none.
+// whole configuration (podkop-engine): a client with a uTLS fingerprint tries the
+// fingerprint without its X25519MLKEM768 key share, then firefox, then the fingerprint as it
+// is, and keeps the first that the server takes and the path lets through (see
+// common/tls/hello_watch.go). Without the option the environment decides
+// (SING_BOX_UTLS_FALLBACK, any value turns it on). With it the environment is not read.
+// Fingerprints is no longer used: it is read so that configurations written for the list
+// of earlier revisions stay valid.
 type UTLSFallbackOptions struct {
 	Enabled      bool                       `json:"enabled,omitempty"`
 	Fingerprints badoption.Listable[string] `json:"fingerprints,omitempty"`

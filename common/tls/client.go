@@ -199,6 +199,13 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 			return nil, E.New("tls.spoof does not work through a detour to a proxy outbound")
 		}
 	}
+	if fallback != nil {
+		err := fallback.ready(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
+		defer fallback.done()
+	}
 	for {
 		conn, err := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
 		if err != nil {

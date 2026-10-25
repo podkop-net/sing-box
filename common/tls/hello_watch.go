@@ -14,27 +14,39 @@ import (
 
 // The uTLS fingerprint fallback (podkop-engine).
 //
-// A middlebox that judges a TLS connection by its ClientHello may drop the ClientHello of
-// one browser and pass that of another: the connection is made, the ClientHello is sent,
-// and no acknowledgment ever comes for it. The handshake then waits out its whole
-// timeout, on every connection. With the fallback on, the dialer watches the connection
-// while the handshake runs; when the ClientHello stays unacknowledged it gives the
-// connection up at once and dials again: with the same fingerprint once more, then with
-// the next one of the list. The fingerprint that got through is the one used from then
-// on, for the local address it worked from (another address is another network, where
-// the configured one may work). When no fingerprint gets through, what drops the
-// ClientHello does not choose by fingerprint: the fallback then rests, and connections
-// are made exactly as without it, with the fingerprint that worked last. It rests as
-// well when the fingerprint that was not answered is answered on the next connection, a
-// loss on the way; when that keeps happening the fingerprint is left after all, since
-// what drops only a part of its ClientHellos looks the same.
+// Since 2026 the Russian DPI freezes the connections of some browser ClientHellos to a
+// server when many are made to it at once: chrome (Chrome 133, with the X25519MLKEM768 key
+// share), safari and randomized among them; the same ClientHello without the key share,
+// and firefox, pass (measured in October 2026). A frozen ClientHello is never
+// acknowledged; the handshake waits out its whole timeout, and so does every connection
+// after it for a while. With the fallback on, a client tries its ClientHellos in this order
+// and keeps the first that a server takes and the path lets through:
 //
-// The list is the option experimental.utls_fallback of the configuration or else the
-// environment variable SING_BOX_UTLS_FALLBACK, comma-separated names of the
-// utls.fingerprint option; the configured fingerprint is tried first. Without either
-// nothing changes. It concerns the TLS clients with a uTLS fingerprint, REALITY included,
-// dialed over a TCP socket of the kernel on Linux: not through a detour to a proxy
-// outbound, and not a client with ECH taken from DNS or with kernel TLS, whose
+//  1. the configured fingerprint without its X25519MLKEM768 key share, as stock sing-box
+//     sends it under REALITY;
+//  2. firefox, with the key share: REALITY servers since Xray-core v26.9.8 refuse a
+//     ClientHello without it (they answer it as a stranger's);
+//  3. the configured fingerprint as it is.
+//
+// The dialer watches the connection while the handshake runs; when the ClientHello stays
+// unacknowledged it gives the connection up at once and dials again: with the same
+// ClientHello once more, then with the next one. A server that answers the ClientHello as a
+// stranger's moves the client on at once. While nothing is known of a server, one dial
+// tries the ClientHellos and the others wait for it: a burst of connections would
+// otherwise freeze the path or pile up refusals on the server. The choice is kept for the
+// local address it was made from (another address is another network) and in the cache
+// file, for a day; then one dial tries the first ClientHello again. When none gets through,
+// what drops the ClientHello does not choose by it: the fallback then rests, and
+// connections are made with the ClientHello that worked last, the configured fingerprint
+// when none has. It rests as well when the ClientHello that was not answered is answered on
+// the next connection, a loss on the way; when that keeps happening it is left after all,
+// since what drops only a part of the ClientHellos of one kind looks the same.
+//
+// The fallback is turned on by the option experimental.utls_fallback of the configuration,
+// or else by the environment variable SING_BOX_UTLS_FALLBACK; the list of fingerprints the
+// option may carry is no longer used. It concerns the TLS clients with a uTLS fingerprint,
+// REALITY included, dialed over a TCP socket of the kernel on Linux: not through a detour
+// to a proxy outbound, and not a client with ECH taken from DNS or with kernel TLS, whose
 // configuration is wrapped in another.
 
 // fingerprintFallbackConfig is a client configuration that can go on with another
@@ -47,6 +59,11 @@ type fingerprintFallbackConfig interface {
 
 // fingerprintDial follows the attempts of one dial.
 type fingerprintDial interface {
+	// ready waits, before the connection is made, while another dial tries the
+	// ClientHellos of a server nothing is known of.
+	ready(ctx context.Context, destination M.Socksaddr) error
+	// done ends the dial: what it held for the others is released.
+	done()
 	// attempt returns the configuration for the handshake over conn, and whether the
 	// ClientHello is to be watched.
 	attempt(conn net.Conn) (config Config, watched bool)

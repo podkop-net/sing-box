@@ -41,6 +41,8 @@ type UTLSClientConfig struct {
 	spoofMethod           tlsspoof.Method
 	// the fingerprint fallback, shared with the clones; nil when off
 	fallback *utlsFallback
+	// the ClientHello without the X25519MLKEM768 key share: a candidate of the fallback
+	noMLKEM bool
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -96,7 +98,7 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil
+	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos, c.noMLKEM}, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
@@ -118,6 +120,7 @@ func (c *UTLSClientConfig) Clone() Config {
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
 		fallback:              c.fallback,
+		noMLKEM:               c.noMLKEM,
 	}
 	cloned.SetServerName(cloned.serverName)
 	return cloned
@@ -169,6 +172,8 @@ func (c *utlsConnWrapper) WriterReplaceable() bool {
 type utlsALPNWrapper struct {
 	utlsConnWrapper
 	nextProtocols []string
+	// the ClientHello goes without the X25519MLKEM768 key share
+	noMLKEM bool
 }
 
 func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
@@ -191,6 +196,17 @@ func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
 				}
 				break
 			}
+		}
+	}
+	if c.noMLKEM {
+		err := c.BuildHandshakeState()
+		if err != nil {
+			return err
+		}
+		dropMLKEM(c.UConn)
+		err = c.BuildHandshakeState()
+		if err != nil {
+			return err
 		}
 	}
 	err := c.UConn.HandshakeContext(ctx)
