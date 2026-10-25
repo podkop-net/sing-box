@@ -65,6 +65,11 @@ var (
 	// A choice is kept this long, also across restarts in the cache file; then one dial
 	// tries the first candidate again: the server may have been updated, the path changed.
 	utlsFallbackRecheck = 24 * time.Hour
+	// A dial waits this long at most for the probe of another. A probe takes a second or
+	// two, four unanswered ClientHellos about four on a path of 50 ms; one that takes longer
+	// is kept by something else (a server that is down, a TCP handshake that does not end),
+	// and the dials behind it would go one at a time, each waiting out its timeout.
+	utlsFallbackProbeWait = 5 * time.Second
 )
 
 // utlsFallbackCandidate is a ClientHello the fallback may send: a fingerprint, with or
@@ -442,6 +447,8 @@ type utlsFallbackDial struct {
 
 func (d *utlsFallbackDial) ready(ctx context.Context, destination M.Socksaddr) error {
 	f := d.fallback
+	timer := time.NewTimer(utlsFallbackProbeWait)
+	defer timer.Stop()
 	for {
 		f.access.Lock()
 		f.load(d.serverName, destination)
@@ -459,6 +466,9 @@ func (d *utlsFallbackDial) ready(ctx context.Context, destination M.Socksaddr) e
 		f.access.Unlock()
 		select {
 		case <-probing:
+		case <-timer.C:
+			// the probe takes long: the dial goes on its own
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
