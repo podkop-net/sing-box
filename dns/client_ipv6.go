@@ -25,13 +25,15 @@ func (c *Client) mayAskIPv6(transport adapter.DNSTransport, message *dns.Msg, op
 		transport.Type() != C.DNSTypeFakeIP
 }
 
-// noIPv4 asks the A question of the name of an AAAA question through the same server. A
-// success without an A record tells that the name has no IPv4 address; an error, another
-// rcode or an A record tell nothing of the kind.
-func (c *Client) noIPv4(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions) bool {
+// noIPv4 asks the A question of the name of an AAAA question through the same server, with
+// the check of the addresses of the rule (a refused answer is not cached, as for the A
+// question of a client). A success without an A record tells that the name has no IPv4
+// address; an error, a refused answer, another rcode or an A record tell nothing of the
+// kind.
+func (c *Client) noIPv4(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) bool {
 	question := message.Copy()
 	question.Question[0].Qtype = dns.TypeA
-	response, err := c.exchange(ctx, transport, question, options, nil)
+	response, err := c.exchange(ctx, transport, question, options, responseChecker)
 	if err != nil || response == nil || response.Rcode != dns.RcodeSuccess {
 		return false
 	}

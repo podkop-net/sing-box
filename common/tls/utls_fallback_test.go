@@ -136,6 +136,12 @@ func TestUTLSFallbackCandidates(t *testing.T) {
 	}
 	config, _ := fallbackClient(t, "android", false)
 	require.Equal(t, "android, firefox", namesOf(t, config))
+	// random that took firefox is not tried again as firefox: the same ClientHello
+	previous := randomFingerprint
+	t.Cleanup(func() { randomFingerprint = previous })
+	randomFingerprint, _ = uTLSClientHelloID("firefox")
+	config, _ = fallbackClient(t, "random", false)
+	require.Equal(t, "random without X25519MLKEM768, random", namesOf(t, config))
 
 	setFallback(t, false)
 	config, _ = fallbackClient(t, "chrome", false)
@@ -515,9 +521,10 @@ func attemptAndFail(t *testing.T, dial fingerprintDial, err error) error {
 	return err
 }
 
-// A ClientHello that fails in another way before it has completed a handshake is left; the
-// first candidate, and one that has worked, stay through such a failure, as without the
-// fallback. A handshake that waited out its whole time ends the dial.
+// A ClientHello that fails in another way before it has completed a handshake is left, the
+// first candidate too (it is not the configured fingerprint); one that has worked stays
+// through such a failure, as without the fallback. A handshake that waited out its whole
+// time ends the dial.
 func TestUTLSFallbackLeavesWhatFails(t *testing.T) {
 	setFallback(t, true)
 	quietLog(t)
@@ -527,9 +534,22 @@ func TestUTLSFallbackLeavesWhatFails(t *testing.T) {
 
 	dial := newDialOf(config)
 	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
-	require.False(t, dial.failed(ctx, fallbackServer, refused), "the first candidate fails as without the fallback")
-	require.Empty(t, warnings.take())
+	require.True(t, dial.failed(ctx, fallbackServer, refused), "the first candidate, never answered, is left")
+	first := warnings.take()
+	require.Len(t, first, 1)
+	require.Contains(t, first[0], "failed with "+chromeWithout+" (remote error: tls: handshake failure), retrying with firefox")
+	require.Equal(t, "firefox", attemptName(t, dial, "192.0.2.10"))
+	// once answered here it stays through such a failure
+	config, warnings = fallbackClient(t, "chrome", false)
+	dial = newDialOf(config)
+	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
+	dial.answered()
+	dial = newDialOf(config)
+	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
+	require.False(t, dial.failed(ctx, fallbackServer, refused), "a candidate that has worked fails as without the fallback")
+	warnings.take()
 
+	config, warnings = fallbackClient(t, "chrome", false)
 	dial = newDialOf(config)
 	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
 	lost(t, dial)
@@ -667,6 +687,7 @@ type choiceCache struct {
 	adapter.CacheFile
 	access  sync.Mutex
 	choices map[string]choiceEntry
+	writes  int
 }
 
 type choiceEntry struct {
@@ -685,7 +706,37 @@ func (c *choiceCache) StoreUTLSChoice(key string, choice string, at time.Time) e
 	c.access.Lock()
 	defer c.access.Unlock()
 	c.choices[key] = choiceEntry{choice, at}
+	c.writes++
 	return nil
+}
+
+// wait returns the only entry once it holds the choice: the fallback writes in the
+// background.
+func (c *choiceCache) wait(t *testing.T, choice string) (string, choiceEntry) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.access.Lock()
+		if len(c.choices) == 1 {
+			for key, entry := range c.choices {
+				if entry.choice == choice {
+					c.access.Unlock()
+					return key, entry
+				}
+			}
+		}
+		c.access.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("the cache has %v, not the choice %s", c.choices, choice)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (c *choiceCache) writeCount() int {
+	c.access.Lock()
+	defer c.access.Unlock()
+	return c.writes
 }
 
 func (c *choiceCache) only(t *testing.T) (string, choiceEntry) {
@@ -716,7 +767,7 @@ func TestUTLSFallbackCache(t *testing.T) {
 	require.Equal(t, "firefox", attemptName(t, dial, "192.0.2.10"))
 	dial.answered()
 	dial.done()
-	key, entry := cache.only(t)
+	key, entry := cache.wait(t, "firefox")
 	require.Equal(t, "chrome example.org 192.0.2.1:443", key)
 	require.Equal(t, "firefox", entry.choice)
 	require.WithinDuration(t, time.Now(), entry.at, time.Minute)
@@ -744,7 +795,7 @@ func TestUTLSFallbackCache(t *testing.T) {
 	require.Equal(t, "firefox", attemptName(t, recheck, "192.0.2.10"))
 	recheck.answered()
 	recheck.done()
-	_, entry = cache.only(t)
+	_, entry = cache.wait(t, "firefox")
 	require.Equal(t, "firefox", entry.choice)
 	require.WithinDuration(t, time.Now(), entry.at, time.Minute)
 	require.WithinDuration(t, time.Now(), path.chosen, time.Minute)
@@ -755,7 +806,7 @@ func TestUTLSFallbackCache(t *testing.T) {
 	recheck.answered()
 	recheck.done()
 	require.Equal(t, chromeWithout, attemptName(t, newDialOf(config), "192.0.2.10"))
-	_, entry = cache.only(t)
+	_, entry = cache.wait(t, chromeWithout)
 	require.Equal(t, chromeWithout, entry.choice)
 
 	// box.New registers the cache file after it has made the outbounds: it is found at the
@@ -769,7 +820,7 @@ func TestUTLSFallbackCache(t *testing.T) {
 	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
 
 	// a choice older than a day is not read: the client made again probes
-	cache.choices[key] = choiceEntry{"firefox", time.Now().Add(-25 * time.Hour)}
+	require.NoError(t, cache.StoreUTLSChoice(key, "firefox", time.Now().Add(-25*time.Hour)))
 	config, _ = fallbackClientIn(t, ctx, "chrome", true)
 	dial = newDialOf(config)
 	require.NoError(t, dial.ready(ctx, fallbackServer))
@@ -870,4 +921,72 @@ func TestUTLSFallbackWarnsOnce(t *testing.T) {
 	fallback.access.Lock()
 	require.LessOrEqual(t, len(fallback.lines), utlsFallbackLines)
 	fallback.access.Unlock()
+}
+
+// The choice is written when the choice of a path changes or gets old, in the background:
+// two paths with choices of their own do not write by turns, and what a dial made during a
+// rest got through with is not written.
+func TestUTLSFallbackStores(t *testing.T) {
+	setFallback(t, true)
+	quietLog(t)
+	cache := &choiceCache{choices: make(map[string]choiceEntry)}
+	ctx := service.ContextWith[adapter.CacheFile](context.Background(), adapter.CacheFile(cache))
+	config, _ := fallbackClientIn(t, ctx, "chrome", false)
+	dial := newDialOf(config)
+	require.NoError(t, dial.ready(ctx, fallbackServer))
+	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
+	dial.answered()
+	dial.done()
+	cache.wait(t, chromeWithout)
+	// another local address, where the first candidate goes unanswered: firefox
+	dial = newDialOf(config)
+	require.Equal(t, chromeWithout, attemptName(t, dial, "198.51.100.7"))
+	lost(t, dial)
+	require.Equal(t, chromeWithout, attemptName(t, dial, "198.51.100.7"))
+	lost(t, dial)
+	require.Equal(t, "firefox", attemptName(t, dial, "198.51.100.7"))
+	dial.answered()
+	cache.wait(t, "firefox")
+	writes := cache.writeCount()
+	require.Equal(t, 2, writes)
+	for range 5 {
+		for _, local := range []string{"192.0.2.10", "198.51.100.7"} {
+			dial = newDialOf(config)
+			attemptName(t, dial, local)
+			dial.answered()
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, writes, cache.writeCount(), "dials by turns on the two paths write")
+
+	// nothing answered, the fallback rests on chrome as configured; a dial of the rest gets
+	// through with it, and nothing is written
+	rest := utlsFallbackRest
+	utlsFallbackRest = time.Minute
+	t.Cleanup(func() { utlsFallbackRest = rest })
+	cache = &choiceCache{choices: make(map[string]choiceEntry)}
+	ctx = service.ContextWith[adapter.CacheFile](context.Background(), adapter.CacheFile(cache))
+	config, _ = fallbackClientIn(t, ctx, "chrome", false)
+	dial = newDialOf(config)
+	require.NoError(t, dial.ready(ctx, fallbackServer))
+	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
+	lost(t, dial)
+	require.Equal(t, chromeWithout, attemptName(t, dial, "192.0.2.10"))
+	lost(t, dial)
+	require.Equal(t, "firefox", attemptName(t, dial, "192.0.2.10"))
+	lost(t, dial)
+	require.Equal(t, "chrome", attemptName(t, dial, "192.0.2.10"))
+	again, err := dial.unanswered(fallbackServer)
+	require.False(t, again)
+	require.Error(t, err)
+	dial.done()
+	dial = newDialOf(config)
+	require.NoError(t, dial.ready(ctx, fallbackServer))
+	name, watched := attemptWatched(t, dial, "192.0.2.10")
+	require.Equal(t, "chrome", name)
+	require.False(t, watched)
+	dial.answered()
+	dial.done()
+	time.Sleep(100 * time.Millisecond)
+	require.Zero(t, cache.writeCount())
 }

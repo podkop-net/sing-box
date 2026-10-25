@@ -402,7 +402,7 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 }
 
 func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
-	if c.mayAskIPv6(transport, message, options) && c.noIPv4(ctx, transport, message, options) {
+	if c.mayAskIPv6(transport, message, options) && c.noIPv4(ctx, transport, message, options, responseChecker) {
 		options.Strategy = C.DomainStrategyPreferIPv4
 	}
 	return c.exchange(ctx, transport, message, options, responseChecker)
@@ -430,7 +430,7 @@ func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTranspo
 	if c.mayAskIPv6(transport, message, options) {
 		// the A question may have to go out: not on the caller's goroutine
 		go func() {
-			if c.noIPv4(ctx, transport, message, options) {
+			if c.noIPv4(ctx, transport, message, options, responseChecker) {
 				options.Strategy = C.DomainStrategyPreferIPv4
 			}
 			callback(c.exchange(ctx, transport, message, options, responseChecker))
