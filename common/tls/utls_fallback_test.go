@@ -271,7 +271,8 @@ func TestUTLSFallbackDial(t *testing.T) {
 
 // While nothing is known of a server, one dial tries the ClientHellos and the others wait
 // for it before they connect; then nobody waits. A dial whose caller gives up does not wait
-// on. While the fallback rests nobody waits either: the dials go as without it.
+// on. While the fallback rests nobody waits either: the dials go as without it; and no dial
+// waits for a probe longer than utlsFallbackProbeWait.
 func TestUTLSFallbackProbe(t *testing.T) {
 	setFallback(t, true)
 	quietLog(t)
@@ -360,6 +361,26 @@ func TestUTLSFallbackProbe(t *testing.T) {
 		require.False(t, waiting(readyLater(dial)))
 		require.False(t, dial.(*utlsFallbackDial).probe)
 	}
+
+	// a probe that takes long (a server that is down, say) holds the others for
+	// utlsFallbackProbeWait at most: then they go on their own, none of them a probe
+	probeWait := utlsFallbackProbeWait
+	utlsFallbackProbeWait = 400 * time.Millisecond
+	t.Cleanup(func() { utlsFallbackProbeWait = probeWait })
+	config, _ = fallbackClient(t, "chrome", false)
+	first = newDialOf(config)
+	require.NoError(t, first.ready(ctx, fallbackServer))
+	second = newDialOf(config)
+	secondReady = readyLater(second)
+	require.True(t, waiting(secondReady))
+	select {
+	case err := <-secondReady:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("the second dial waits on past utlsFallbackProbeWait")
+	}
+	require.False(t, second.(*utlsFallbackDial).probe)
+	first.done()
 }
 
 // A REALITY server since Xray-core v26.9.8 answers the ClientHello without the
