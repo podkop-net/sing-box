@@ -178,6 +178,9 @@ type utlsFallback struct {
 	// so that a burst of connections does not try all of them at once: a server refusing a
 	// ClientHello counts every refusal, and a path freezes on a burst
 	probing chan struct{}
+	// until when a path rests: its dials are made as without the fallback, and none waits
+	// for a probe, which would make them one at a time, each waiting out its timeout
+	restUntil time.Time
 }
 
 // utlsFallbackEnabled tells whether the fallback is on: the option
@@ -358,6 +361,9 @@ func (f *utlsFallback) advance(path *utlsFallbackPath) {
 // caller holds the lock.
 func (f *utlsFallback) rests(path *utlsFallbackPath, now time.Time, rest time.Duration) {
 	path.restUntil = now.Add(rest)
+	if path.restUntil.After(f.restUntil) {
+		f.restUntil = path.restUntil
+	}
 	path.position = path.last
 	path.resume = -1
 	if path.position < 0 {
@@ -439,11 +445,13 @@ func (d *utlsFallbackDial) ready(ctx context.Context, destination M.Socksaddr) e
 	for {
 		f.access.Lock()
 		f.load(d.serverName, destination)
-		if f.known || f.probing == nil {
-			if !f.known {
-				f.probing = make(chan struct{})
-				d.probe = true
-			}
+		if f.known || time.Now().Before(f.restUntil) {
+			f.access.Unlock()
+			return nil
+		}
+		if f.probing == nil {
+			f.probing = make(chan struct{})
+			d.probe = true
 			f.access.Unlock()
 			return nil
 		}
