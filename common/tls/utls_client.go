@@ -37,6 +37,8 @@ type UTLSClientConfig struct {
 	spoofMethod           tlsspoof.Method
 	// the fingerprint fallback, shared with the clones; nil when off
 	fallback *utlsFallback
+	// the ClientHello without the X25519MLKEM768 key share: a candidate of the fallback
+	noMLKEM bool
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -74,7 +76,7 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos}, nil
+	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos, c.noMLKEM}, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
@@ -83,7 +85,7 @@ func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []by
 
 func (c *UTLSClientConfig) Clone() Config {
 	return &UTLSClientConfig{
-		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment, c.spoof, c.spoofMethod, c.fallback,
+		c.ctx, c.config.Clone(), c.id, c.fragment, c.fragmentFallbackDelay, c.recordFragment, c.spoof, c.spoofMethod, c.fallback, c.noMLKEM,
 	}
 }
 
@@ -133,6 +135,8 @@ func (c *utlsConnWrapper) WriterReplaceable() bool {
 type utlsALPNWrapper struct {
 	utlsConnWrapper
 	nextProtocols []string
+	// the ClientHello goes without the X25519MLKEM768 key share
+	noMLKEM bool
 }
 
 func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
@@ -155,6 +159,17 @@ func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
 				}
 				break
 			}
+		}
+	}
+	if c.noMLKEM {
+		err := c.BuildHandshakeState()
+		if err != nil {
+			return err
+		}
+		dropMLKEM(c.UConn)
+		err = c.BuildHandshakeState()
+		if err != nil {
+			return err
 		}
 	}
 	err := c.UConn.HandshakeContext(ctx)
@@ -294,7 +309,7 @@ func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		return nil, err
 	}
 	fallback := newUTLSFallback(ctx, logger, options.UTLS.Fingerprint, id, options.Reality != nil && options.Reality.Enabled, spoof != "")
-	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, spoof, spoofMethod, fallback}
+	var config Config = &UTLSClientConfig{ctx, &tlsConfig, id, options.Fragment, time.Duration(options.FragmentFallbackDelay), options.RecordFragment, spoof, spoofMethod, fallback, false}
 	if options.ECH != nil && options.ECH.Enabled {
 		if options.Reality != nil && options.Reality.Enabled {
 			return nil, E.New("Reality is conflict with ECH")

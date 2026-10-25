@@ -227,80 +227,31 @@ func cipherSuitesLength(t *testing.T, fingerprint string) uint16 {
 	return binary.BigEndian.Uint16(uConn.HandshakeState.Hello.Raw[4+2+32+1+32:])
 }
 
-// A path that drops the ClientHello of the configured fingerprint and passes the others:
-// the dial gets through with the next fingerprint of the list after two lost ClientHellos
-// of the configured one, and the dials after it begin with that one.
-func TestIntegrationFingerprintFallback(t *testing.T) {
-	setFallbackOrder(t, "safari,firefox")
-	// the second dial would say the same as the first: none of it is to be taken for a
-	// repeat and left out
-	interval := utlsFallbackLogInterval
-	utlsFallbackLogInterval = 0
-	t.Cleanup(func() { utlsFallbackLogInterval = interval })
-	chromeSuites := cipherSuitesLength(t, "chrome")
-	if chromeSuites == cipherSuitesLength(t, "safari") {
-		t.Skip("the ClientHello of chrome and safari cannot be told apart by the length of the cipher suites")
-	}
+// A path that drops the large ClientHellos, those with the X25519MLKEM768 key share, as the
+// Russian DPI does with chrome under a burst of connections: the first candidate of the
+// fallback (chrome without the key share) gets through at once. Without the fallback the
+// same dial waits for its handshake timeout.
+func TestIntegrationFingerprintFallbackLargeHello(t *testing.T) {
+	setFallback(t, true)
+	quietLog(t)
 	certificate := testCertificate(t)
-	address := listenLocal(t, func(conn net.Conn) {
-		defer conn.Close()
-		server := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{certificate}})
-		if server.Handshake() != nil {
-			return
-		}
-		io.Copy(server, server)
-	})
-	// the length of the cipher suites follows the record header (5 bytes) and what
-	// cipherSuitesLength skips, in the payload of the segment
-	dropArriving(t, address.Port, fmt.Sprintf("@ih,%d,16 == %d", (5+4+2+32+1+32)*8, chromeSuites))
-
+	address := listenLocal(t, echoTLS(certificate))
+	dropArriving(t, address.Port, "meta length > 1100")
 	logger, warnings := newWarnLogger(t)
-	options := option.OutboundTLSOptions{
-		Enabled:    true,
-		ServerName: "example.org",
-		Insecure:   true,
-		UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"},
-	}
+	options := integrationOptions("chrome")
 	config, err := NewClient(context.Background(), logger, "127.0.0.1", options)
 	require.NoError(t, err)
-	// the dialer of an outbound wraps its connections, as the tracking of connections does
-	dialer := NewDialer(wrappingDialer{}, config)
 	destination := M.SocksaddrFromNet(address)
-
-	echo := func(conn net.Conn) {
-		_, err := conn.Write([]byte("ping"))
-		require.NoError(t, err)
-		answer := make([]byte, 4)
-		_, err = io.ReadFull(conn, answer)
-		require.NoError(t, err)
-		require.Equal(t, "ping", string(answer))
-	}
-
 	start := time.Now()
-	conn, err := dialer.DialTLSContext(context.Background(), destination)
+	conn, err := NewDialer(wrappingDialer{}, config).DialTLSContext(context.Background(), destination)
 	require.NoError(t, err)
-	t.Logf("the first dial took %d ms", time.Since(start).Milliseconds())
-	echo(conn)
+	t.Logf("the dial took %d ms", time.Since(start).Milliseconds())
+	echoPing(t, conn)
 	conn.Close()
-	lines := warnings.take()
-	require.Len(t, lines, 3)
-	require.Contains(t, lines[0], "unanswered with fingerprint chrome, trying it once more")
-	require.Contains(t, lines[1], "unanswered with fingerprint chrome, retrying with safari")
-	require.Contains(t, lines[2], "fingerprint safari is answered where chrome was not")
+	require.Empty(t, warnings.take(), "no ClientHello went unanswered")
+	require.Equal(t, chromeWithout, attemptName(t, newDialOf(config), "127.0.0.1"))
 
-	start = time.Now()
-	conn, err = dialer.DialTLSContext(context.Background(), destination)
-	require.NoError(t, err)
-	elapsed := time.Since(start)
-	t.Logf("the second dial took %d ms", elapsed.Milliseconds())
-	echo(conn)
-	conn.Close()
-	// a dial that began with the fingerprint that is dropped would have said so
-	require.Empty(t, warnings.take())
-	require.Equal(t, "safari", attemptName(t, config.(fingerprintFallbackConfig).fingerprintDial(), "127.0.0.1"))
-
-	// without the list the same dial waits for its handshake timeout
-	setFallbackOrder(t, "")
+	setFallback(t, false)
 	config, err = NewClient(context.Background(), logger, "127.0.0.1", options)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -308,4 +259,78 @@ func TestIntegrationFingerprintFallback(t *testing.T) {
 	_, err = NewDialer(N.SystemDialer, config).DialTLSContext(ctx, destination)
 	require.Error(t, err)
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "the control: the ClientHello of chrome is dropped, the handshake hangs")
+}
+
+// A path that drops the ClientHello of chrome whatever its key shares: the dial gets through
+// with firefox after two lost ClientHellos of the first candidate, and the dials after it
+// begin with firefox.
+func TestIntegrationFingerprintFallback(t *testing.T) {
+	setFallback(t, true)
+	quietLog(t)
+	chromeSuites := cipherSuitesLength(t, "chrome")
+	if chromeSuites == cipherSuitesLength(t, "firefox") {
+		t.Skip("the ClientHello of chrome and firefox cannot be told apart by the length of the cipher suites")
+	}
+	certificate := testCertificate(t)
+	address := listenLocal(t, echoTLS(certificate))
+	// the length of the cipher suites follows the record header (5 bytes) and what
+	// cipherSuitesLength skips, in the payload of the segment
+	dropArriving(t, address.Port, fmt.Sprintf("@ih,%d,16 == %d", (5+4+2+32+1+32)*8, chromeSuites))
+	logger, warnings := newWarnLogger(t)
+	config, err := NewClient(context.Background(), logger, "127.0.0.1", integrationOptions("chrome"))
+	require.NoError(t, err)
+	// the dialer of an outbound wraps its connections, as the tracking of connections does
+	dialer := NewDialer(wrappingDialer{}, config)
+	destination := M.SocksaddrFromNet(address)
+
+	start := time.Now()
+	conn, err := dialer.DialTLSContext(context.Background(), destination)
+	require.NoError(t, err)
+	t.Logf("the first dial took %d ms", time.Since(start).Milliseconds())
+	echoPing(t, conn)
+	conn.Close()
+	lines := warnings.take()
+	require.Len(t, lines, 3)
+	require.Contains(t, lines[0], "unanswered with "+chromeWithout+", trying it once more")
+	require.Contains(t, lines[1], "unanswered with "+chromeWithout+", retrying with firefox")
+	require.Contains(t, lines[2], "firefox is answered where "+chromeWithout+" was not")
+
+	start = time.Now()
+	conn, err = dialer.DialTLSContext(context.Background(), destination)
+	require.NoError(t, err)
+	t.Logf("the second dial took %d ms", time.Since(start).Milliseconds())
+	echoPing(t, conn)
+	conn.Close()
+	// a dial that began with the ClientHello that is dropped would have said so
+	require.Empty(t, warnings.take())
+	require.Equal(t, "firefox", attemptName(t, newDialOf(config), "127.0.0.1"))
+}
+
+func integrationOptions(fingerprint string) option.OutboundTLSOptions {
+	return option.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: "example.org",
+		Insecure:   true,
+		UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint},
+	}
+}
+
+func echoTLS(certificate tls.Certificate) func(conn net.Conn) {
+	return func(conn net.Conn) {
+		defer conn.Close()
+		server := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{certificate}})
+		if server.Handshake() != nil {
+			return
+		}
+		io.Copy(server, server)
+	}
+}
+
+func echoPing(t *testing.T, conn net.Conn) {
+	_, err := conn.Write([]byte("ping"))
+	require.NoError(t, err)
+	answer := make([]byte, 4)
+	_, err = io.ReadFull(conn, answer)
+	require.NoError(t, err)
+	require.Equal(t, "ping", string(answer))
 }

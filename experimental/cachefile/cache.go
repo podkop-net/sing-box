@@ -34,6 +34,7 @@ var (
 		string(bucketMode),
 		string(bucketRuleSet),
 		string(bucketRuleSetChecked),
+		string(bucketUTLSChoice),
 		string(bucketRDRC),
 	}
 

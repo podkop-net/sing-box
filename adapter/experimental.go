@@ -56,6 +56,9 @@ type CacheFile interface {
 	StoreGroupExpand(group string, expand bool) error
 	LoadRuleSet(tag string) *SavedBinary
 	SaveRuleSet(tag string, set *SavedBinary) error
+	// what the uTLS fingerprint fallback chose for a server, and when (podkop-engine)
+	LoadUTLSChoice(key string) (choice string, at time.Time, loaded bool)
+	StoreUTLSChoice(key string, choice string, at time.Time) error
 }
 
 // RuleSetCheckCache is a cache file that keeps the time a remote rule set was last found

@@ -95,7 +95,7 @@ func TestSpoofThroughDetour(t *testing.T) {
 	if !tlsspoof.PlatformSupported {
 		t.Skip("tls spoof is not supported here")
 	}
-	setFallbackOrder(t, "safari")
+	setFallback(t, true)
 	logger, _ := newWarnLogger(t)
 	options := realityOptionsForTest("chrome", false)
 	options.Spoof = "packagist.org"
