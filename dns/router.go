@@ -53,6 +53,8 @@ type Router struct {
 	closing               bool
 	// providers are the provider's servers of the fallback of this box (podkop-engine)
 	providers *providerSet
+	// ipv6IfNoIPv4 is dns.ipv6_if_no_ipv4 (podkop-engine, dns/client_ipv6.go)
+	ipv6IfNoIPv4 bool
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOptions) (*Router, error) {
@@ -89,8 +91,10 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 			optimisticTimeout = 3 * 24 * time.Hour
 		}
 	}
+	router.ipv6IfNoIPv4 = options.DNSClientOptions.IPv6IfNoIPv4
 	router.client = NewClient(ClientOptions{
 		Context:           ctx,
+		IPv6IfNoIPv4:      options.DNSClientOptions.IPv6IfNoIPv4,
 		Timeout:           time.Duration(options.DNSClientOptions.Timeout),
 		DisableCache:      options.DNSClientOptions.DisableCache,
 		DisableExpire:     options.DNSClientOptions.DisableExpire,
@@ -1000,7 +1004,12 @@ func (r *Router) lookupWithRules(ctx context.Context, rules []adapter.DNSRule, d
 		lookupOptions.Strategy = strategy
 	}
 	if strategy == C.DomainStrategyIPv4Only {
-		return r.lookupWithRulesType(ctx, rules, domain, mDNS.TypeA, lookupOptions)
+		addresses, err := r.lookupWithRulesType(ctx, rules, domain, mDNS.TypeA, lookupOptions)
+		if err == nil && len(addresses) == 0 && r.ipv6IfNoIPv4 {
+			// podkop-engine: a name without an IPv4 address (dns/client_ipv6.go)
+			return r.lookupWithRulesType(ctx, rules, domain, mDNS.TypeAAAA, lookupOptions)
+		}
+		return addresses, err
 	}
 	if strategy == C.DomainStrategyIPv6Only {
 		return r.lookupWithRulesType(ctx, rules, domain, mDNS.TypeAAAA, lookupOptions)

@@ -51,6 +51,7 @@ type Client struct {
 	cacheLock         compatible.Map[dnsExchangeKey, chan struct{}]
 	backgroundRefresh compatible.Map[dnsCacheKey, struct{}]
 	failures          failureLog
+	ipv6IfNoIPv4      bool
 }
 
 type ClientOptions struct {
@@ -64,6 +65,7 @@ type ClientOptions struct {
 	RDRC              func() adapter.RDRCStore
 	DNSCache          func() adapter.DNSCacheStore
 	Logger            logger.ContextLogger
+	IPv6IfNoIPv4      bool
 }
 
 func NewClient(options ClientOptions) *Client {
@@ -79,6 +81,7 @@ func NewClient(options ClientOptions) *Client {
 		initRDRCFunc:      options.RDRC,
 		initDNSCacheFunc:  options.DNSCache,
 		logger:            options.Logger,
+		ipv6IfNoIPv4:      options.IPv6IfNoIPv4,
 	}
 	if client.timeout == 0 {
 		client.timeout = C.DNSTimeout
@@ -399,6 +402,13 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 }
 
 func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
+	if c.mayAskIPv6(transport, message, options) && c.noIPv4(ctx, transport, message, options) {
+		options.Strategy = C.DomainStrategyPreferIPv4
+	}
+	return c.exchange(ctx, transport, message, options, responseChecker)
+}
+
+func (c *Client) exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
 	if options.Timeout == 0 {
 		options.Timeout = c.timeout
 	}
@@ -417,6 +427,16 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 }
 
 func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool, callback func(response *dns.Msg, err error)) {
+	if c.mayAskIPv6(transport, message, options) {
+		// the A question may have to go out: not on the caller's goroutine
+		go func() {
+			if c.noIPv4(ctx, transport, message, options) {
+				options.Strategy = C.DomainStrategyPreferIPv4
+			}
+			callback(c.exchange(ctx, transport, message, options, responseChecker))
+		}()
+		return
+	}
 	if options.Timeout == 0 {
 		options.Timeout = c.timeout
 	}
@@ -464,7 +484,11 @@ func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, dom
 	}
 	switch strategy {
 	case C.DomainStrategyIPv4Only:
-		return c.lookupToExchange(ctx, transport, dnsName, dns.TypeA, lookupOptions, responseChecker)
+		addresses, err := c.lookupToExchange(ctx, transport, dnsName, dns.TypeA, lookupOptions, responseChecker)
+		if err == nil && len(addresses) == 0 && c.ipv6IfNoIPv4 && transport.Type() != C.DNSTypeFakeIP {
+			return c.lookupToExchange(ctx, transport, dnsName, dns.TypeAAAA, lookupOptions, responseChecker)
+		}
+		return addresses, err
 	case C.DomainStrategyIPv6Only:
 		return c.lookupToExchange(ctx, transport, dnsName, dns.TypeAAAA, lookupOptions, responseChecker)
 	}
