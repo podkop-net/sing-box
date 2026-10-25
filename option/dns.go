@@ -109,6 +109,10 @@ type DNSClientOptions struct {
 	IndependentCache bool                  `json:"independent_cache,omitempty"`
 	CacheCapacity    uint32                `json:"cache_capacity,omitempty"`
 	ClientSubnet     *badoption.Prefixable `json:"client_subnet,omitempty"`
+	// podkop-engine: with the strategy ipv4_only, the AAAA question of a name that has no
+	// IPv4 address is asked, and a lookup of such a name takes its IPv6 addresses
+	// (dns/client_ipv6.go)
+	IPv6IfNoIPv4 bool `json:"ipv6_if_no_ipv4,omitempty"`
 }
 
 type LegacyDNSFakeIPOptions struct {

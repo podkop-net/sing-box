@@ -46,6 +46,7 @@ type Client struct {
 	transportCache     freelru.Cache[transportCacheKey, *dns.Msg]
 	transportCacheLock compatible.Map[transportCacheKey, chan struct{}]
 	failures           failureLog
+	ipv6IfNoIPv4       bool
 }
 
 type ClientOptions struct {
@@ -58,6 +59,7 @@ type ClientOptions struct {
 	ClientSubnet     netip.Prefix
 	RDRC             func() adapter.RDRCStore
 	Logger           logger.ContextLogger
+	IPv6IfNoIPv4     bool
 }
 
 func NewClient(options ClientOptions) *Client {
@@ -70,6 +72,7 @@ func NewClient(options ClientOptions) *Client {
 		clientSubnet:     options.ClientSubnet,
 		initRDRCFunc:     options.RDRC,
 		logger:           options.Logger,
+		ipv6IfNoIPv4:     options.IPv6IfNoIPv4,
 	}
 	if client.timeout == 0 {
 		client.timeout = C.DNSTimeout
@@ -123,6 +126,13 @@ func stripDNSPadding(response *dns.Msg) {
 }
 
 func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(responseAddrs []netip.Addr) bool) (*dns.Msg, error) {
+	if c.mayAskIPv6(transport, message, options) && c.noIPv4(ctx, transport, message, options) {
+		options.Strategy = C.DomainStrategyPreferIPv4
+	}
+	return c.exchange(ctx, transport, message, options, responseChecker)
+}
+
+func (c *Client) exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(responseAddrs []netip.Addr) bool) (*dns.Msg, error) {
 	if len(message.Question) == 0 {
 		if c.logger != nil {
 			c.logger.WarnContext(ctx, "bad question size: ", len(message.Question))
@@ -350,7 +360,11 @@ func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, dom
 	}
 	switch strategy {
 	case C.DomainStrategyIPv4Only:
-		return c.lookupToExchange(ctx, transport, dnsName, dns.TypeA, lookupOptions, responseChecker)
+		addresses, err := c.lookupToExchange(ctx, transport, dnsName, dns.TypeA, lookupOptions, responseChecker)
+		if err == nil && len(addresses) == 0 && c.ipv6IfNoIPv4 && transport.Type() != C.DNSTypeFakeIP {
+			return c.lookupToExchange(ctx, transport, dnsName, dns.TypeAAAA, lookupOptions, responseChecker)
+		}
+		return addresses, err
 	case C.DomainStrategyIPv6Only:
 		return c.lookupToExchange(ctx, transport, dnsName, dns.TypeAAAA, lookupOptions, responseChecker)
 	}
