@@ -126,7 +126,7 @@ func stripDNSPadding(response *dns.Msg) {
 }
 
 func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(responseAddrs []netip.Addr) bool) (*dns.Msg, error) {
-	if c.mayAskIPv6(transport, message, options) && c.noIPv4(ctx, transport, message, options) {
+	if c.mayAskIPv6(transport, message, options) && c.noIPv4(ctx, transport, message, options, responseChecker) {
 		options.Strategy = C.DomainStrategyPreferIPv4
 	}
 	return c.exchange(ctx, transport, message, options, responseChecker)

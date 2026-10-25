@@ -155,3 +155,20 @@ func TestIPv6IfNoIPv4Lookup(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, addresses)
 }
+
+// The A question goes with the check of the addresses of the rule: an answer the rule
+// refuses tells nothing and is not cached, as for the A question of a client.
+func TestIPv6IfNoIPv4Checked(t *testing.T) {
+	ctx := context.Background()
+	transport := newIPv6TestTransport("server", C.DNSTypeUDP)
+	client := ipv6TestClient(true)
+	refuse := func([]netip.Addr) bool { return false }
+	response, err := client.Exchange(ctx, transport, ipv6TestQuestion("dual.test.", mDNS.TypeAAAA), ipv4Only, refuse)
+	require.NoError(t, err)
+	require.Empty(t, response.Answer)
+	require.Equal(t, 1, transport.asked(mDNS.TypeA))
+	require.Zero(t, transport.asked(mDNS.TypeAAAA))
+	_, err = client.Exchange(ctx, transport, ipv6TestQuestion("dual.test.", mDNS.TypeA), ipv4Only, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, transport.asked(mDNS.TypeA), "the refused answer was cached")
+}

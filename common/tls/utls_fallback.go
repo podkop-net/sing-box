@@ -123,8 +123,10 @@ type utlsFallbackPath struct {
 	// one that did last (-1: none); a candidate refused since is in neither
 	worked uint64
 	last   int
-	// when the candidate in use was chosen or confirmed last
+	// when the candidate in use was chosen or confirmed last, and the candidate this path
+	// kept as the choice for the server then (-1: none)
 	chosen time.Time
+	choice int
 	// a dial is trying the first candidate again, the choice being old
 	rechecking bool
 	// when the ClientHello of the candidate in use went unanswered for the first time
@@ -186,6 +188,10 @@ type utlsFallback struct {
 	// until when a path rests: its dials are made as without the fallback, and none waits
 	// for a probe, which would make them one at a time, each waiting out its timeout
 	restUntil time.Time
+	// the writes of the choice to the cache file, made in the order the choices were: a
+	// write waits for the file (a batch of bbolt) and is not made under access
+	storing sync.Mutex
+	stored  time.Time
 }
 
 // utlsFallbackEnabled tells whether the fallback is on: the option
@@ -224,11 +230,10 @@ func newUTLSFallback(ctx context.Context, logger logger.ContextLogger, configure
 	if !utlsClassicFingerprint(configured) {
 		candidates[0].noMLKEM = true
 	}
-	if configured != utlsFallbackWithKeyShare {
-		id, err := uTLSClientHelloID(utlsFallbackWithKeyShare)
-		if err == nil {
-			candidates = append(candidates, utlsFallbackCandidate{name: utlsFallbackWithKeyShare, id: id})
-		}
+	// the same ClientHello is not tried twice: random may have taken firefox
+	id, err := uTLSClientHelloID(utlsFallbackWithKeyShare)
+	if err == nil && id != configuredID {
+		candidates = append(candidates, utlsFallbackCandidate{name: utlsFallbackWithKeyShare, id: id})
 	}
 	configuredIndex := -1
 	for index, candidate := range candidates {
@@ -305,14 +310,25 @@ func (f *utlsFallback) load(serverName string, destination M.Socksaddr) {
 	}
 }
 
-// store keeps the candidate in use of a path as the choice for the server. The caller holds
-// the lock.
+// store keeps the candidate in use of a path as the choice for the server; the cache file
+// is written in the background. The caller holds the lock.
 func (f *utlsFallback) store(path *utlsFallbackPath, now time.Time) {
-	path.chosen = now
+	path.chosen, path.choice = now, path.position
 	f.saved, f.savedAt = path.position, now
-	if f.cache != nil && f.key != "" {
-		_ = f.cache.StoreUTLSChoice(f.key, f.candidates[path.position].String(), now)
+	if f.cache == nil || f.key == "" {
+		return
 	}
+	cache, key, choice := f.cache, f.key, f.candidates[path.position].String()
+	go func() {
+		f.storing.Lock()
+		defer f.storing.Unlock()
+		if now.Before(f.stored) {
+			// a later choice is written already
+			return
+		}
+		f.stored = now
+		_ = cache.StoreUTLSChoice(key, choice, now)
+	}()
 }
 
 // path returns what is known of the local address of conn. The caller holds the lock.
@@ -326,10 +342,10 @@ func (f *utlsFallback) path(conn net.Conn) *utlsFallbackPath {
 			return path
 		}
 	}
-	path := &utlsFallbackPath{local: local, last: -1, resume: -1}
+	path := &utlsFallbackPath{local: local, last: -1, resume: -1, choice: -1}
 	if f.saved >= 0 {
 		// what was chosen for the server before, on this or another address
-		path.position, path.last, path.chosen = f.saved, f.saved, f.savedAt
+		path.position, path.last, path.chosen, path.choice = f.saved, f.saved, f.savedAt, f.saved
 		path.worked = 1 << f.saved
 	}
 	if len(f.paths) < utlsFallbackPaths {
@@ -558,11 +574,15 @@ func (d *utlsFallbackDial) answered() {
 	path.worked |= 1 << d.position
 	path.last = d.position
 	f.known = true
-	if first || f.saved != d.position || now.Sub(path.chosen) >= utlsFallbackRecheck {
-		f.store(path, now)
-	}
 	if !d.watched || now.Before(path.restUntil) {
+		// what a dial made during a rest got through with (the configured fingerprint as it
+		// is when nothing has worked) is no choice of the fallback: it is not kept
 		return
+	}
+	// kept when the choice of this path changes or gets old: two paths with choices of
+	// their own do not write by turns
+	if path.choice != d.position || now.Sub(path.chosen) >= utlsFallbackRecheck {
+		f.store(path, now)
 	}
 	name := f.candidates[d.position].String()
 	if !path.suspected.IsZero() {
@@ -646,8 +666,9 @@ func (d *utlsFallbackDial) failed(ctx context.Context, destination M.Socksaddr, 
 	if !d.watched || ctx.Err() != nil || d.position != path.position || now.Before(path.restUntil) {
 		return false
 	}
-	if !refused && path.twice() {
-		// answered, with a failure of another kind: not what the fallback is for
+	if !refused && path.worked&(1<<d.position) != 0 {
+		// answered, with a failure of another kind, a candidate that has worked here: not
+		// what the fallback is for
 		path.suspected = time.Time{}
 		return false
 	}
