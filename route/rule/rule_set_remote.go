@@ -63,6 +63,8 @@ type RemoteRuleSet struct {
 	fetchLoaded   bool
 	failures      int
 	failureLogged time.Time
+	// the size of the list it holds: big lists are updated one at a time (heavyRuleSetSize)
+	contentSize atomic.Int64
 }
 
 func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, options option.RuleSet) *RemoteRuleSet {
@@ -234,6 +236,7 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 	s.rules = rules
 	callbacks := s.callbacks.Array()
 	s.access.Unlock()
+	s.contentSize.Store(int64(len(content)))
 	for _, callback := range callbacks {
 		callback(s)
 	}
@@ -286,8 +289,25 @@ func (s *RemoteRuleSet) loopUpdate() {
 	}
 }
 
+// heavyRuleSetSize is the size of a list from which its update waits for the update of
+// any other such list (podkop-engine): the download holds the list, the parse builds the
+// next one beside the one in use, and the save writes it; big lists started together are
+// due together and took all of that at once.
+const heavyRuleSetSize = 1 << 20
+
+// heavyUpdate is held by the update of a big list.
+var heavyUpdate = make(chan struct{}, 1)
+
 // updateOnce updates the rule-set and reports whether it loaded a new list.
 func (s *RemoteRuleSet) updateOnce() bool {
+	if s.contentSize.Load() >= heavyRuleSetSize {
+		select {
+		case heavyUpdate <- struct{}{}:
+			defer func() { <-heavyUpdate }()
+		case <-s.ctx.Done():
+			return false
+		}
+	}
 	s.fetchLoaded = false
 	err := s.fetch(s.ctx, nil)
 	if err != nil {

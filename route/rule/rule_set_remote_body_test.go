@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -174,4 +176,50 @@ func TestRuleSetLogText(t *testing.T) {
 	require.True(t, strings.HasSuffix(long, "..."))
 	require.True(t, utf8.ValidString(long))
 	require.NotContains(t, long, "?")
+}
+
+// Big lists are updated one at a time, small ones together: two sets that hold a big list
+// each never download at once, two small ones do. What was loaded tells its size.
+func TestRemoteRuleSetBigOneAtATime(t *testing.T) {
+	var bigInFlight, bigMost, smallInFlight, smallMost atomic.Int32
+	raise := func(most *atomic.Int32, now int32) {
+		for {
+			seen := most.Load()
+			if now <= seen || most.CompareAndSwap(seen, now) {
+				return
+			}
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inFlight, most := &smallInFlight, &smallMost
+		if r.URL.Path == "/big" {
+			inFlight, most = &bigInFlight, &bigMost
+		}
+		raise(most, inFlight.Add(1))
+		defer inFlight.Add(-1)
+		time.Sleep(200 * time.Millisecond)
+		io.WriteString(w, testSourceSet)
+	}))
+	defer server.Close()
+	var sets []*RemoteRuleSet
+	for _, path := range []string{"/big", "/big", "/small", "/small"} {
+		set := newTestRuleSet(server.URL + path)
+		set.options.Format = C.RuleSetFormatSource
+		if path == "/big" {
+			set.contentSize.Store(heavyRuleSetSize)
+		}
+		sets = append(sets, set)
+	}
+	var group sync.WaitGroup
+	for _, set := range sets {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			require.True(t, set.updateOnce())
+		}()
+	}
+	group.Wait()
+	require.EqualValues(t, 1, bigMost.Load(), "two big lists were downloaded at once")
+	require.EqualValues(t, 2, smallMost.Load())
+	require.EqualValues(t, len(testSourceSet), sets[0].contentSize.Load())
 }
