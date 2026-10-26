@@ -169,8 +169,14 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 		db.Close()
 		return err
 	}
-	c.pruneRuleSetFiles(db)
 	c.DB = db
+	moved := c.moveRuleSetsToFiles()
+	db, err = c.compactSparse(db, moved)
+	if err != nil {
+		return err
+	}
+	c.DB = db
+	c.pruneRuleSetFiles(db)
 	return nil
 }
 

@@ -107,3 +107,44 @@ func TestRuleSetFileName(t *testing.T) {
 	require.NotEqual(t, ruleSetFileName(nil, "a/b"), ruleSetFileName(nil, "a_b"))
 	require.NotEqual(t, ruleSetFileName(nil, "a"), ruleSetFileName([]byte("\x00x"), "a"))
 }
+
+// The lists an earlier version kept in the database move into their files at the start,
+// and the cache file they left at three times their size is written anew, small; what was
+// saved is read as before, and the rest of the database stays.
+func TestRuleSetFileMovedAndCompacted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	cacheFile := openTestCacheFile(t, path)
+	list := bytes.Repeat([]byte("203.0.113.0/24\n"), 300000)
+	for round := byte(0); round < 3; round++ {
+		list[0] = '0' + round
+		value, err := (&adapter.SavedBinary{Content: list, LastUpdated: time.Unix(100+int64(round), 0)}).MarshalBinary()
+		require.NoError(t, err)
+		require.NoError(t, cacheFile.batch(func(tx *bbolt.Tx) error {
+			bucket, err := cacheFile.createBucket(tx, bucketRuleSet)
+			if err != nil {
+				return err
+			}
+			return bucket.Put([]byte("big"), value)
+		}))
+	}
+	require.NoError(t, cacheFile.StoreSelected("proxy", "main"))
+	require.NoError(t, cacheFile.Close())
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Greater(t, info.Size(), int64(2*len(list)), "the database of an earlier version is not as big")
+
+	cacheFile = openTestCacheFile(t, path)
+	defer cacheFile.Close()
+	info, err = os.Stat(path)
+	require.NoError(t, err)
+	require.Less(t, info.Size(), int64(len(list)/4), "the cache file is not compacted")
+	saved := cacheFile.LoadRuleSet("big")
+	require.NotNil(t, saved)
+	require.Equal(t, list, saved.Content)
+	require.True(t, time.Unix(102, 0).Equal(saved.LastUpdated))
+	require.Equal(t, "main", cacheFile.LoadSelected("proxy"))
+	require.NoError(t, cacheFile.view(func(tx *bbolt.Tx) error {
+		require.Nil(t, cacheFile.bucket(tx, bucketRuleSet).Get([]byte("big")))
+		return nil
+	}))
+}
