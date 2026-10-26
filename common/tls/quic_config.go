@@ -1,6 +1,24 @@
 package tls
 
-import E "github.com/sagernet/sing/common/exceptions"
+import (
+	"github.com/sagernet/sing-box/option"
+	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/logger"
+)
+
+// QUICClientOptions are the TLS options of an outbound that runs over QUIC (hysteria,
+// hysteria2, tuic) as it can use them: quic-go makes the ClientHello itself, so a uTLS
+// fingerprint cannot be sent, and with one every connection failed ("unsupported usage
+// for uTLS"). The fingerprint is dropped with a warning, as the decoder of share links
+// drops it and as Xray ignores fp over QUIC (podkop-engine).
+func QUICClientOptions(logger logger.Logger, options option.OutboundTLSOptions) option.OutboundTLSOptions {
+	if options.UTLS == nil || !options.UTLS.Enabled {
+		return options
+	}
+	logger.Warn("uTLS is not used over QUIC: the fingerprint ", options.UTLS.Fingerprint, " is ignored")
+	options.UTLS = nil
+	return options
+}
 
 // STDConfigForQUIC returns the crypto/tls form of a client config for a QUIC
 // handshake, which quic-go builds itself (podkop-engine, XHTTP over HTTP/3).
