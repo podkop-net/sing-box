@@ -34,6 +34,7 @@ var (
 		string(bucketMode),
 		string(bucketRuleSet),
 		string(bucketRuleSetChecked),
+		string(bucketRuleSetFile),
 		string(bucketUTLSChoice),
 		string(bucketRDRC),
 	}
@@ -168,6 +169,7 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 		db.Close()
 		return err
 	}
+	c.pruneRuleSetFiles(db)
 	c.DB = db
 	return nil
 }
@@ -338,6 +340,9 @@ func (c *CacheFile) StoreGroupExpand(group string, isExpand bool) error {
 }
 
 func (c *CacheFile) LoadRuleSet(tag string) *adapter.SavedBinary {
+	if saved, found := c.loadRuleSetFile(tag); found {
+		return saved
+	}
 	var savedSet adapter.SavedBinary
 	err := c.view(func(t *bbolt.Tx) error {
 		bucket := c.bucket(t, bucketRuleSet)
@@ -387,16 +392,7 @@ func (c *CacheFile) StoreRuleSetChecked(tag string, at time.Time) error {
 	})
 }
 
+// SaveRuleSet keeps the content of a rule set in a file of its own (rule_set_file.go).
 func (c *CacheFile) SaveRuleSet(tag string, set *adapter.SavedBinary) error {
-	return c.batch(func(t *bbolt.Tx) error {
-		bucket, err := c.createBucket(t, bucketRuleSet)
-		if err != nil {
-			return err
-		}
-		setBinary, err := set.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(tag), setBinary)
-	})
+	return c.saveRuleSetFile(tag, set)
 }
