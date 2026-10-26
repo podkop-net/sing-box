@@ -27,8 +27,10 @@ var commandDecodeLinkFlagCompact bool
 
 var commandDecodeLink = &cobra.Command{
 	Use:   "decode-link [link]",
-	Short: "Convert a share link (vless://, trojan://) to an outbound",
-	Long: "Convert a share link (vless://, trojan://) to an outbound.\n\n" +
+	Short: "Convert a share link (vless://, trojan://, ss://, hysteria2://, ...) to an outbound",
+	Long: "Convert a share link to an outbound: vless://, trojan://, ss://, socks://, hysteria2://\n" +
+		"(hy2://), tuic://, http(s)://; in a build with every outbound also vmess://, hysteria://,\n" +
+		"anytls:// and naive+https:// (naive+quic://).\n\n" +
 		"The link is the argument or, with no argument, the standard input. The outbound is\n" +
 		"printed to the standard output as JSON.\n\n" +
 		"Exit status:\n" +
