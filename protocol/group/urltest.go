@@ -271,7 +271,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 				conn = watched
 			}
 		}
-		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+		return s.group.newUseConn(outbound, conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
 	s.group.memberFailed(ctx, outbound, N.NetworkName(network), err, start)
 	return nil, memberError(outbound, err)
@@ -295,7 +295,7 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	}
 	conn, err := outbound.ListenPacket(ctx, destination)
 	if err == nil {
-		return s.group.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
+		return s.group.newUsePacketConn(outbound, conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
 	s.group.memberFailed(ctx, outbound, N.NetworkUDP, err, time.Time{})
 	return nil, memberError(outbound, err)
@@ -344,6 +344,16 @@ type URLTestGroup struct {
 	frozen          common.TypedValue[map[string]time.Time] // member tag → when it last failed the download test
 	responses       sync.Map                                // member tag → *memberResponses
 	responsesClosed atomic.Bool
+	// cancel ends the rounds, the selection and the tests of the group at its close, and
+	// closed tells it was closed: set under access, so that Touch starts no ticker after
+	// (podkop-engine)
+	cancel context.CancelFunc
+	closed atomic.Bool
+	// hotStart makes the first round test only the members without a result (TakeOver)
+	hotStart bool
+	// uses are the connections the group dialed that are open, by member (MembersInUse)
+	useAccess sync.Mutex
+	uses      map[adapter.Outbound]int
 }
 
 func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, fallbacks []adapter.Outbound, link string, downloadLink string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
@@ -363,8 +373,10 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 	if history == nil {
 		return nil, E.New("missing URL test history storage")
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	group := &URLTestGroup{
 		ctx:                          ctx,
+		cancel:                       cancel,
 		outbound:                     outboundManager,
 		logger:                       logger,
 		outbounds:                    outbounds,
@@ -381,6 +393,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		interruptExternalConnections: interruptExternalConnections,
 		epoch:                        time.Now(),
 		downloadLink:                 downloadLink,
+		uses:                         make(map[adapter.Outbound]int),
 	}
 	group.watchPause(group.pause)
 	return group, nil
@@ -389,8 +402,15 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 func (g *URLTestGroup) PostStart() {
 	g.access.Lock()
 	defer g.access.Unlock()
+	if g.closed.Load() {
+		return
+	}
 	g.started = true
 	g.lastActive.Store(time.Now())
+	if g.hotStart {
+		go g.checkUntested()
+		return
+	}
 	go g.CheckOutbounds(g.ctx, false)
 }
 
@@ -400,6 +420,9 @@ func (g *URLTestGroup) Touch() {
 	}
 	g.access.Lock()
 	defer g.access.Unlock()
+	if g.closed.Load() {
+		return
+	}
 	if g.ticker != nil {
 		g.lastActive.Store(time.Now())
 		g.probeUnseenNetwork()
@@ -416,6 +439,12 @@ func (g *URLTestGroup) Close() error {
 	g.responsesClosed.Store(true)
 	g.access.Lock()
 	defer g.access.Unlock()
+	if g.closed.Swap(true) {
+		return nil
+	}
+	if g.cancel != nil {
+		g.cancel()
+	}
 	if g.networkCallback != nil {
 		g.pause.UnregisterCallback(g.networkCallback)
 		g.networkCallback = nil
@@ -543,6 +572,14 @@ func (g *URLTestGroup) CheckOutbounds(ctx context.Context, force bool) {
 // URLTest is the Clash API's round: it does not wait for the selection, which may run a
 // download test, nor for those of the nested urltest groups.
 func (g *URLTestGroup) URLTest(ctx context.Context) (map[string]uint16, error) {
+	if g.closed.Load() {
+		return nil, E.New("the group is closed")
+	}
+	// the round ends with the group too: a group that was replaced must not write results
+	// for the tags another group tests now (podkop-engine)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(g.ctx, cancel)()
 	result, err := g.urlTestRound(ctx, true, false)
 	g.requestUpdateCheck()
 	return result, err
@@ -558,6 +595,14 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 // With wait, a nested urltest group among the members selects within the round (see
 // URLTestOutbounds).
 func (g *URLTestGroup) urlTestRound(ctx context.Context, force bool, wait bool) (map[string]uint16, error) {
+	return g.urlTestMembers(ctx, g.members, urlTestConcurrency, force, wait)
+}
+
+// urlTestMembers is urlTestRound of some of the members, so many at a time.
+func (g *URLTestGroup) urlTestMembers(ctx context.Context, members []adapter.Outbound, concurrency int, force bool, wait bool) (map[string]uint16, error) {
+	if g.closed.Load() {
+		return make(map[string]uint16), nil
+	}
 	if g.checking.Swap(true) {
 		if force {
 			g.requestRecheck()
@@ -574,7 +619,7 @@ func (g *URLTestGroup) urlTestRound(ctx context.Context, force bool, wait bool) 
 			go g.CheckOutbounds(g.ctx, true)
 		}
 	}()
-	return URLTestOutbounds(ctx, g.outbound, g.history, g.logger, g.members, g.link, g.interval, force, wait), nil
+	return urlTestOutbounds(ctx, g.outbound, g.history, g.logger, members, g.link, g.interval, force, wait, concurrency), nil
 }
 
 type urlTestResult struct {
@@ -601,7 +646,14 @@ type urlTestBatch struct {
 // choice. Without, the selection runs after the call returns: the Clash API answers its
 // client in time, while the selection may run a download test of up to 15 s per candidate.
 func URLTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool, wait bool) map[string]uint16 {
-	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](10))
+	return urlTestOutbounds(ctx, outboundManager, history, logger, outbounds, link, interval, force, wait, urlTestConcurrency)
+}
+
+// urlTestConcurrency is how many outbounds a round tests at a time.
+const urlTestConcurrency = 10
+
+func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManager, history *urltest.HistoryStorage, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, force bool, wait bool, concurrency int) map[string]uint16 {
+	b, _ := batch.New(ctx, batch.WithConcurrencyNum[any](concurrency))
 	testBatch := &urlTestBatch{
 		ctx:      ctx,
 		outbound: outboundManager,
@@ -673,6 +725,11 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
 					b.history.DeleteURLTestHistory(tag)
 				} else {
+					if b.ctx.Err() != nil {
+						// the round ended with its group (podkop-engine): the tag may be
+						// another outbound's by now
+						return nil, nil
+					}
 					b.logger.Debug("outbound ", tag, " available: ", testResult.delay, "ms")
 					b.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{
 						Time:  time.Now(),
@@ -694,8 +751,13 @@ func (g *URLTestGroup) performUpdateCheck() {
 	g.updateSelection()
 }
 
-// updateSelection is performUpdateCheck under its lock.
+// updateSelection is performUpdateCheck under its lock. A group that was closed selects no
+// more (podkop-engine): its download test is canceled with it, and what it would choose then
+// was not tested.
 func (g *URLTestGroup) updateSelection() {
+	if g.closed.Load() {
+		return
+	}
 	if g.downloadLink != "" {
 		// new dials already pass over a member without a test result while the selection
 		// waits (selectionPending), which the download test may make long
@@ -706,7 +768,11 @@ func (g *URLTestGroup) updateSelection() {
 		selected bool
 	)
 	// the selection is read by every dial, which may run while it changes: stored atomically
-	if outbound, exists := g.selectTested(); outbound != nil {
+	outbound, exists := g.selectTested()
+	if g.closed.Load() {
+		return
+	}
+	if outbound != nil {
 		if current := g.selectedOutboundTCP.Load(); current == nil || (exists && outbound != current) {
 			if current != nil {
 				updated = true
@@ -728,6 +794,9 @@ func (g *URLTestGroup) updateSelection() {
 			g.selectedOutboundUDP.Store(outbound)
 			selected = true
 		}
+	}
+	if g.closed.Load() {
+		return
 	}
 	if updated {
 		g.interruptGroup.Interrupt(g.interruptExternalConnections)

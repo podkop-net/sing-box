@@ -59,6 +59,7 @@ func TestPodkopConfigurationLoads(t *testing.T) {
 			{"type": "hysteria2", "tag": "hy2-out", ` + testServerTLS + `, "password": "p"},
 			{"type": "tuic", "tag": "tuic-out", ` + testServerTLS + `, ` + testUUID + `},
 			{"type": "selector", "tag": "select", "outbounds": ["direct-out", "vless-out"]},
+			{"type": "block", "tag": "block-out"},
 			{"type": "http", "tag": "http-out", ` + testServer + `},
 			{"type": "urltest", "tag": "auto", "outbounds": ["vless-out", "hy2-out"]}
 		]
@@ -75,7 +76,6 @@ func TestPodkopSlimStubs(t *testing.T) {
 		{`{"inbounds": [{"type": "vless", "listen": "127.0.0.1", "listen_port": 0}]}`, "vless inbound is not included in this build (podkop_slim)"},
 		{`{"inbounds": [{"type": "hysteria2", "listen": "127.0.0.1", "listen_port": 0}]}`, "hysteria2 inbound is not included in this build (podkop_slim)"},
 		{`{"inbounds": [{"type": "tun"}]}`, "tun inbound is not included in this build (podkop_slim)"},
-		{`{"outbounds": [{"type": "block", "tag": "block"}]}`, "block outbound is not included in this build (podkop_slim), use the rule action reject"},
 		{`{"dns": {"servers": [{"type": "quic", "tag": "doq", "server": "127.0.0.1"}]}}`, "quic DNS server is not included in this build (podkop_slim)"},
 		{`{"services": [{"type": "ssm-api", "servers": {"/": "ss-in"}}]}`, "ssm-api service is not included in this build (podkop_slim)"},
 	} {

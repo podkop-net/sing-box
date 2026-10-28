@@ -13,6 +13,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/protocol/block"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -42,7 +43,9 @@ func registerNonPodkopInbounds(registry *inbound.Registry) {
 
 func registerNonPodkopOutbounds(registry *outbound.Registry) {
 	stubOutbound(registry, C.TypeBridge, notIncludedSlim)
-	stubOutbound(registry, C.TypeBlock, notIncludedSlim+", use the rule action reject")
+	// a section whose group has no server refuses its connections through a selector of a
+	// block outbound: the selector changes while the box runs, a rule does not
+	block.RegisterOutbound(registry)
 }
 
 func registerNonPodkopDNSTransports(registry *dns.TransportRegistry) {

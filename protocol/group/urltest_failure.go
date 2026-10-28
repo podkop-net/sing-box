@@ -69,6 +69,11 @@ func serverOnlyDial(outbound adapter.Outbound) bool {
 // memberFailed judges a failed dial through member, begun at start, or a failed handshake
 // write (start is zero).
 func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound, network string, err error, start time.Time) {
+	if g.closed.Load() {
+		// a group that was replaced judges nothing (podkop-engine): another tests the members
+		// now, and its members may be let go of
+		return
+	}
 	if g.networkPaused() {
 		// without a network every dial fails at once: that says nothing about the member
 		return
@@ -269,7 +274,7 @@ func (g *URLTestGroup) succeededSince(tag string, start time.Time) bool {
 // waits to run are covered by it, so at most one selection waits at any time (a selection
 // may run long: the download test).
 func (g *URLTestGroup) requestUpdateCheck() {
-	if g.updatePending.Swap(true) {
+	if g.closed.Load() || g.updatePending.Swap(true) {
 		return
 	}
 	go func() {
