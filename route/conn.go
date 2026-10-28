@@ -123,7 +123,7 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
 		m.deleteURLTestHistory(metadata.OutboundChain)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
-		m.logger.ErrorContext(ctx, err)
+		m.logDialError(ctx, this, err)
 		return
 	}
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
@@ -223,7 +223,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			err = E.Cause(err, "listen packet connection using ", dialerString)
 			m.deleteURLTestHistory(metadata.OutboundChain)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
-			m.logger.ErrorContext(ctx, err)
+			m.logDialError(ctx, this, err)
 			return
 		}
 	}
