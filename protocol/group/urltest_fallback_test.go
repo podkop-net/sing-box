@@ -35,6 +35,8 @@ func newTestFallbackGroup(t *testing.T, link, downloadLink string, outbounds, fa
 	}
 	group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), outbounds, fallbacks, link, downloadLink, time.Minute, 50, 0, false)
 	require.NoError(t, err)
+	// the results are those of a round (roundDone)
+	group.roundDone.Store(true)
 	group.performUpdateCheck()
 	return &URLTest{group: group, logger: log.NewNOPFactory().NewLogger("urltest")}, group
 }

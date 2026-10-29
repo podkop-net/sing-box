@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -99,4 +100,23 @@ func TestProbeLimit(t *testing.T) {
 	done.Wait()
 	require.Equal(t, int32(cap(probeSlots)), most.Load())
 	require.Equal(t, int32(3*cap(probeSlots)), slow.dials.Load())
+}
+
+// Before a round has tested the members a fallback is not taken for want of their results: at
+// a start or after a swap a block fallback would refuse every connection.
+func TestNoFallbackBeforeARound(t *testing.T) {
+	t.Parallel()
+	history := urltest.NewHistoryStorage()
+	ctx := service.ContextWithPtr(context.Background(), history)
+	server, block := newTestMember(C.TypeSOCKS, "a", dialRefused), newTestMember(C.TypeBlock, "block", dialRefused)
+	manager := &testOutboundManager{members: map[string]adapter.Outbound{"a": server, "block": block}}
+	group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), members(server), members(block), "", "", time.Minute, 50, 0, false)
+	require.NoError(t, err)
+	selected, found := group.Select(N.NetworkTCP)
+	require.Equal(t, "a", selected.Tag())
+	require.False(t, found)
+	group.roundDone.Store(true)
+	selected, found = group.Select(N.NetworkTCP)
+	require.Equal(t, "block", selected.Tag(), "tested and not answering: the fallback")
+	require.True(t, found)
 }

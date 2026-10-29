@@ -320,6 +320,7 @@ type URLTestGroup struct {
 	checking                     atomic.Bool
 	recheck                      atomic.Bool
 	lastRound                    atomic.Int64 // when the last round began, since epoch
+	roundDone                    atomic.Bool  // a round has tested the members (see selectAmong)
 	selectedOutboundTCP          common.TypedValue[adapter.Outbound]
 	selectedOutboundUDP          common.TypedValue[adapter.Outbound]
 	interruptGroup               *interrupt.Group
@@ -502,6 +503,17 @@ func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history
 		}
 	}
 	if minOutbound == nil {
+		if !g.roundDone.Load() {
+			// before a round has tested them the outbounds have no results, which is no
+			// reason to fall back (podkop-engine): at a start or after a swap a block
+			// fallback would refuse every connection, a direct one send it past the proxy.
+			// The first of them, as without fallbacks.
+			for _, detour := range g.outbounds {
+				if common.Contains(detour.Network(), network) {
+					return detour, false
+				}
+			}
+		}
 		for _, detour := range g.fallbacks {
 			if !common.Contains(detour.Network(), network) {
 				continue
@@ -626,7 +638,9 @@ func (g *URLTestGroup) urlTestMembers(ctx context.Context, members []adapter.Out
 			go g.CheckOutbounds(g.ctx, true)
 		}
 	}()
-	return urlTestOutbounds(ctx, g.outbound, g.history, g.logger, members, g.link, g.interval, force, wait, concurrency), nil
+	result := urlTestOutbounds(ctx, g.outbound, g.history, g.logger, members, g.link, g.interval, force, wait, concurrency)
+	g.roundDone.Store(true)
+	return result, nil
 }
 
 type urlTestResult struct {
