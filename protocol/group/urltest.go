@@ -72,7 +72,9 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
 	}
-	if len(outbound.tags) == 0 {
+	// without outbounds the fallbacks are all there is (podkop-engine): a provider that took
+	// every server away leaves what the rule falls back on
+	if len(outbound.tags) == 0 && len(outbound.fallbackTags) == 0 {
 		return nil, E.New("missing tags")
 	}
 	for i, tag := range outbound.tags {
@@ -504,6 +506,11 @@ func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history
 			if !common.Contains(detour.Network(), network) {
 				continue
 			}
+			if detour.Type() == C.TypeBlock {
+				// a block fallback answers by refusing (podkop-engine): it is what the
+				// rule does when nothing before it answers, never tested
+				return detour, true
+			}
 			tag := RealTag(detour, network)
 			history := g.history.LoadURLTestHistory(tag)
 			if history == nil || (skip != nil && skip(tag, history)) {
@@ -678,7 +685,8 @@ func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval time.Duration, force bool) {
 	for _, detour := range outbounds {
 		tag := detour.Tag()
-		if b.checked[tag] {
+		if b.checked[tag] || detour.Type() == C.TypeBlock {
+			// a block fallback refuses every test: it answers by being chosen (selectAmong)
 			continue
 		}
 		switch nested := detour.(type) {

@@ -69,6 +69,10 @@ func serverOnlyDial(outbound adapter.Outbound) bool {
 // memberFailed judges a failed dial through member, begun at start, or a failed handshake
 // write (start is zero).
 func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound, network string, err error, start time.Time) {
+	if member.Type() == C.TypeBlock {
+		// refusing is what a block fallback is chosen for (podkop-engine)
+		return
+	}
 	if g.closed.Load() {
 		// a group that was replaced judges nothing (podkop-engine): another tests the members
 		// now, and its members may be let go of
@@ -371,8 +375,21 @@ func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag stri
 	return true
 }
 
-// testOutbound runs one URL test of detour, bounded by the TCP timeout.
+// probeSlots bound how many URL tests run at once in the whole process (podkop-engine):
+// every group runs its rounds at its own time, ten members at once, so a router with a few
+// groups of large subscriptions would open tens of connections at a time. Bursts of TLS
+// hellos are what operators' DPI freezes, and a small CPU lags under them.
+var probeSlots = make(chan struct{}, 4)
+
+// testOutbound runs one URL test of detour, bounded by the TCP timeout once one of
+// probeSlots is free: the wait for the slot does not take the time of the test.
 func testOutbound(ctx context.Context, link string, detour adapter.Outbound) (uint16, error) {
+	select {
+	case probeSlots <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	defer func() { <-probeSlots }()
 	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
 	defer cancel()
 	type result struct {

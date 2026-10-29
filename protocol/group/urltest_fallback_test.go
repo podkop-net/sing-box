@@ -342,7 +342,11 @@ func TestURLTestFallbackOptions(t *testing.T) {
 	require.Error(t, err)
 	_, err = newGroup([]string{"a"}, []string{"f", "f"})
 	require.Error(t, err)
-	_, err = newGroup(nil, []string{"f"})
+	// fallbacks alone make a group (podkop-engine r20); nothing at all does not
+	urlTest, err = newGroup(nil, []string{"f"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"f"}, urlTest.All())
+	_, err = newGroup(nil, nil)
 	require.Error(t, err)
 	// sing-box 1.14.4 refuses a tag listed twice in the outbounds too
 	_, err = newGroup([]string{"a", "a"}, nil)
