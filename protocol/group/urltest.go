@@ -319,8 +319,10 @@ type URLTestGroup struct {
 	history                      *urltest.HistoryStorage
 	checking                     atomic.Bool
 	recheck                      atomic.Bool
-	lastRound                    atomic.Int64 // when the last round began, since epoch
-	roundDone                    atomic.Bool  // a round has tested the members (see selectAmong)
+	lastRound                    atomic.Int64  // when the last round began, since epoch
+	roundDone                    atomic.Bool   // a round has tested the members (see selectAmong)
+	blockRetry                   time.Duration // the delay of the round retryBlock armed last; under updateAccess
+	blockRetryTimer              *time.Timer   // that round while it waits; under updateAccess
 	selectedOutboundTCP          common.TypedValue[adapter.Outbound]
 	selectedOutboundUDP          common.TypedValue[adapter.Outbound]
 	interruptGroup               *interrupt.Group
@@ -504,11 +506,12 @@ func (g *URLTestGroup) selectAmong(network string, skip func(tag string, history
 	}
 	if minOutbound == nil {
 		if !g.roundDone.Load() {
-			// before a round has tested them the outbounds have no results, which is no
+			// before a round has tested them the members have no results, which is no
 			// reason to fall back (podkop-engine): at a start or after a swap a block
 			// fallback would refuse every connection, a direct one send it past the proxy.
-			// The first of them, as without fallbacks.
-			for _, detour := range g.outbounds {
+			// The first member, as without fallbacks; in a group of fallbacks alone the
+			// first fallback, not a block further down.
+			for _, detour := range g.members {
 				if common.Contains(detour.Network(), network) {
 					return detour, false
 				}
@@ -639,7 +642,10 @@ func (g *URLTestGroup) urlTestMembers(ctx context.Context, members []adapter.Out
 		}
 	}()
 	result := urlTestOutbounds(ctx, g.outbound, g.history, g.logger, members, g.link, g.interval, force, wait, concurrency)
-	g.roundDone.Store(true)
+	if ctx.Err() == nil {
+		// a round cut short (a delay test of the Clash API that timed out) tested only some
+		g.roundDone.Store(true)
+	}
 	return result, nil
 }
 
@@ -826,5 +832,56 @@ func (g *URLTestGroup) updateSelection() {
 	if selected {
 		g.history.NotifyUpdated()
 	}
+	g.retryBlock()
 	g.closeUnanswered()
+}
+
+// blockRetryFirst is how soon a round follows a selection that left a block fallback chosen
+// (podkop-engine), twice as long each time it still does, at most an interval. Block is
+// never tested and the dials it refuses reach no member, so without these rounds the
+// servers would come back at the next periodic round only, minutes after the network that
+// failed them (an outage of the provider, a start before the WAN is up).
+var blockRetryFirst = 30 * time.Second
+
+// retryBlock arms that round while the TCP choice is a block fallback, and forgets the delay
+// once it is not. Called under updateAccess.
+func (g *URLTestGroup) retryBlock() {
+	current := g.selectedOutboundTCP.Load()
+	if current == nil || current.Type() != C.TypeBlock || !g.isFallback(current) {
+		g.blockRetry = 0
+		if g.blockRetryTimer != nil {
+			g.blockRetryTimer.Stop()
+			g.blockRetryTimer = nil
+		}
+		return
+	}
+	if g.blockRetryTimer != nil {
+		return
+	}
+	if g.blockRetry == 0 {
+		g.blockRetry = blockRetryFirst
+	} else {
+		g.blockRetry = min(2*g.blockRetry, g.interval)
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(g.blockRetry, func() {
+		g.updateAccess.Lock()
+		if g.blockRetryTimer == timer {
+			// a selection may have disarmed this timer and armed another while this waited
+			g.blockRetryTimer = nil
+		}
+		// an idle group is tested again when a dial comes (Touch), a paused network when it
+		// is back (watchPause); the retries then start over from the first delay
+		resting := g.closed.Load() || g.ctx.Err() != nil || g.networkPaused() || time.Since(g.lastActive.Load()) > g.idleTimeout
+		if resting {
+			g.blockRetry = 0
+		}
+		g.updateAccess.Unlock()
+		if !resting {
+			// not forced: the members without a result, the ones block stands for, are
+			// tested anyway, and a round in progress selects at its end
+			g.CheckOutbounds(g.ctx, false)
+		}
+	})
+	g.blockRetryTimer = timer
 }

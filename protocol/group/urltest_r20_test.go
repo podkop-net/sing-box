@@ -120,3 +120,104 @@ func TestNoFallbackBeforeARound(t *testing.T) {
 	require.Equal(t, "block", selected.Tag(), "tested and not answering: the fallback")
 	require.True(t, found)
 }
+
+// Before a round a group of fallbacks alone takes its first fallback, not a block further
+// down: a rule whose servers are gone and whose fallbacks are direct, then block.
+func TestFallbacksOnlyBeforeARound(t *testing.T) {
+	t.Parallel()
+	history := urltest.NewHistoryStorage()
+	ctx := service.ContextWithPtr(context.Background(), history)
+	direct, block := newTestMember(C.TypeDirect, "direct", dialRefused), newTestMember(C.TypeBlock, "block", dialRefused)
+	manager := &testOutboundManager{members: map[string]adapter.Outbound{"direct": direct, "block": block}}
+	group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), nil, members(direct, block), "", "", time.Minute, 50, 0, false)
+	require.NoError(t, err)
+	for _, network := range []string{N.NetworkTCP, N.NetworkUDP} {
+		selected, found := group.Select(network)
+		require.Equal(t, "direct", selected.Tag(), network)
+		require.False(t, found)
+	}
+	group.roundDone.Store(true)
+	selected, found := group.Select(N.NetworkTCP)
+	require.Equal(t, "block", selected.Tag(), "tested, direct did not answer: block")
+	require.True(t, found)
+}
+
+// The first round of a group that took over, when every member has a result already, tests
+// nothing and still counts as a round: a member that fails after it gives way to a fallback.
+func TestTakeOverWithResultsIsARound(t *testing.T) {
+	t.Parallel()
+	a, f := newTestMember(C.TypeSOCKS, "a", dialRefused), newTestMember(C.TypeSOCKS, "f", dialRefused)
+	_, group := newTestFallbackGroup(t, "", "", members(a), members(f), map[string]uint16{"a": 100, "f": 200})
+	group.roundDone.Store(false)
+	group.checkUntested()
+	require.True(t, group.roundDone.Load())
+	require.Zero(t, a.dials.Load()+f.dials.Load(), "nothing to test")
+	setResult(group, "a", 0)
+	group.performUpdateCheck()
+	tcp, _ := selectedTags(group)
+	require.Equal(t, "f", tcp)
+}
+
+// A block fallback is taken without a download test: it downloads nothing.
+func TestBlockFallbackWithoutDownloadTest(t *testing.T) {
+	t.Parallel()
+	a, block := newTestMember(C.TypeSOCKS, "a", dialRefused), newTestMember(C.TypeBlock, "block", dialRefused)
+	_, group := newTestFallbackGroup(t, "", "http://www.example.com/64k", members(a), members(block), nil)
+	tcp, _ := selectedTags(group)
+	require.Equal(t, "block", tcp)
+	require.Zero(t, block.dials.Load())
+}
+
+// While a block fallback is the choice, rounds come sooner than the interval, so the servers
+// come back soon after the network that failed them. Not parallel: blockRetryFirst is the
+// package's.
+func TestBlockFallbackRetried(t *testing.T) {
+	first := blockRetryFirst
+	blockRetryFirst = 50 * time.Millisecond
+	t.Cleanup(func() { blockRetryFirst = first })
+	link, _ := testURL(t, 0)
+	var up atomic.Bool
+	a := newTestMember(C.TypeSOCKS, "a", func(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+		if !up.Load() {
+			return nil, errors.New("down")
+		}
+		return dialWorking(ctx, network, destination)
+	})
+	block := newTestMember(C.TypeBlock, "block", dialRefused)
+	ctx := service.ContextWithPtr(context.Background(), urltest.NewHistoryStorage())
+	manager := &testOutboundManager{members: map[string]adapter.Outbound{"a": a, "block": block}}
+	group, err := NewURLTestGroup(ctx, manager, log.NewNOPFactory().Logger(), members(a), members(block), link, "", 10*time.Minute, 50, 0, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = group.Close() })
+	group.lastActive.Store(time.Now())
+	group.CheckOutbounds(ctx, true)
+	tcp, _ := selectedTags(group)
+	require.Equal(t, "block", tcp)
+	require.Eventually(t, func() bool { return a.dials.Load() >= 3 }, 5*time.Second, 10*time.Millisecond, "rounds while block is chosen")
+	up.Store(true)
+	require.Eventually(t, func() bool {
+		tcp, _ := selectedTags(group)
+		return tcp == "a"
+	}, 5*time.Second, 10*time.Millisecond)
+	group.updateAccess.Lock()
+	armed := group.blockRetryTimer != nil
+	group.updateAccess.Unlock()
+	require.False(t, armed, "no more rounds once a server answers")
+}
+
+// A confirming test of a failing member does not wait for probeSlots: behind the rounds it
+// would keep the group on a dead member. Not parallel: the slots are those of the process.
+func TestConfirmPastProbeSlots(t *testing.T) {
+	for range cap(probeSlots) {
+		probeSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cap(probeSlots) {
+			<-probeSlots
+		}
+	})
+	a, f := newTestMember(C.TypeSOCKS, "a", dialRefused), newTestMember(C.TypeSOCKS, "f", dialRefused)
+	_, group := newTestFallbackGroup(t, "http://www.example.com/generate_204", "", members(a), members(f), map[string]uint16{"a": 100, "f": 200})
+	require.True(t, group.confirmFailure("a", a))
+	require.Eventually(t, func() bool { return a.dials.Load() > 0 }, 5*time.Second, 10*time.Millisecond)
+}

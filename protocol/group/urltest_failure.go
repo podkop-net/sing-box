@@ -345,7 +345,9 @@ func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag stri
 	g.confirmAccess.Unlock()
 	go func() {
 		start := time.Now()
-		_, err := testOutbound(g.ctx, g.link, member)
+		// past probeSlots: one test of a member whose connections fail, paced as above, is
+		// no burst, and behind the rounds it would keep the group on a dead member
+		_, err := probeOutbound(g.ctx, g.link, member)
 		now := time.Now()
 		g.confirmAccess.Lock()
 		state.running = false
@@ -381,8 +383,8 @@ func (g *URLTestGroup) confirmWith(confirms *map[string]*memberConfirm, tag stri
 // hellos are what operators' DPI freezes, and a small CPU lags under them.
 var probeSlots = make(chan struct{}, 4)
 
-// testOutbound runs one URL test of detour, bounded by the TCP timeout once one of
-// probeSlots is free: the wait for the slot does not take the time of the test.
+// testOutbound runs one URL test of detour (probeOutbound) once one of probeSlots is free:
+// the wait for the slot does not take the time of the test.
 func testOutbound(ctx context.Context, link string, detour adapter.Outbound) (uint16, error) {
 	select {
 	case probeSlots <- struct{}{}:
@@ -390,6 +392,11 @@ func testOutbound(ctx context.Context, link string, detour adapter.Outbound) (ui
 		return 0, ctx.Err()
 	}
 	defer func() { <-probeSlots }()
+	return probeOutbound(ctx, link, detour)
+}
+
+// probeOutbound runs one URL test of detour, bounded by the TCP timeout.
+func probeOutbound(ctx context.Context, link string, detour adapter.Outbound) (uint16, error) {
 	ctx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
 	defer cancel()
 	type result struct {

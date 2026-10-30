@@ -85,6 +85,10 @@ func (g *URLTestGroup) selectTested() (adapter.Outbound, bool) {
 		if candidate == nil || !exists {
 			break
 		}
+		if candidate.Type() == C.TypeBlock {
+			// a block fallback downloads nothing: it refuses (podkop-engine)
+			return candidate, true
+		}
 		tag := RealTag(candidate, N.NetworkTCP)
 		if candidate == current {
 			if _, wasFrozen := g.frozen.Load()[tag]; !wasFrozen {

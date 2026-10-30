@@ -116,6 +116,9 @@ func (g *URLTestGroup) checkUntested() {
 	}
 	if len(untested) > 0 {
 		_, _ = g.urlTestMembers(g.ctx, untested, hotRoundConcurrency, true, true)
+	} else {
+		// every member has a result already: as good as a round (selectAmong falls back)
+		g.roundDone.Store(true)
 	}
 	g.performUpdateCheck()
 }
