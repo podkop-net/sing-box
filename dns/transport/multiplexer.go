@@ -155,7 +155,22 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
 		go m.exchangeSingle(ctx, message, callback)
 		return
 	}
+	if m.options.probeReuse && m.inflight() >= pipelineMaxInflight {
+		go m.exchangeSingle(ctx, message, callback)
+		return
+	}
 	m.exchangeAsync(ctx, message, callback, retryReadError)
+}
+
+// Some servers reset a TCP/TLS connection that carries too many queries at once:
+// Yandex DNS over TLS does with more than about 20. Queries beyond this limit on the
+// shared connection get a connection of their own instead.
+const pipelineMaxInflight = 16
+
+func (m *queryMultiplexer) inflight() int {
+	m.queryAccess.Lock()
+	defer m.queryAccess.Unlock()
+	return len(m.queries)
 }
 
 func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {

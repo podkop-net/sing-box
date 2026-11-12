@@ -53,6 +53,10 @@ type HTTPSTransport struct {
 	transportAccess  sync.Mutex
 	transport        *HTTPSTransportWrapper
 	transportResetAt time.Time
+	// answeredStartAt is the latest start among the answered exchanges, in nanoseconds since
+	// createdAt: time.Sub reads the monotonic clock, which a clock set back does not move
+	answeredStartAt atomic.Int64
+	createdAt       time.Time
 }
 
 func NewHTTPS(ctx context.Context, logger log.ContextLogger, tag string, options option.RemoteHTTPSDNSServerOptions) (adapter.DNSTransport, error) {
@@ -134,6 +138,7 @@ func NewHTTPSRaw(
 	}
 	transport := &HTTPSTransport{
 		TransportAdapter: adapter,
+		createdAt:        time.Now(),
 		logger:           logger,
 		dialer:           dialer,
 		destination:      destination,
@@ -186,11 +191,31 @@ func (t *HTTPSTransport) resetTransportLocked() {
 func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	startAt := time.Now()
 	response, err := t.exchange(ctx, message)
+	if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && ctx.Err() == nil {
+		// The server closed its HTTP/2 connection without a GOAWAY while this query was
+		// on it, as Quad9 does to busy connections too: x/net fails every query in
+		// flight there and asks none of them again. A DNS query may be asked again; the
+		// connection is gone, so this goes over a new one. Once: a server that closes the
+		// new connection as well is failing.
+		if t.logger != nil {
+			t.logger.DebugContext(ctx, "connection closed without a GOAWAY, query asked again")
+		}
+		// what follows compares this query with the others on its connection by when
+		// they began, and its connection is now the new one
+		startAt = time.Now()
+		response, err = t.exchange(ctx, message)
+	}
 	if !t.keepIdle.Load() {
 		t.CloseIdleConnections()
 	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
+			// A query that began after this one was answered: the connection is alive
+			// and the timeout is about this query alone (a slow upstream for one name).
+			// A reset would close the connection with every query in flight on it.
+			if t.answeredStartAt.Load() > t.sinceCreated(startAt) {
+				return nil, err
+			}
 			t.transportAccess.Lock()
 			defer t.transportAccess.Unlock()
 			if t.transportResetAt.After(startAt) {
@@ -200,7 +225,19 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		}
 		return nil, err
 	}
+	for started := t.sinceCreated(startAt); ; {
+		latest := t.answeredStartAt.Load()
+		if started <= latest || t.answeredStartAt.CompareAndSwap(latest, started) {
+			break
+		}
+	}
 	return response, nil
+}
+
+// sinceCreated is a time of this transport as nanoseconds since it was made, by the
+// monotonic clock.
+func (t *HTTPSTransport) sinceCreated(at time.Time) int64 {
+	return int64(at.Sub(t.createdAt))
 }
 
 func (t *HTTPSTransport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
