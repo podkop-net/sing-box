@@ -194,6 +194,20 @@ func resolveOutbound(outbound adapter.Outbound, network string) ([]adapter.Outbo
 	return chain, nil
 }
 
+// dialTarget is the outbound of a chain a routed connection is dialed through: the first URL
+// test group of the chain, else the last outbound. The URL test of podkop-engine judges the
+// dials of its members itself (a member that fails or does not answer is tested out of turn and
+// left at once, a fallback taken, a member whose test is pending not used): a dial of the member
+// past the group, as sing-box 1.14.4 makes it, would leave all of that out.
+func dialTarget(chain []adapter.Outbound) adapter.Outbound {
+	for _, outbound := range chain {
+		if _, isURLTestGroup := outbound.(adapter.URLTestGroup); isURLTestGroup {
+			return outbound
+		}
+	}
+	return chain[len(chain)-1]
+}
+
 func registerInterrupt(chain []adapter.Outbound, closer io.Closer, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
 	var removers []func()
 	for _, outbound := range chain {
