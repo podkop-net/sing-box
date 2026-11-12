@@ -15,7 +15,10 @@ import (
 func tcpEndpoints(conn net.Conn) (*net.TCPConn, netip.AddrPort, netip.AddrPort, error) {
 	tcpConn, isTCP := common.Cast[*net.TCPConn](conn)
 	if !isTCP {
-		return nil, netip.AddrPort{}, netip.AddrPort{}, E.New("tls_spoof: underlying conn is not *net.TCPConn")
+		// not one of its own to the server (a transport that carries several streams
+		// over one connection), or not made yet (tcp_fast_open sends its first data
+		// with the connection attempt) (podkop-engine)
+		return nil, netip.AddrPort{}, netip.AddrPort{}, E.New("tls_spoof: no established TCP connection of its own under this one (it does not work with tcp_fast_open, nor over a multiplexed transport)")
 	}
 	local := M.AddrPortFromNet(tcpConn.LocalAddr())
 	remote := M.AddrPortFromNet(tcpConn.RemoteAddr())
