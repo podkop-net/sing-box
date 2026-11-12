@@ -20,6 +20,7 @@ import (
 	"github.com/sagernet/sing-box/experimental/locale"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/group"
+	"github.com/sagernet/sing-box/protocol/group/urltestgroup"
 	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/memory"
@@ -728,7 +729,7 @@ func (s *StartedService) URLTest(ctx context.Context, request *URLTestRequest) (
 		return nil, status.Error(codes.NotFound, "outbound not found: "+outboundTag)
 	}
 	historyStorage := boxService.urlTestHistoryStorage
-	urlTest, isURLTest := outbound.(*group.URLTest)
+	urlTest, isURLTest := outbound.(*urltestgroup.URLTest)
 	outboundGroup, isOutboundGroup := outbound.(adapter.OutboundGroup)
 	if isURLTest {
 		go urlTest.CheckOutbounds()
