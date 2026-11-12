@@ -30,14 +30,14 @@ func (f *scopedCacheFile) Close() error {
 }
 
 // startWithCacheFile starts a store on a real cache file, as sing-box does.
-func startWithCacheFile(t *testing.T, path string) (*Store, *scopedCacheFile) {
+func startWithCacheFile(t *testing.T, path string) (*TableStore, *scopedCacheFile) {
 	t.Helper()
 	ctx := service.ContextWithDefaultRegistry(context.Background())
 	cacheFile := cachefile.New(ctx, logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
 	scope := adapter.NewScope(ctx, logger.NOP())
 	require.NoError(t, cacheFile.Start(adapter.StartStateInitialize, scope))
 	service.MustRegister[adapter.CacheFile](ctx, cacheFile)
-	store := NewStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store := NewTableStore(ctx, logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
 	store.manual = true
 	require.NoError(t, store.Start())
 	require.NotNil(t, store.storage, "the cache file keeps the table")
@@ -45,7 +45,7 @@ func startWithCacheFile(t *testing.T, path string) (*Store, *scopedCacheFile) {
 }
 
 // killed copies the cache file as a killed process leaves it: no write is under way.
-func killed(t *testing.T, store *Store, path string) string {
+func killed(t *testing.T, store *TableStore, path string) string {
 	t.Helper()
 	store.saveAccess.Lock()
 	defer store.saveAccess.Unlock()

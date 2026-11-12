@@ -139,14 +139,14 @@ const (
 )
 
 // newTestStore returns a started store whose clock, sweeps and saves the test drives.
-func newTestStore(t *testing.T, storage *fakeStorage, inet4Range string, inet6Range string) *Store {
+func newTestStore(t *testing.T, storage *fakeStorage, inet4Range string, inet6Range string) *TableStore {
 	t.Helper()
 	store, err := startTestStore(storage, inet4Range, inet6Range)
 	require.NoError(t, err)
 	return store
 }
 
-func startTestStore(storage *fakeStorage, inet4Range string, inet6Range string) (*Store, error) {
+func startTestStore(storage *fakeStorage, inet4Range string, inet6Range string) (*TableStore, error) {
 	var prefix4, prefix6 netip.Prefix
 	if inet4Range != "" {
 		prefix4 = netip.MustParsePrefix(inet4Range)
@@ -154,7 +154,7 @@ func startTestStore(storage *fakeStorage, inet4Range string, inet6Range string) 
 	if inet6Range != "" {
 		prefix6 = netip.MustParsePrefix(inet6Range)
 	}
-	store := NewStore(context.Background(), logger.NOP(), prefix4, prefix6)
+	store := NewTableStore(context.Background(), logger.NOP(), prefix4, prefix6)
 	store.manual = true
 	store.idleTicks = testIdle
 	store.protectTicks = testProtect
@@ -166,25 +166,25 @@ func startTestStore(storage *fakeStorage, inet4Range string, inet6Range string) 
 	return store, store.Start()
 }
 
-func (s *Store) advance(ticks uint32) {
+func (s *TableStore) advance(ticks uint32) {
 	s.tick.Add(ticks)
 }
 
 // domainAt reads a record without using it.
-func (s *Store) domainAt(address netip.Addr) string {
+func (s *TableStore) domainAt(address netip.Addr) string {
 	if r := s.recordAt(address); r != nil {
 		return r.domain
 	}
 	return ""
 }
 
-func (s *Store) recordAt(address netip.Addr) *record {
+func (s *TableStore) recordAt(address netip.Addr) *record {
 	p := s.poolOf(address)
 	offset, _ := p.offset(address)
 	return p.byOffset[offset]
 }
 
-func mustCreate(t *testing.T, store *Store, domain string) netip.Addr {
+func mustCreate(t *testing.T, store *TableStore, domain string) netip.Addr {
 	t.Helper()
 	address, err := store.Create(domain, false)
 	require.NoError(t, err)
@@ -982,7 +982,7 @@ func TestSecondRangeAddedAfterKill(t *testing.T) {
 func TestBackgroundSave(t *testing.T) {
 	t.Parallel()
 	storage := newFakeStorage()
-	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store := NewTableStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
 	store.testStorage = storage
 	store.saveRetry = 20 * time.Millisecond
 	require.NoError(t, store.Start())
@@ -1016,7 +1016,7 @@ func TestBackgroundSave(t *testing.T) {
 func TestNewNamesWhileTheLoopCannotSave(t *testing.T) {
 	t.Parallel()
 	storage := newFakeStorage()
-	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store := NewTableStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
 	store.testStorage = storage
 	store.saveRetry = 20 * time.Millisecond
 	require.NoError(t, store.Start())
@@ -1040,7 +1040,7 @@ func TestNewNamesWhileTheLoopCannotSave(t *testing.T) {
 func TestCloseStopsTheLoopBeforeSavesAreRefused(t *testing.T) {
 	t.Parallel()
 	for range 300 {
-		store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+		store := NewTableStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
 		store.testStorage = newFakeStorage()
 		require.NoError(t, store.Start())
 		refusedWhileRunning := make(chan bool)
@@ -1098,7 +1098,7 @@ func runClientModel(t *testing.T, prefix string, domains int, seed uint64) {
 	storage := newFakeStorage()
 	held := make(map[netip.Addr]string)  // what clients hold
 	saved := make(map[netip.Addr]string) // the part of it that reached the storage
-	var store *Store
+	var store *TableStore
 	start := func() {
 		var err error
 		store, err = startTestStore(storage, prefix, "")
@@ -1209,7 +1209,7 @@ func runClientModel(t *testing.T, prefix string, domains int, seed uint64) {
 			// a crash
 			if store.storageFailed {
 				// while the storage could not be written: the addresses that did not reach
-				// it are not covered, see Store
+				// it are not covered, see TableStore
 				for address := range held {
 					if saved[address] == "" {
 						delete(held, address)
@@ -1233,7 +1233,7 @@ func TestConcurrentUse(t *testing.T) {
 	t.Parallel()
 	storage := newFakeStorage()
 	// 1021 addresses for 3000 names: the range fills up and makes room all the time
-	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/22"), netip.Prefix{})
+	store := NewTableStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/22"), netip.Prefix{})
 	store.testStorage = storage
 	require.NoError(t, store.Start())
 	var group sync.WaitGroup
@@ -1272,7 +1272,7 @@ func TestConcurrentUse(t *testing.T) {
 
 func BenchmarkStore(b *testing.B) {
 	// the real clock, as in sing-box
-	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
+	store := NewTableStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/15"), netip.Prefix{})
 	err := store.Start()
 	if err != nil {
 		b.Fatal(err)

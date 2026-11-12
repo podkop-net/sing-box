@@ -17,7 +17,7 @@ import (
 func TestSmallRangeKeepsNameInUseRealClock(t *testing.T) {
 	t.Parallel()
 	for _, storage := range []*fakeStorage{nil, newFakeStorage()} {
-		store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/27"), netip.Prefix{})
+		store := NewTableStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/27"), netip.Prefix{})
 		if storage != nil {
 			store.testStorage = storage
 		}
