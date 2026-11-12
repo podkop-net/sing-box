@@ -21,6 +21,20 @@ type HTTPClientManager interface {
 	ResetNetwork()
 }
 
+// HTTPClientFallbacks is an HTTPClientManager that resolves the fallback clients of a client
+// (option.HTTPClientOptions.Fallback): those a caller that saw a request fail through the client
+// may repeat it through, in their order. The options are those the caller resolved its transport
+// from; nil stands for the default client.
+type HTTPClientFallbacks interface {
+	ResolveFallbacks(options *option.HTTPClientOptions) ([]HTTPFallback, error)
+}
+
+// HTTPFallback is a fallback client: its tag and its shared transport.
+type HTTPFallback struct {
+	Tag       string
+	Transport HTTPTransport
+}
+
 type HTTPStartContext struct {
 	access     sync.Mutex
 	transports []HTTPTransport

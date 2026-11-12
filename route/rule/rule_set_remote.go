@@ -52,6 +52,9 @@ type RemoteRuleSet struct {
 	options        option.RuleSet
 	updateInterval time.Duration
 	httpClient     *http.Client
+	// the clients a fetch that failed through httpClient is repeated through, in order
+	// (option.HTTPClientOptions.Fallback)
+	fallbacks      []ruleSetFallback
 	access         sync.RWMutex
 	rules          []adapter.HeadlessRule
 	metadata       adapter.RuleSetMetadata
@@ -132,6 +135,14 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	}
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
+	fallbacks, err := s.resolveFallbacks()
+	if err != nil {
+		return E.Cause(err, "create rule-set http client")
+	}
+	for _, fallback := range fallbacks {
+		startContext.Register(fallback.Transport)
+		s.fallbacks = append(s.fallbacks, ruleSetFallback{tag: fallback.Tag, client: &http.Client{Transport: fallback.Transport}})
+	}
 	s.loadCached()
 	var loadedFromInitialPath bool
 	if s.lastUpdated.IsZero() && s.initialPath != "" {
@@ -520,18 +531,43 @@ func describeRuleSetBody(response *http.Response, size int64, sample []byte) str
 	return description.String()
 }
 
+// fetch downloads the list through the http client of the rule-set and, while that fails, through
+// each of its fallback clients in turn. Each way has the whole stall timeout of its own; the start
+// deadline bounds them all. The error is that of every way.
 func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
+	if isStart {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(ctx, ruleSetStartDeadline)
+		defer stop()
+	}
+	err := s.fetchThrough(ctx, s.httpClient, isStart)
+	if err == nil || len(s.fallbacks) == 0 {
+		return err
+	}
+	errs := []error{err}
+	for _, fallback := range s.fallbacks {
+		if s.ctx.Err() != nil || ctx.Err() != nil {
+			break
+		}
+		s.logger.Info("update rule-set ", s.tag, " through http_client[", fallback.tag, "]: ", logText(err))
+		err = s.fetchThrough(ctx, fallback.client, isStart)
+		if err == nil {
+			return nil
+		}
+		err = E.Cause(err, "http_client[", fallback.tag, "]")
+		errs = append(errs, err)
+	}
+	return E.Errors(errs...)
+}
+
+// fetchThrough downloads the list through client.
+func (s *RemoteRuleSet) fetchThrough(ctx context.Context, client *http.Client, isStart bool) error {
 	s.logger.Debug("updating rule-set ", s.tag, " from URL: ", s.url)
 	// a group that switches members closes the connections it does not know as routed
 	// ones: a list half downloaded through it would wait for the next update_interval
 	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if isStart {
-		var stop context.CancelFunc
-		ctx, stop = context.WithTimeout(ctx, ruleSetStartDeadline)
-		defer stop()
-	}
 	// Fire the stall timer if the request produces nothing (no response headers, then no body
 	// bytes) for the stall timeout; each read that carries data resets it below.
 	var stalled atomic.Bool
@@ -558,14 +594,14 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 		request.Header.Set("If-None-Match", s.lastEtag)
 	}
 	if !isStart {
-		defer s.httpClient.CloseIdleConnections()
+		defer client.CloseIdleConnections()
 	}
-	response, err := s.httpClient.Do(request.WithContext(ctx))
+	response, err := client.Do(request.WithContext(ctx))
 	if err != nil {
 		if isStart {
 			// the start fetches share pooled connections: one that stalled would carry the
 			// next batch of rule-sets into the same wait
-			s.httpClient.Transport.(adapter.HTTPTransport).Reset()
+			client.Transport.(adapter.HTTPTransport).Reset()
 		}
 		return describe(err)
 	}
