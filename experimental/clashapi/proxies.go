@@ -12,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/protocol/group"
+	"github.com/sagernet/sing-box/protocol/group/urltestgroup"
 	"github.com/sagernet/sing/common"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/json/badjson"
@@ -79,7 +80,7 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 	if loss := lossInfo(server.urlTestHistory, group.RealTag(detour, N.NetworkTCP)); loss != nil {
 		info.Put("loss", loss)
 	}
-	if urlTest, isURLTest := detour.(*group.URLTest); isURLTest {
+	if urlTest, isURLTest := detour.(*urltestgroup.URLTest); isURLTest {
 		if mode := urlTest.Mode(); mode != "fastest" {
 			info.Put("mode", mode)
 		}

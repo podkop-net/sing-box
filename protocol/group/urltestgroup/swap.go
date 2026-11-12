@@ -1,6 +1,7 @@
-package group
+package urltestgroup
 
 import (
+	"github.com/sagernet/sing-box/protocol/group"
 	"net"
 	"sync"
 	"time"
@@ -100,19 +101,13 @@ func (s *URLTest) MembersInUse() []adapter.Outbound {
 	return members
 }
 
-// ReleaseMembers lets go of the members but the chosen one, a while after another selector
-// took the tag: nothing asks this one for a member by its tag any more.
-func (s *Selector) ReleaseMembers() {
-	s.outbounds = make(map[string]adapter.Outbound)
-}
-
 // checkUntested is the first round of a group that took over (TakeOver): only the members
 // without a test result are tested, hotRoundConcurrency at a time; the others were tested by
 // the group before, which shares the history.
 func (g *URLTestGroup) checkUntested() {
 	var untested []adapter.Outbound
 	for _, member := range g.members {
-		if g.history.LoadURLTestHistory(RealTag(member, N.NetworkTCP)) == nil {
+		if g.history.LoadURLTestHistory(group.RealTag(member, N.NetworkTCP)) == nil {
 			untested = append(untested, member)
 		}
 	}

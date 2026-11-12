@@ -1,8 +1,9 @@
-package group
+package urltestgroup
 
 import (
 	"context"
 	"errors"
+	"github.com/sagernet/sing-box/protocol/group"
 	"maps"
 	"net/url"
 	"os"
@@ -94,7 +95,7 @@ func (g *URLTestGroup) selectTested() (adapter.Outbound, bool) {
 			// a block fallback downloads nothing: it refuses (podkop-engine)
 			return candidate, true
 		}
-		tag := RealTag(candidate, N.NetworkTCP)
+		tag := group.RealTag(candidate, N.NetworkTCP)
 		if candidate == current {
 			if _, wasFrozen := g.frozen.Load()[tag]; !wasFrozen {
 				break
@@ -124,7 +125,7 @@ func (g *URLTestGroup) selectTested() (adapter.Outbound, bool) {
 		}
 		return candidate, true
 	}
-	if current != nil && g.history.LoadURLTestHistory(RealTag(current, N.NetworkTCP)) != nil {
+	if current != nil && g.history.LoadURLTestHistory(group.RealTag(current, N.NetworkTCP)) != nil {
 		return current, true
 	}
 	return g.Select(N.NetworkTCP)
@@ -134,7 +135,7 @@ func (g *URLTestGroup) selectTested() (adapter.Outbound, bool) {
 // download check may keep the next selection waiting (one download test per candidate):
 // connections then go by the plain choice instead of a member known to be down.
 func (g *URLTestGroup) selectionPending(selected adapter.Outbound) bool {
-	return g.selectionMayWait() && g.history.LoadURLTestHistory(RealTag(selected, N.NetworkTCP)) == nil
+	return g.selectionMayWait() && g.history.LoadURLTestHistory(group.RealTag(selected, N.NetworkTCP)) == nil
 }
 
 // selectionMayWait tells whether a selection may wait for a test of a candidate: the download

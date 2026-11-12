@@ -1,4 +1,4 @@
-package group
+package urltestgroup
 
 import (
 	"context"

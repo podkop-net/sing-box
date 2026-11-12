@@ -21,6 +21,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
+	"github.com/sagernet/sing-box/protocol/group/urltestgroup"
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/redirect"
@@ -56,7 +57,7 @@ func OutboundRegistry() *outbound.Registry {
 	registerNonPodkopOutbounds(registry)
 
 	group.RegisterSelector(registry)
-	group.RegisterURLTest(registry)
+	urltestgroup.RegisterURLTest(registry)
 
 	socks.RegisterOutbound(registry)
 	shadowsocks.RegisterOutbound(registry)

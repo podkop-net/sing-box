@@ -1,8 +1,9 @@
-package group
+package urltestgroup
 
 import (
 	"context"
 	"errors"
+	"github.com/sagernet/sing-box/protocol/group"
 	"io"
 	"net"
 	"os"
@@ -94,7 +95,7 @@ func (g *URLTestGroup) memberFailed(ctx context.Context, member adapter.Outbound
 	if ctx.Err() != nil || !timeout && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, context.Canceled)) {
 		return
 	}
-	tag := RealTag(member, network)
+	tag := group.RealTag(member, network)
 	if localNetworkError(err) {
 		g.afterLocalFailure(tag, func() {
 			g.judgeFailure(tag, member, network, err, start)
@@ -182,7 +183,7 @@ func (g *URLTestGroup) networkPaused() bool {
 	}
 	reported := g.epoch.Add(time.Duration(g.networkPauseAt.Load()))
 	for _, member := range g.members {
-		history := g.history.LoadURLTestHistory(RealTag(member, N.NetworkTCP))
+		history := g.history.LoadURLTestHistory(group.RealTag(member, N.NetworkTCP))
 		if history != nil && history.Time.After(reported) {
 			return false
 		}
@@ -236,7 +237,7 @@ func (g *URLTestGroup) probeUnseenNetwork() {
 		return
 	}
 	for _, member := range g.members {
-		if g.history.LoadURLTestHistory(RealTag(member, N.NetworkTCP)) != nil {
+		if g.history.LoadURLTestHistory(group.RealTag(member, N.NetworkTCP)) != nil {
 			return
 		}
 	}
@@ -260,7 +261,7 @@ func (g *URLTestGroup) networkChangedSince(t time.Time) bool {
 
 // memberSucceeded records a successful TCP dial through member.
 func (g *URLTestGroup) memberSucceeded(member adapter.Outbound) {
-	tag := RealTag(member, N.NetworkTCP)
+	tag := group.RealTag(member, N.NetworkTCP)
 	value, loaded := g.successes.Load(tag)
 	if !loaded {
 		value, _ = g.successes.LoadOrStore(tag, new(atomic.Int64))

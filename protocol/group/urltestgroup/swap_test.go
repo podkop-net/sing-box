@@ -1,4 +1,4 @@
-package group
+package urltestgroup
 
 import (
 	"context"
@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/protocol/group"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
@@ -67,7 +67,7 @@ func TestURLTestTakeOver(t *testing.T) {
 
 	// a group of another type, or one not started, is no source
 	other := newSwapGroup(t, urltest.NewHistoryStorage(), link, c)
-	other.TakeOver(&Selector{})
+	other.TakeOver(&group.Selector{})
 	require.Nil(t, other.group.selectedOutboundTCP.Load())
 	require.False(t, other.group.hotStart)
 }
@@ -196,8 +196,7 @@ func TestURLTestMembersInUse(t *testing.T) {
 	require.Equal(t, "a", group.group.selectedOutboundTCP.Load().Tag(), "the chain names a")
 }
 
-// A group that was replaced lets go of its members but those it chose; a selector of all but
-// the one it chose.
+// A group that was replaced lets go of its members but those it chose.
 func TestReleaseMembers(t *testing.T) {
 	link, _ := testURL(t, 0)
 	history := urltest.NewHistoryStorage()
@@ -212,11 +211,4 @@ func TestReleaseMembers(t *testing.T) {
 	require.Nil(t, group.group.outbounds)
 	require.Same(t, adapter.Outbound(a), group.group.selectedOutboundTCP.Load())
 	require.Same(t, adapter.Outbound(a), group.Selected(N.NetworkTCP))
-
-	selector := &Selector{outbounds: map[string]adapter.Outbound{"a": a, "b": b}, tags: []string{"a", "b"}, interruptGroup: interrupt.NewGroup()}
-	selector.selected.Store(a)
-	selector.ReleaseMembers()
-	require.Empty(t, selector.outbounds)
-	require.False(t, selector.SelectOutbound("b"))
-	require.Same(t, adapter.Outbound(a), selector.Selected(N.NetworkTCP))
 }

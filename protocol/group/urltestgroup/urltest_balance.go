@@ -1,7 +1,8 @@
-package group
+package urltestgroup
 
 import (
 	"context"
+	"github.com/sagernet/sing-box/protocol/group"
 	"hash/fnv"
 	"slices"
 	"strings"
@@ -67,7 +68,7 @@ func (g *URLTestGroup) balanceMembers(network string, view lossView, skip map[st
 	var members []adapter.Outbound
 	best := -1
 	for i, member := range ranked {
-		tag := RealTag(member, network)
+		tag := group.RealTag(member, network)
 		if skip[tag] {
 			continue
 		}
@@ -107,7 +108,7 @@ func (g *URLTestGroup) updateBalance() {
 		tcp = g.balanceMembers(N.NetworkTCP, view, failed)
 		again := false
 		for _, member := range tcp {
-			tag := RealTag(member, N.NetworkTCP)
+			tag := group.RealTag(member, N.NetworkTCP)
 			if g.downloadLink == "" || member.Type() == C.TypeBlock || slices.Contains(previous, member) || tested[tag] {
 				continue
 			}

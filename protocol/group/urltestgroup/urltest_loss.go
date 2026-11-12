@@ -1,8 +1,9 @@
-package group
+package urltestgroup
 
 import (
 	"context"
 	"errors"
+	"github.com/sagernet/sing-box/protocol/group"
 	"slices"
 	"time"
 
@@ -141,7 +142,7 @@ func (g *URLTestGroup) lossView() lossView {
 	view := make(lossView)
 	floor, counted := 0.0, 0
 	for _, member := range g.outbounds {
-		tag := RealTag(member, N.NetworkTCP)
+		tag := group.RealTag(member, N.NetworkTCP)
 		window, known := g.history.LossOfWindow(tag, now, lossMinSegments)
 		if !known {
 			continue
@@ -180,7 +181,7 @@ func (v lossView) delay(tag string, history *adapter.URLTestHistory) uint16 {
 // memberAlive tells whether a member may carry connections: it has a test result and has
 // not failed the download test since.
 func (g *URLTestGroup) memberAlive(member adapter.Outbound) bool {
-	tag := RealTag(member, N.NetworkTCP)
+	tag := group.RealTag(member, N.NetworkTCP)
 	history := g.history.LoadURLTestHistory(tag)
 	if history == nil {
 		return false
@@ -201,7 +202,7 @@ func (g *URLTestGroup) rankedOutbounds(network string, view lossView) ([]adapter
 		if !slices.Contains(member.Network(), network) || !g.memberAlive(member) {
 			continue
 		}
-		tag := RealTag(member, network)
+		tag := group.RealTag(member, network)
 		history := g.history.LoadURLTestHistory(tag)
 		if history == nil {
 			continue
@@ -378,7 +379,7 @@ func (g *URLTestGroup) lossRound() {
 			if g.ctx.Err() != nil || g.networkPaused() {
 				return
 			}
-			tag := RealTag(member, N.NetworkTCP)
+			tag := group.RealTag(member, N.NetworkTCP)
 			if !g.lossDue(tag) {
 				continue
 			}
