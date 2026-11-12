@@ -14,7 +14,6 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
-	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service/filemanager"
@@ -32,6 +31,7 @@ type LocalRuleSet struct {
 	fileFormat string
 	watcher    *fswatch.Watcher
 	access     sync.Mutex
+	closed     bool
 	callbacks  list.List[adapter.RuleSetUpdateCallback]
 	refs       atomic.Int32
 }
@@ -101,7 +101,7 @@ func (s *LocalRuleSet) reloadFile(path string) error {
 		if err != nil {
 			return err
 		}
-		ruleSet, err = json.UnmarshalExtended[option.PlainRuleSetCompat](content)
+		ruleSet, err = domainset.ReadSourceContext(s.ctx, content)
 		if err != nil {
 			return err
 		}
@@ -149,8 +149,14 @@ func (s *LocalRuleSet) reloadRules(headlessRules []option.HeadlessRule) error {
 	if err != nil {
 		return err
 	}
-	s.content.Store(&ruleSetContent{rules: rules, metadata: metadata})
+	// under the lock Close takes: a reload does not give a closed set its rules back
 	s.access.Lock()
+	if s.closed {
+		// a reload the watcher had already started when the set was closed
+		s.access.Unlock()
+		return nil
+	}
+	s.content.Store(&ruleSetContent{rules: rules, metadata: metadata})
 	callbacks := s.callbacks.Array()
 	s.access.Unlock()
 	for _, callback := range callbacks {
@@ -179,7 +185,7 @@ func (s *LocalRuleSet) DecRef() {
 
 func (s *LocalRuleSet) Cleanup() {
 	if s.refs.Load() == 0 {
-		s.content.Store(&ruleSetContent{})
+		dropRules(&s.content)
 	}
 }
 
@@ -196,8 +202,12 @@ func (s *LocalRuleSet) UnregisterCallback(element *list.Element[adapter.RuleSetU
 }
 
 func (s *LocalRuleSet) Close() error {
+	err := common.Close(common.PtrOrNil(s.watcher))
+	s.access.Lock()
+	s.closed = true
 	s.content.Store(&ruleSetContent{})
-	return common.Close(common.PtrOrNil(s.watcher))
+	s.access.Unlock()
+	return err
 }
 
 func (s *LocalRuleSet) Match(metadata *adapter.InboundContext) bool {
