@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/sagernet/sing-box/experimental/clashmode"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 	M "github.com/sagernet/sing/common/metadata"
@@ -49,6 +51,8 @@ type Server struct {
 	endpoint       adapter.EndpointManager
 	logger         log.Logger
 	httpServer     *http.Server
+	closed         chan struct{}
+	closeOnce      sync.Once
 	trafficManager *trafficcontrol.Manager
 	urlTestHistory *urltest.HistoryStorage
 	clashMode      *clashmode.Manager
@@ -86,6 +90,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 			Addr:    options.ExternalController,
 			Handler: chiRouter,
 		},
+		closed:                   make(chan struct{}),
 		trafficManager:           trafficManager,
 		urlTestHistory:           urlTestHistory,
 		clashMode:                clashMode,
@@ -154,31 +159,79 @@ func (s *Server) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	}
 	if s.externalController {
 		s.checkAndDownloadExternalUI()
-		var (
-			listener net.Listener
-			err      error
-		)
-		for range 3 {
-			listener, err = net.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(s.httpServer.Addr).Addr), s.httpServer.Addr)
-			if runtime.GOOS == "android" && errors.Is(err, syscall.EADDRINUSE) {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			break
-		}
+		scope.Add(s.close)
+		listener, err := s.listen()
 		if err != nil {
-			return E.Cause(err, "external controller listen error")
+			// The API carries no traffic: an address taken by another program, or not
+			// yet on an interface at boot, must not stop the proxy (on a router, a failed
+			// start is retried a few times and then the service is given up).
+			s.logger.Error("external controller listen error, retrying in the background: ", err)
+			go s.listenLater(listenRetryDelay)
+			return nil
 		}
-		scope.Add(s.httpServer.Close)
-		s.logger.Info("restful api listening at ", listener.Addr())
-		go func() {
-			err = s.httpServer.Serve(listener)
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				s.logger.Error("external controller serve error: ", err)
-			}
-		}()
+		s.serve(listener)
 	}
 	return nil
+}
+
+// listenRetryDelay is the first pause before the listen of the external controller is
+// retried; the pause doubles up to listenRetryMaxDelay.
+var (
+	listenRetryDelay    = 5 * time.Second
+	listenRetryMaxDelay = time.Minute
+)
+
+func (s *Server) listen() (listener net.Listener, err error) {
+	for range 3 {
+		listener, err = net.Listen(M.NetworkFromNetAddr(N.NetworkTCP, M.ParseSocksaddr(s.httpServer.Addr).Addr), s.httpServer.Addr)
+		if runtime.GOOS == "android" && errors.Is(err, syscall.EADDRINUSE) {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return
+}
+
+func (s *Server) listenLater(delay time.Duration) {
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-time.After(delay):
+		}
+		listener, err := s.listen()
+		if err == nil {
+			select {
+			case <-s.closed:
+				// closed while it listened: the server would not take the listener
+				listener.Close()
+			default:
+				s.serve(listener)
+			}
+			return
+		}
+		s.logger.Debug("external controller listen error: ", err)
+		delay = min(delay*2, listenRetryMaxDelay)
+	}
+}
+
+func (s *Server) serve(listener net.Listener) {
+	s.logger.Info("restful api listening at ", listener.Addr())
+	go func() {
+		err := s.httpServer.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.logger.Error("external controller serve error: ", err)
+		}
+	}()
+}
+
+// close stops a listen retried in the background and the server.
+func (s *Server) close() error {
+	s.closeOnce.Do(func() { close(s.closed) })
+	return common.Close(
+		common.PtrOrNil(s.httpServer),
+	)
 }
 
 func authentication(serverSecret string) func(next http.Handler) http.Handler {

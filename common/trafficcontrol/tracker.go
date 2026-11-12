@@ -38,7 +38,7 @@ func (m *Manager) RoutedConnection(ctx context.Context, conn net.Conn, metadata 
 	upload := new(atomic.Int64)
 	download := new(atomic.Int64)
 	tracker := &connTracker{
-		ExtendedConn: bufio.NewInt64CounterConn(conn, []*atomic.Int64{upload}, []*atomic.Int64{download}),
+		ExtendedConn: bufio.NewCounterConn(conn, []N.CountFunc{countUpload}, []N.CountFunc{countDownload}),
 		metadata:     m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download),
 		manager:      m,
 	}
@@ -70,6 +70,7 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 	chain := common.Map(metadata.OutboundChain, adapter.Outbound.Tag)
 	slices.Reverse(chain)
 	outbound := metadata.OutboundChain[len(metadata.OutboundChain)-1]
+	trimTrackedMetadata(&metadata)
 	return TrackerMetadata{
 		ID:           id,
 		Metadata:     metadata,
@@ -82,6 +83,19 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 		OutboundType: outbound.Type(),
 	}
 }
+
+// trimTrackedMetadata drops from the tracker's copy what only routing needed: the sniffer's
+// working state (for QUIC, the fragments of the client hello collected so far) and the DNS
+// answers. A tracker lives as long as its connection, and then in the list of closed
+// connections.
+func trimTrackedMetadata(metadata *adapter.InboundContext) {
+	metadata.SniffContext = nil
+	metadata.SniffError = nil
+	metadata.DNSResponse = nil
+	metadata.NamedDNSResponses = nil
+}
+
+var _ adapter.RemoteEOFMarker = (*connTracker)(nil)
 
 type connTracker struct {
 	N.ExtendedConn

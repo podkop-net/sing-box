@@ -95,8 +95,11 @@ func (m *Manager) leave(tracker Tracker) {
 		m.closedConnectionsAccess.Unlock()
 		return
 	}
-	metadata.ClosedAt = closedAt
+	// The time goes into the copy that is kept, not into the record of the connection
+	// itself: that one is being read by whoever lists the connections at this moment (the
+	// Clash API copies every record), and the write raced with that read (podkop-engine).
 	metadataCopy := *metadata
+	metadataCopy.ClosedAt = closedAt
 	if m.closedConnections.Len() >= closedConnectionsLimit {
 		evicted := m.closedConnections.PopFront()
 		m.closedUploadTotal += evicted.Upload.Load()
