@@ -18,6 +18,7 @@ When object:
   "version": 0,
   "disable_version_fallback": false,
   "headers": {},
+  "fallback": [],
 
   ... // HTTP2 Fields
 
@@ -91,6 +92,16 @@ Disable automatic fallback to lower HTTP version.
 Custom HTTP headers.
 
 `Host` header is used as request host.
+
+#### fallback
+
+Tags of shared HTTP clients defined in top-level `http_clients`, tried in order when a download
+through this client fails.
+
+A remote rule-set whose download through this client fails (an error, an unexpected status,
+no data for the stall timeout, or content that is not a rule-set) repeats it through each
+fallback client in turn, until one brings the list. The fallbacks of a fallback client are not
+followed. Other users of the client do not fall back.
 
 ### HTTP2 Fields
 
