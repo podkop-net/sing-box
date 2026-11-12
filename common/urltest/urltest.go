@@ -25,11 +25,13 @@ type HistoryStorage struct {
 	access       sync.RWMutex
 	delayHistory map[string]*adapter.URLTestHistory
 	updateHooks  []*observable.Subscriber[struct{}]
+	detail       historyDetail
 }
 
 func NewHistoryStorage() *HistoryStorage {
 	return &HistoryStorage{
 		delayHistory: make(map[string]*adapter.URLTestHistory),
+		detail:       newHistoryDetail(),
 	}
 }
 
@@ -57,6 +59,7 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory 
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 	s.access.Lock()
 	delete(s.delayHistory, tag)
+	s.detail.forget(tag)
 	s.notifyUpdated()
 	s.access.Unlock()
 }
@@ -64,6 +67,7 @@ func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 func (s *HistoryStorage) StoreURLTestHistory(tag string, history *adapter.URLTestHistory) {
 	s.access.Lock()
 	s.delayHistory[tag] = history
+	s.detail.passed(tag)
 	s.notifyUpdated()
 	s.access.Unlock()
 }
@@ -73,8 +77,12 @@ func (s *HistoryStorage) UpdateURLTestHistory(stored map[string]*adapter.URLTest
 	defer s.access.Unlock()
 	for _, tag := range deleted {
 		delete(s.delayHistory, tag)
+		s.detail.forget(tag)
 	}
 	maps.Copy(s.delayHistory, stored)
+	for tag := range stored {
+		s.detail.passed(tag)
+	}
 }
 
 func (s *HistoryStorage) notifyUpdated() {
@@ -91,6 +99,7 @@ func (s *HistoryStorage) Close() error {
 }
 
 func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) {
+	ctx = ContextWithTest(ctx)
 	multiplexOutbound, isMultiplexOutbound := common.Cast[adapter.OutboundWithMultiplex](detour)
 	if isMultiplexOutbound && multiplexOutbound.MultiplexEnabled() {
 		warmContext := adapter.ContextWithKeepSession(ctx)
@@ -137,21 +146,7 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	if err != nil {
 		return
 	}
-	client := http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return instance, nil
-			},
-			TLSClientConfig: &tls.Config{
-				Time:    ntp.TimeFuncFromContext(ctx),
-				RootCAs: adapter.RootPoolFromContext(ctx),
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Timeout: C.TCPTimeout,
-	}
+	client := probeClient(ctx, instance)
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
@@ -160,4 +155,35 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	resp.Body.Close()
 	t = uint16(time.Since(start) / time.Millisecond)
 	return
+}
+
+// probeHeaderLimit bounds the response headers a test reads (podkop-engine). The answer comes
+// through the member tested, and net/http keeps up to 10 MB of headers by default: a member (or
+// what it reaches) that sends headers without end would cost that for each test of a round, on
+// a router. The headers of a test URL are some hundreds of bytes; web servers bound a header at
+// 8 KB (nginx, Apache), all of them at 64 KB to 1 MB.
+const probeHeaderLimit = 64 << 10
+
+// probeClient makes an HTTP client that speaks over instance only, the connection the test
+// dialed through the member: no redirects, no compression asked for (a download test counts
+// the bytes that cross the link, and a body of zeros would compress to nothing), the TCP
+// timeout, and response headers of probeHeaderLimit at most.
+func probeClient(ctx context.Context, instance net.Conn) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			MaxResponseHeaderBytes: probeHeaderLimit,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return instance, nil
+			},
+			TLSClientConfig: &tls.Config{
+				Time:    ntp.TimeFuncFromContext(ctx),
+				RootCAs: adapter.RootPoolFromContext(ctx),
+			},
+			DisableCompression: true,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: C.TCPTimeout,
+	}
 }

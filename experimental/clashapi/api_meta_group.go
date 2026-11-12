@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/protocol/group"
+	"github.com/sagernet/sing-box/protocol/group/urltestgroup"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/json/badjson"
 
@@ -86,7 +86,7 @@ func getGroupDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 				itOutbound, _ := server.outbound.Outbound(it)
 				return itOutbound
 			}))
-			result = group.URLTestOutbounds(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url, 0, true)
+			result = urltestgroup.URLTestOutbounds(ctx, server.outbound, server.urlTestHistory, server.logger, outbounds, url, 0, true, false)
 		}
 
 		if err != nil {
