@@ -291,6 +291,11 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	if err != nil {
 		common.Close(source, destination)
 	} else {
+		if direction {
+			if marker, isMarker := common.Cast[adapter.RemoteEOFMarker](destination); isMarker {
+				marker.MarkRemoteEOF()
+			}
+		}
 		destinationWriter, _ := N.UnwrapCountWriter(destination, nil)
 		duplexDst, isDuplex := N.UnwrapWriter(destinationWriter).(N.WriteCloser)
 		if isDuplex {

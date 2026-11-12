@@ -105,6 +105,14 @@ func JudgeFlow(router Router, inbound string, inboundType string, network uint8,
 	}
 }
 
+// RemoteEOFMarker is a routed connection that is told when the remote side ended the stream with
+// an EOF (podkop-engine). A connection cut on the way never gets it, and neither does a healthy one
+// its client closed first (the close of a REALITY connection is a full one, so the answer of the
+// server never comes): without it nothing is known of who ended the stream.
+type RemoteEOFMarker interface {
+	MarkRemoteEOF()
+}
+
 type ConnectionTracker interface {
 	RoutedConnection(ctx context.Context, conn net.Conn, metadata InboundContext, matchedRule Rule, matchOutbound Outbound) net.Conn
 	RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata InboundContext, matchedRule Rule, matchOutbound Outbound) N.PacketConn

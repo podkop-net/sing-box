@@ -46,6 +46,36 @@ type CacheFile interface {
 	StoreGroupExpand(group string, expand bool) error
 	LoadRuleSet(tag string) *SavedBinary
 	SaveRuleSet(tag string, set *SavedBinary) error
+	// what the uTLS fingerprint fallback chose for a server, and when (podkop-engine)
+	LoadUTLSChoice(key string) (choice string, at time.Time, loaded bool)
+	StoreUTLSChoice(key string, choice string, at time.Time) error
+	// what the block detector read of a server (podkop-engine): a flags byte (DetectNoAnswer,
+	// DetectRefused, DetectFailed) and the fingerprint in use, with the time it was recorded
+	LoadDetectOutcome(key string) (flags byte, fingerprint string, at time.Time, loaded bool)
+	StoreDetectOutcome(key string, flags byte, fingerprint string, at time.Time) error
+}
+
+// Flags of a block-detector outcome kept by the cache file (podkop-engine).
+const (
+	// DetectNoAnswer: TCP connects, and no ClientHello tried got an answer. Any completed
+	// handshake clears it.
+	DetectNoAnswer byte = 1 << 0
+	// DetectRefused: the first candidate of the fingerprint fallback, a ClientHello without an
+	// X25519MLKEM768 key share, was answered as a stranger's and a later candidate completed the
+	// handshake: a REALITY server since Xray-core v26.9.8. Informational (the server is new), not
+	// a block. It stays until the first candidate completes a handshake.
+	DetectRefused byte = 1 << 1
+	// DetectFailed: the server answered, and the handshake did not complete. Any completed
+	// handshake clears it.
+	DetectFailed byte = 1 << 2
+)
+
+// RuleSetCheckCache is a cache file that keeps the time a remote rule set was last found
+// up to date apart from its content (podkop-engine): an answer "not modified" writes the
+// time alone, not the whole list again.
+type RuleSetCheckCache interface {
+	LoadRuleSetChecked(tag string) time.Time
+	StoreRuleSetChecked(tag string, at time.Time) error
 }
 
 type SavedBinary struct {

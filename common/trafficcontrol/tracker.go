@@ -27,6 +27,72 @@ type TrackerMetadata struct {
 	Rule         adapter.Rule
 	Outbound     string
 	OutboundType string
+	// nil but for the TCP connections (podkop-engine)
+	stamp *detectStamp
+}
+
+// PendingSince returns since when the client of the connection has been waiting for the server
+// (detectStamp); zero when it is not, and always for what is not a TCP connection (podkop-engine).
+func (m *TrackerMetadata) PendingSince() time.Time {
+	if m.stamp == nil {
+		return time.Time{}
+	}
+	since := m.stamp.pendingSince.Load()
+	if since == 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(time.Duration(since - detectClock()))
+}
+
+// detectStamp tells a client that waits for the server (podkop-engine). A connection cut on the way
+// and a healthy one closed by its client look the same at the close, so what the block detector
+// reads as a cut is a connection whose client wrote after detectPendingGap with nothing from the
+// server, and that got nothing since. A close_notify written at the close does not make one: it has
+// to stand for detectCutWait before the close. A client that never writes after the cut is missed.
+//
+// The times are offsets from detectEpoch, so the first step of the clock of a router with no RTC
+// does not make a gap. The download side writes one atomic and reads the clock on every write; the
+// upload side reads two atomics, and the clock only while it is not waiting yet.
+type detectStamp struct {
+	lastDownAt   atomic.Int64
+	pendingSince atomic.Int64
+}
+
+var detectEpoch = time.Now()
+
+func detectClock() int64 {
+	return int64(time.Since(detectEpoch))
+}
+
+func (s *detectStamp) downloaded() {
+	s.lastDownAt.Store(detectClock())
+	if s.pendingSince.Load() != 0 {
+		s.pendingSince.Store(0)
+	}
+}
+
+func (s *detectStamp) uploaded(download int64) {
+	if download == 0 || s.pendingSince.Load() != 0 {
+		return
+	}
+	now := detectClock()
+	if now-s.lastDownAt.Load() >= int64(detectPendingGap) {
+		s.pendingSince.CompareAndSwap(0, now)
+	}
+}
+
+// waitedAt reports whether a connection closed at closedAt was waiting by then for detectCutWait,
+// and since when: one read of the stamp, on the monotonic clock of closedAt.
+func (s *detectStamp) waitedAt(closedAt time.Time) (time.Time, bool) {
+	since := s.pendingSince.Load()
+	if since == 0 {
+		return time.Time{}, false
+	}
+	waited := closedAt.Sub(detectEpoch) - time.Duration(since)
+	if waited < detectCutWait {
+		return time.Time{}, false
+	}
+	return closedAt.Add(-waited), true
 }
 
 type Tracker interface {
@@ -37,11 +103,22 @@ type Tracker interface {
 func (m *Manager) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
 	upload := new(atomic.Int64)
 	download := new(atomic.Int64)
+	stamp := new(detectStamp)
+	countUpload := func(n int64) {
+		upload.Add(n)
+		stamp.uploaded(download.Load())
+	}
+	countDownload := func(n int64) {
+		// the stamp first: who sees the bytes finds their time
+		stamp.downloaded()
+		download.Add(n)
+	}
 	tracker := &connTracker{
 		ExtendedConn: bufio.NewCounterConn(conn, []N.CountFunc{countUpload}, []N.CountFunc{countDownload}),
 		metadata:     m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download),
 		manager:      m,
 	}
+	tracker.metadata.stamp = stamp
 	m.join(tracker)
 	return tracker
 }
@@ -99,8 +176,13 @@ var _ adapter.RemoteEOFMarker = (*connTracker)(nil)
 
 type connTracker struct {
 	N.ExtendedConn
-	metadata TrackerMetadata
-	manager  *Manager
+	metadata  TrackerMetadata
+	manager   *Manager
+	remoteEOF atomic.Bool
+}
+
+func (t *connTracker) MarkRemoteEOF() {
+	t.remoteEOF.Store(true)
 }
 
 func (t *connTracker) Metadata() *TrackerMetadata {
