@@ -2,8 +2,10 @@
 
 package main
 
-import "github.com/sagernet/sing-box/cmd/sing-box/cli"
+import "github.com/sagernet/sing-box/log"
 
 func main() {
-	cli.Main()
+	if err := mainCommand.Execute(); err != nil {
+		log.Fatal(err)
+	}
 }
