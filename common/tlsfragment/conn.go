@@ -66,7 +66,12 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			}
 			var splitIndexes []int
 			for i, split := range splits {
-				splitAt := rand.Intn(len(split))
+				// a name may have an empty label, the first one when it begins with a
+				// dot: the cut is then made where the label stands (podkop-engine)
+				var splitAt int
+				if len(split) > 0 {
+					splitAt = rand.Intn(len(split))
+				}
 				splitIndexes = append(splitIndexes, currentIndex+splitAt)
 				currentIndex += len(split)
 				if i != len(splits)-1 {
@@ -83,6 +88,12 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 					}
 				} else if i == len(splitIndexes) {
 					payload = b[splitIndexes[i-1]:]
+					// a name that ends with a dot at the very end of the ClientHello:
+					// nothing is left after the last cut, and an empty record is not
+					// one a server takes (podkop-engine)
+					if len(payload) == 0 {
+						continue
+					}
 				} else {
 					payload = b[splitIndexes[i-1]:splitIndexes[i]]
 				}
