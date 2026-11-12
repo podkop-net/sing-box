@@ -21,6 +21,17 @@ import (
 
 const udpOutputBatchSize = 128
 
+// udpOutputQueueSize is how many packets may wait for the output loop, the one goroutine
+// that writes them to the socket; a packet that finds the queue full is dropped. Packets
+// are made on every core at once, so the queue has to hold what they make while the output
+// loop wakes up or is busy with a write. It held 64: less than a resolver in front has in
+// flight (dnsmasq: 150) and less than the kernel hands the listener in one go (its receive
+// buffer holds a few hundred small packets), so a burst of 70 DNS answers already lost
+// some, and a lost DNS answer costs the client its timeout, seconds. Writers do not wait
+// for room instead: under a flood of queries the waiting writers would be a queue without
+// a bound.
+const udpOutputQueueSize = 1024
+
 func (l *Listener) ListenUDP() (net.PacketConn, error) {
 	return l.ListenUDPWithConfig(net.ListenConfig{})
 }
