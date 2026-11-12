@@ -511,7 +511,6 @@ func (s *Box) PreStart() error {
 func (s *Box) Start() error {
 	err := s.start()
 	if err != nil {
-		s.Close()
 		return err
 	}
 	s.logger.Info("sing-box started (", F.Seconds(time.Since(s.createdAt).Seconds()), "s)")
@@ -553,6 +552,11 @@ func (s *Box) preStart() error {
 	}
 	s.scope.Add(s.logFactory.Close)
 	applyDebugOptions(s.debugOptions)
+	stopMemoryLimit := startMemoryLimit(s.logger, s.debugOptions)
+	s.scope.Add(func() error {
+		stopMemoryLimit()
+		return nil
+	})
 	debugHTTPServer, err := startDebugHTTPServer(s.debugOptions)
 	if err != nil {
 		return err
