@@ -40,6 +40,8 @@ type UDPTransport struct {
 	udpSize    atomic.Int32
 
 	multiplexer *queryMultiplexer
+
+	fresh *freshSocket // one socket per query, see udp_fresh.go
 }
 
 func NewUDP(ctx context.Context, logger log.ContextLogger, tag string, options option.RemoteDNSServerOptions) (adapter.DNSTransport, error) {
@@ -54,7 +56,9 @@ func NewUDP(ctx context.Context, logger log.ContextLogger, tag string, options o
 	if !serverAddr.IsValid() {
 		return nil, E.New("invalid server address: ", serverAddr)
 	}
-	return NewUDPRaw(logger, dns.NewTransportAdapterWithRemoteOptions(C.DNSTypeUDP, tag, options), transportDialer, serverAddr), nil
+	transport := NewUDPRaw(logger, dns.NewTransportAdapterWithRemoteOptions(C.DNSTypeUDP, tag, options), transportDialer, serverAddr)
+	transport.fresh = &freshSocket{ctx: ctx, options: options}
+	return transport, nil
 }
 
 func NewUDPRaw(logger logger.ContextLogger, adapter dns.TransportAdapter, dialerInstance N.Dialer, serverAddr M.Socksaddr) *UDPTransport {
@@ -101,7 +105,7 @@ func (t *UDPTransport) CloseIdleConnections() {
 
 func (t *UDPTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	t.updateUDPSize(message)
-	response, err := t.multiplexer.Exchange(ctx, message)
+	response, err := t.exchangeQuery(ctx, message)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +118,7 @@ func (t *UDPTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.M
 
 func (t *UDPTransport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
 	t.updateUDPSize(message)
-	t.multiplexer.ExchangeAsync(ctx, message, func(response *mDNS.Msg, err error) {
+	t.exchangeQueryAsync(ctx, message, func(response *mDNS.Msg, err error) {
 		if err == nil && response.Truncated {
 			t.logger.InfoContext(ctx, "response truncated, retrying with TCP")
 			go func() {
