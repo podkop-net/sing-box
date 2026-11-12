@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,7 +128,7 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
 		m.deleteURLTestHistory(metadata.OutboundChain, err)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
-		m.logger.ErrorContext(ctx, err)
+		m.logDialError(ctx, this, err)
 		return
 	}
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
@@ -227,7 +226,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			err = E.Cause(err, "listen packet connection", dialerString)
 			m.deleteURLTestHistory(metadata.OutboundChain, err)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
-			m.logger.ErrorContext(ctx, err)
+			m.logDialError(ctx, this, err)
 			return
 		}
 		if destinationAddress == metadata.Destination.Addr {
@@ -287,21 +286,10 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
 }
 
+// deleteURLTestHistory is left to the URL test group: a connection of a chain with one is
+// dialed through it (dialTarget), and it judges the failures of its members itself, a failure of
+// the destination or of the network of the router not taken for one of the member.
 func (m *ConnectionManager) deleteURLTestHistory(chain []adapter.Outbound, err error) {
-	if E.IsClosedOrCanceled(err) {
-		return
-	}
-	urlTestGroups := common.FilterIsInstance(chain, func(it adapter.Outbound) (adapter.URLTestGroup, bool) {
-		group, isURLTestGroup := it.(adapter.URLTestGroup)
-		return group, isURLTestGroup
-	})
-	if len(urlTestGroups) == 0 {
-		return
-	}
-	m.urlTestHistory.DeleteURLTestHistory(chain[len(chain)-1].Tag())
-	for _, group := range slices.Backward(urlTestGroups) {
-		group.PerformUpdateCheck()
-	}
 }
 
 func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
