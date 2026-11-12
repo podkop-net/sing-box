@@ -95,7 +95,9 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 	local.RegisterTransport(registry)
 	mdns.RegisterTransport(registry)
 	fakeip.RegisterTransport(registry)
-	resolved.RegisterTransport(registry)
+	// podkop-engine: a list of servers, and the provider's servers that netifd knows
+	dns.RegisterGroupTransport(registry)
+	dns.RegisterProviderTransport(registry)
 
 	registerNonPodkopDNSTransports(registry)
 	registerDHCPTransport(registry)

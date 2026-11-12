@@ -128,7 +128,9 @@ func (r *Router) Initialize(rules []option.DNSRule) error {
 		return err
 	}
 	closeRules(newRules)
-	return nil
+	// every DNS server exists now: the groups find their members, so that a wrong one fails
+	// the configuration check (podkop-engine, transport_group.go)
+	return initializeGroups(r.transport)
 }
 
 func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {

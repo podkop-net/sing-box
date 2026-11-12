@@ -30,6 +30,16 @@ const (
 	DNSTypeTailscale   = "tailscale"
 	DNSTypeOpenConnect = "openconnect"
 	DNSTypeOpenVPN     = "openvpn"
+	// a list of DNS servers asked in order or by speed, and the internet provider's DNS
+	// servers that netifd knows (podkop-engine, dns/transport_group.go, dns/transport_provider.go)
+	DNSTypeGroup    = "group"
+	DNSTypeProvider = "provider"
+)
+
+// The strategies of a DNS server group (podkop-engine).
+const (
+	DNSGroupStrategyOrder   = "order"
+	DNSGroupStrategyFastest = "fastest"
 )
 
 const (
