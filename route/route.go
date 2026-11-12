@@ -156,6 +156,10 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 		buf.ReleaseMulti(buffers)
 		return err
 	}
+	if r.wouldLoopToInbound(&metadata, chain[len(chain)-1]) {
+		buf.ReleaseMulti(buffers)
+		return &inboundLoopError{metadata.Inbound, E.New("refused connection to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")}
+	}
 	for _, buffer := range buffers {
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
@@ -337,6 +341,10 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	if err != nil {
 		N.ReleaseMultiPacketBuffer(packetBuffers)
 		return err
+	}
+	if r.wouldLoopToInbound(&metadata, chain[len(chain)-1]) {
+		N.ReleaseMultiPacketBuffer(packetBuffers)
+		return &inboundLoopError{metadata.Inbound, E.New("refused packet to the address of inbound ", metadata.Inbound, " (", metadata.Destination, "): not hijacked, would loop")}
 	}
 	for _, buffer := range packetBuffers {
 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
@@ -657,6 +665,44 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
 		metadata.IPVersion = 6
 	}
 	return nil
+}
+
+// wouldLoopToInbound reports whether dialing selectedOutbound would send the connection
+// back to the listen address of the inbound it arrived on. A direct inbound without an
+// override hands out its own address as the destination, expecting a rule to hijack it;
+// when nothing does, the connection falls to the direct outbound, which dials that address,
+// and the packet returns to the same inbound as a new session, round after round. Only the
+// direct outbound dials the raw destination, and only a return to the SAME inbound is a
+// loop: a connection chained to a different local inbound (a urltest member pointed at a
+// mixed inbound) goes through a proxy outbound to another inbound and is left alone.
+//
+// selectedOutbound is the outbound the connection is dialed through: the last of the chain
+// the router resolved, a group's selected member.
+func (r *Router) wouldLoopToInbound(metadata *adapter.InboundContext, selectedOutbound adapter.Outbound) bool {
+	if metadata.Inbound == "" {
+		return false
+	}
+	if selectedOutbound.Type() != C.TypeDirect {
+		return false
+	}
+	inbound, loaded := r.inbound.Get(metadata.Inbound)
+	if !loaded {
+		return false
+	}
+	listenInbound, isListen := inbound.(adapter.InboundListenAddress)
+	if !isListen {
+		return false
+	}
+	listen := listenInbound.ListenAddress()
+	if !listen.Addr.IsValid() || metadata.Destination.Port != listen.Port {
+		return false
+	}
+	if listen.Addr.IsUnspecified() {
+		// a listener on every address is reached at any of them: a connection accepted on
+		// it carries the one it came in on as its original destination
+		return metadata.Destination.Addr == listen.Addr || (metadata.OriginDestination.Addr.IsValid() && metadata.Destination.Addr == metadata.OriginDestination.Addr)
+	}
+	return metadata.Destination.Addr == listen.Addr
 }
 
 func (r *Router) matchRule(
