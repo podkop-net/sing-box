@@ -11,6 +11,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/listener"
+	"github.com/sagernet/sing-box/common/probesock"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/service/powerreport"
@@ -272,6 +273,18 @@ func (d *DefaultDialer) DialContext(ctx context.Context, network string, address
 		return nil, E.New("invalid address")
 	} else if address.IsDomain() {
 		return nil, E.New("domain not resolved")
+	}
+	if probe := probesock.From(ctx); probe != nil && N.NetworkName(network) == N.NetworkTCP {
+		// the connection of a loss probe (podkop-engine): its own small receive buffer and a
+		// capture of its packets; a network strategy does not choose its interface
+		dialer := d.dialer4.Dialer
+		if address.IsIPv6() {
+			dialer = d.dialer6.Dialer
+		}
+		conn, err := listener.ListenNetworkNamespace[net.Conn](ctx, d.netns, func() (net.Conn, error) {
+			return probe.Dial(ctx, dialer, network, address.String())
+		})
+		return d.trackConn(ctx, address, conn, err)
 	}
 	if d.networkStrategy == nil {
 		conn, err := listener.ListenNetworkNamespace[net.Conn](ctx, d.netns, func() (net.Conn, error) {
