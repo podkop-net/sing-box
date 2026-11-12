@@ -1,0 +1,244 @@
+package domainset
+
+import (
+	"bytes"
+	"math/rand"
+	"strings"
+	"testing"
+
+	"github.com/sagernet/sing-box/common/domainset/succinct"
+	"github.com/sagernet/sing/common/domain"
+
+	"github.com/stretchr/testify/require"
+)
+
+// names makes count names of no pattern, some with a dot in front, some repeated, some
+// not of ASCII.
+func names(random *rand.Rand, count int) []string {
+	letters := "abcdefghijklmnopqrstuvwxyz0123456789-"
+	tlds := []string{"com", "net", "org", "ru", "io", "co.uk", "рф", "xn--p1ai"}
+	result := make([]string, 0, count)
+	for len(result) < count {
+		var name strings.Builder
+		if random.Intn(10) == 0 {
+			name.WriteByte('.')
+		}
+		for range 1 + random.Intn(3) {
+			for range 1 + random.Intn(10) {
+				name.WriteByte(letters[random.Intn(26)])
+			}
+			if random.Intn(5) == 0 {
+				name.WriteString("-" + string(letters[random.Intn(len(letters))]))
+			}
+			name.WriteByte('.')
+		}
+		name.WriteString(tlds[random.Intn(len(tlds))])
+		result = append(result, name.String())
+		if random.Intn(20) == 0 && len(result) < count {
+			// the same name again
+			result = append(result, result[random.Intn(len(result))])
+		}
+	}
+	return result
+}
+
+func singBytes(t *testing.T, domains []string, domainSuffix []string, generateLegacy bool) []byte {
+	var content bytes.Buffer
+	require.NoError(t, domain.NewMatcher(domains, domainSuffix, generateLegacy).Write(&content))
+	return content.Bytes()
+}
+
+// The matcher is the one of sing, byte for byte as it is written into a rule set: names and
+// suffixes of no pattern, repeated, in both lists, with a dot in front, not of ASCII, in
+// the legacy way and not, from a few to many.
+func TestSameAsSing(t *testing.T) {
+	random := rand.New(rand.NewSource(1))
+	for _, count := range []int{1, 2, 3, 10, 100, 1000, 20000} {
+		for _, legacy := range []bool{false, true} {
+			domains, suffixes := names(random, count), names(random, count)
+			// a name in both lists, and a suffix of a name
+			domains = append(domains, suffixes[0])
+			suffixes = append(suffixes, "."+strings.TrimPrefix(domains[0], "."))
+			for _, lists := range [][2][]string{{domains, suffixes}, {domains, nil}, {nil, suffixes}} {
+				want := singBytes(t, lists[0], lists[1], legacy)
+				encoded, err := Encode(lists[0], lists[1], legacy)
+				require.NoError(t, err)
+				require.Equal(t, want, encoded, "%d names, legacy %v", count, legacy)
+				if legacy {
+					continue
+				}
+				matcher, err := NewSet(lists[0], lists[1])
+				require.NoError(t, err)
+				var written bytes.Buffer
+				require.NoError(t, matcher.(*succinct.Set).Write(&written))
+				require.Equal(t, want, written.Bytes())
+			}
+		}
+	}
+	// one name and one suffix, and a name that is a suffix of another
+	for _, lists := range [][2][]string{
+		{{"example.com"}, nil}, {nil, {"example.com"}}, {nil, {".example.com"}},
+		{{"a.b.c", "b.c"}, {"c", ".b.c"}}, {{"x"}, {"x"}},
+	} {
+		encoded, err := Encode(lists[0], lists[1], false)
+		require.NoError(t, err)
+		require.Equal(t, singBytes(t, lists[0], lists[1], false), encoded, "%v", lists)
+	}
+}
+
+// Names sing takes that a list of a rule set hardly has: empty, in capitals, with the
+// labels of the trie inside them, of one byte, a name that is a suffix of another in
+// every way; and names that are not valid UTF-8, which go the way sing builds them. The
+// random lists go every way: with a name that is not valid UTF-8 or not, legacy or not.
+func TestSameAsSingOddNames(t *testing.T) {
+	for _, lists := range [][2][]string{
+		{{""}, nil},
+		{{"", "a"}, {"a"}},
+		{{"Example.COM", "example.com"}, {"EXAMPLE.com"}},
+		{{"a\nb", "a\rb", "\nx"}, {"b\ra", ".\n"}},
+		{{"a", "b", "c"}, {"a", ".a", "b"}},
+		{{".a", "a."}, {".a", "a."}},
+		{{"x.y.z", "y.z", "z"}, {"y.z", ".z", "x.y.z"}},
+		{{"ab\xffcd"}, {"ef\xfegh"}},
+		{{"пример.рф", "例子.测试"}, {".рф", "测试"}},
+	} {
+		encoded, err := Encode(lists[0], lists[1], false)
+		require.NoError(t, err)
+		require.Equal(t, singBytes(t, lists[0], lists[1], false), encoded, "%q", lists)
+	}
+	random := rand.New(rand.NewSource(3))
+	alphabet := []string{"a", "b", ".", "\n", "\r", "я", "-"}
+	for range 2000 {
+		var lists [2][]string
+		for side := range lists {
+			for range random.Intn(8) {
+				var name strings.Builder
+				for range random.Intn(6) {
+					name.WriteString(alphabet[random.Intn(len(alphabet))])
+				}
+				lists[side] = append(lists[side], name.String())
+			}
+		}
+		if len(lists[0])+len(lists[1]) == 0 {
+			continue
+		}
+		// a name that is not valid UTF-8 takes the list to the build of sorted keys, as
+		// the legacy way does (two bytes before the bad one: sing's reverse of a name puts
+		// U+FFFD, three bytes, where that byte goes and needs room for it)
+		odd := append(append([]string(nil), lists[0]...), "ab\xffcd")
+		for _, domains := range [][]string{lists[0], odd} {
+			for _, legacy := range []bool{false, true} {
+				var want []byte
+				func() {
+					defer func() {
+						if recover() != nil {
+							want = nil
+						}
+					}()
+					want = singBytes(t, domains, lists[1], legacy)
+				}()
+				encoded, err := Encode(domains, lists[1], legacy)
+				if want == nil {
+					// sing stops the process: an empty suffix
+					require.Error(t, err, "%q %q legacy %v", domains, lists[1], legacy)
+				} else {
+					require.NoError(t, err, "%q %q legacy %v", domains, lists[1], legacy)
+					require.Equal(t, want, encoded, "%q %q legacy %v", domains, lists[1], legacy)
+				}
+				if !legacy {
+					_, err = NewSet(domains, lists[1])
+					require.Equal(t, want == nil, err != nil, "%q %q", domains, lists[1])
+				}
+			}
+		}
+	}
+}
+
+// What sing cannot build is an error here, where sing stops the process.
+func TestRefused(t *testing.T) {
+	_, err := NewSet(nil, []string{"a", ""})
+	require.ErrorIs(t, err, ErrEmptySuffix)
+	_, err = NewSet([]string{"ab\xffcd"}, []string{"a", ""})
+	require.ErrorIs(t, err, ErrEmptySuffix)
+	_, err = Encode(nil, []string{"a", ""}, true)
+	require.ErrorIs(t, err, ErrEmptySuffix)
+}
+
+// A name and a suffix that make the same key are one key, as in sing since v0.9.7: in the
+// trie of Collector, and in the build of sorted keys (the legacy way, a name that is not
+// valid UTF-8).
+func TestSameKey(t *testing.T) {
+	for _, item := range []struct {
+		domains, domainSuffix []string
+		legacy                bool
+	}{
+		{[]string{"\na"}, []string{"a"}, false},
+		{[]string{"\r.a"}, []string{"a"}, true},
+		{[]string{"\na", "ab\xffcd"}, []string{"a"}, false},
+	} {
+		encoded, err := Encode(item.domains, item.domainSuffix, item.legacy)
+		require.NoError(t, err, "%q", item)
+		require.Equal(t, singBytes(t, item.domains, item.domainSuffix, item.legacy), encoded, "%q", item)
+	}
+}
+
+// What a list of 100000 names of no pattern costs to build: here and in sing.
+func BenchmarkBuild(b *testing.B) {
+	list := names(rand.New(rand.NewSource(2)), 100000)
+	b.Run("domainset", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := NewSet(nil, list); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("sing", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			domain.NewMatcher(nil, list, false)
+		}
+	})
+}
+
+// The set matches what the matcher of sing matches: the names of the lists, their
+// subdomains, the names a suffix is cut from, names in capitals, not of ASCII, empty,
+// words; and it tells of itself what route/rule told of a domain item.
+func TestSetMatchesAsSing(t *testing.T) {
+	random := rand.New(rand.NewSource(7))
+	for _, count := range []int{1, 2, 5, 50, 3000} {
+		for round := range 20 {
+			domains, suffixes := names(random, count), names(random, count)
+			if round%3 == 1 {
+				domains = nil
+			} else if round%3 == 2 {
+				suffixes = nil
+			}
+			matcher, err := NewSet(domains, suffixes)
+			require.NoError(t, err)
+			want := domain.NewMatcher(domains, suffixes, false)
+			var queries []string
+			for _, name := range append(append([]string(nil), domains...), suffixes...) {
+				bare := strings.TrimPrefix(name, ".")
+				queries = append(queries, name, bare, "a."+bare, "x.y."+bare, strings.ToUpper(bare), bare[1:], bare+".", "."+bare)
+				if dot := strings.IndexByte(bare, '.'); dot >= 0 {
+					queries = append(queries, bare[dot+1:], bare[dot:])
+				}
+			}
+			queries = append(queries, "", ".", "com", "рф", "localhost", "\n", "\r", "a\nb")
+			for _, query := range queries {
+				require.Equal(t, want.Match(query), matcher.Match(query), "%q in %d names", query, count)
+			}
+			require.Equal(t, Describe(domains[:min(3, len(domains))], len(domains), suffixes[:min(3, len(suffixes))], len(suffixes)),
+				matcher.(*succinct.Set).String())
+		}
+	}
+}
+
+// A trie that is not one is refused, as domain.ReadMatcher refuses it.
+func TestSetRefusesMalformed(t *testing.T) {
+	_, err := succinct.New(nil, []uint64{0b10}, []byte("ab"), "")
+	require.Error(t, err)
+	_, err = succinct.New(nil, nil, nil, "")
+	require.Error(t, err)
+}
