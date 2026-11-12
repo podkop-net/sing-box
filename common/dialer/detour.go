@@ -51,7 +51,10 @@ func InitializeDetour(dialer N.Dialer) error {
 
 func (d *DetourDialer) Dialer() (N.Dialer, error) {
 	d.initOnce.Do(d.init)
-	return d.dialer, d.initErr
+	if d.initErr != nil {
+		return nil, d.initErr
+	}
+	return d.current(), nil
 }
 
 func (d *DetourDialer) init() {
