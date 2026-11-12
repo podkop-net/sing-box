@@ -39,6 +39,11 @@ type _HTTPClientOptions struct {
 	DirectResolver          bool                 `json:"-"`
 	OutboundTLSOptionsContainer
 	DialerOptions
+
+	// Fallback names the http clients a caller that saw a request fail through this one may
+	// repeat it through, in order (adapter.HTTPClientFallbacks). Their own fallbacks are not
+	// followed.
+	Fallback badoption.Listable[string] `json:"fallback,omitempty"`
 }
 
 type (
