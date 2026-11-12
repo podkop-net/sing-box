@@ -48,6 +48,17 @@ import (
 // when the provider safety net follows, the net. The caller's deadline always wins; a member
 // cut by it before its time counts nothing.
 //
+// Together after a timeout. A member that gives no answer in its time tells that the way to it
+// may be dead (an uplink down, DoH blocked on the way), and then the members after it often are
+// as well: asked one after another, four of them take 12 s, more than the 10 s of a query (on a
+// router whose DoH servers were all dropped, the first two queries got no answer). So when a
+// member times out and more than one candidate is left, those are asked at once, each within
+// its timeout (none of its own when no safety net follows: together they are the last step),
+// and the first answer is taken; the others are cut and count nothing. A reply with another
+// rcode or an error that comes in time moves on to the next candidate as before. A group whose
+// members answer never asks together; while a dead first member is not set aside yet (two
+// queries), each of those queries costs one copy for each member left.
+//
 // Set aside. A member that fails twice in a row is set aside, as a server of the fallback
 // is: queries that fail together (a closed connection they shared, a dead server they
 // waited for) count once, a second failure counting only for a query started after the
@@ -437,6 +448,26 @@ func (g *GroupTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		g.failed(ctx, member, plan.epoch, startAt, err)
 		lastErr = E.Cause(err, "server ", member.tag)
 		g.logger.DebugContext(ctx, "server ", member.tag, " failed: ", err)
+		if rest := plan.attempts[index+1:]; len(rest) > 1 && elapsed >= attempt.timeout {
+			g.logger.DebugContext(ctx, "server ", member.tag, " gave no answer in ", attempt.timeout, ", asking the other ", len(rest), " together")
+			response, reply, err := g.exchangeTogether(ctx, plan, rest, message, tried)
+			if response != nil {
+				return response, nil
+			}
+			if rcodeReply == nil {
+				rcodeReply = reply
+			}
+			if err != nil {
+				lastErr = err
+			}
+			if ctx.Err() != nil {
+				if rcodeReply != nil {
+					return rcodeReply, nil
+				}
+				return nil, lastErr
+			}
+			break
+		}
 	}
 	if rcodeReply != nil {
 		return rcodeReply, nil
@@ -456,6 +487,70 @@ func (g *GroupTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		g.logger.DebugContext(ctx, "provider DNS failed as well: ", err)
 	}
 	return nil, lastErr
+}
+
+// exchangeTogether asks the members of attempts at once, after one before them gave no answer in
+// its time. It returns the first answer (NOERROR or NXDOMAIN), or else the first reply of
+// another rcode and the error of the last member that failed. A member cut by the answer of
+// another, or by the caller before its time, counts nothing.
+func (g *GroupTransport) exchangeTogether(ctx context.Context, plan groupPlan, attempts []groupAttempt, message *mDNS.Msg, tried []*groupMember) (*mDNS.Msg, *mDNS.Msg, error) {
+	togetherCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type outcome struct {
+		attempt  groupAttempt
+		response *mDNS.Msg
+		err      error
+		startAt  time.Time
+		elapsed  time.Duration
+	}
+	outcomes := make(chan outcome, len(attempts))
+	for _, attempt := range attempts {
+		// a copy each: a transport may change the message it sends (its ID)
+		go func(attempt groupAttempt, message *mDNS.Msg) {
+			attemptCtx, attemptCancel := togetherCtx, context.CancelFunc(func() {})
+			if plan.net != nil {
+				attemptCtx, attemptCancel = context.WithTimeout(togetherCtx, attempt.timeout)
+			}
+			startAt := time.Now()
+			response, err := attempt.member.transport.Exchange(attemptCtx, message)
+			elapsed := time.Since(startAt)
+			attemptCancel()
+			response, err = groupResult(message, response, err)
+			outcomes <- outcome{attempt, response, err, startAt, elapsed}
+		}(attempt, message.Copy())
+	}
+	var (
+		rcodeReply *mDNS.Msg
+		lastErr    error
+	)
+	for range attempts {
+		result := <-outcomes
+		member := result.attempt.member
+		switch {
+		case result.err == nil && isGroupAnswer(result.response):
+			g.answered(ctx, member, plan.epoch, result.elapsed)
+			g.refresh(ctx, plan.epoch, member, tried, message)
+			return result.response, nil, nil
+		case result.err == nil:
+			tried = append(tried, member)
+			if rcodeReply == nil {
+				rcodeReply = result.response
+			}
+			g.logger.DebugContext(ctx, "server ", member.tag, " replied ", mDNS.RcodeToString[result.response.Rcode])
+		case ctx.Err() != nil:
+			// as one after another: only a member that had all of its time failed
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && result.elapsed >= result.attempt.timeout {
+				g.failed(ctx, member, plan.epoch, result.startAt, result.err)
+			}
+			lastErr = result.err
+		default:
+			tried = append(tried, member)
+			g.failed(ctx, member, plan.epoch, result.startAt, result.err)
+			lastErr = E.Cause(result.err, "server ", member.tag)
+			g.logger.DebugContext(ctx, "server ", member.tag, " failed: ", result.err)
+		}
+	}
+	return nil, rcodeReply, lastErr
 }
 
 // ExchangeAsync must not keep the caller, which reads the next queries of its client.

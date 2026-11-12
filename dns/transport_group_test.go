@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/rand/v2"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -959,5 +960,50 @@ func TestGroupRace(t *testing.T) {
 			require.Less(t, time.Since(startAt), time.Second, "close waited for the background copies")
 			require.Greater(t, answered.Load(), int32(0))
 		})
+	}
+}
+
+// A member that gives no answer in its time has the rest asked together: the answer comes one
+// timeout after the query, not one per dead member, and the members it cut count nothing.
+func TestGroupTogetherAfterTimeout(t *testing.T) {
+	t.Parallel()
+	first, second, third := newGroupTestMember("first", groupTestSilent), newGroupTestMember("second", groupTestSilent), newGroupTestMember("third", groupTestSilent)
+	fourth := newGroupTestMember("fourth", groupTestAnswer(4, 0))
+	group, output := newGroupTest(t, nil, C.DNSGroupStrategyOrder, false, first, second, third, fourth)
+	elapsed := groupTestExpect(t, group, "10.0.0.4")
+	if elapsed < groupTestTiming.attemptMax || elapsed > 2*groupTestTiming.attemptMax {
+		t.Errorf("answered after %v, want one timeout of %v", elapsed, groupTestTiming.attemptMax)
+	}
+	// the members cut by the answer may be called after it, with their context done already
+	require.Eventually(t, func() bool {
+		return first.asked() == 1 && second.asked() == 1 && third.asked() == 1 && fourth.asked() == 1
+	}, time.Second, 5*time.Millisecond, "each member asked once")
+	require.Equal(t, uint64(1), group.testMember("first").Failures)
+	require.Zero(t, group.testMember("second").Failures, "cut by the answer of the fourth")
+	require.Zero(t, group.testMember("third").Failures, "cut by the answer of the fourth")
+	require.True(t, output.has("server first gave no answer in 300ms, asking the other 3 together"), output.String())
+
+	// a first member that answers: nobody else is asked
+	first.serve(groupTestAnswer(1, 0))
+	groupTestExpect(t, group, "10.0.0.1")
+	require.Equal(t, []int{1, 1, 1}, []int{second.asked(), third.asked(), fourth.asked()})
+}
+
+// Every member dead, the safety net behind them: the first times out, the rest together, then the
+// provider; each member had its whole time and counts one failure.
+func TestGroupTogetherThenSafetyNet(t *testing.T) {
+	t.Parallel()
+	members := make([]adapter.DNSTransport, 4)
+	for index := range members {
+		members[index] = newGroupTestMember("m"+strconv.Itoa(index+1), groupTestSilent)
+	}
+	group, _ := newGroupTest(t, groupTestProviders(testResolver(t, mDNS.RcodeSuccess)), C.DNSGroupStrategyOrder, true, members...)
+	elapsed := groupTestExpect(t, group, "1.2.3.4")
+	if elapsed > 3*groupTestTiming.attemptMax {
+		t.Errorf("the provider answered after %v; one after another the members alone take %v", elapsed, 4*groupTestTiming.attemptMax)
+	}
+	for index := range members {
+		tag := "m" + strconv.Itoa(index+1)
+		require.Equal(t, uint64(1), group.testMember(tag).Failures, tag)
 	}
 }
