@@ -100,9 +100,9 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if security == "" {
 		security = "auto"
 	}
-	if security == "auto" && outbound.tlsConfig != nil {
-		security = "zero"
-	}
+	// "auto" is AES-128-GCM or ChaCha20-Poly1305, by the hardware, under TLS too. It was
+	// made "zero" there; Xray-core has dropped "zero" and "none", and its server refuses a
+	// request that names one of them ("unknown security type").
 	client, err := vmess.NewClient(options.UUID, security, options.AlterId, clientOptions...)
 	if err != nil {
 		return nil, err
