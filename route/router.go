@@ -232,6 +232,15 @@ func (r *Router) RuleSet(tag string) (adapter.RuleSet, bool) {
 	return ruleSet, loaded
 }
 
+// UpdateRuleSets updates the remote rule-sets now instead of at their update_interval and
+// returns what that came to. With no remote rule-set there is nothing to do.
+func (r *Router) UpdateRuleSets(ctx context.Context) (R.RuleSetUpdateSummary, error) {
+	if r.ruleSetUpdater == nil {
+		return R.RuleSetUpdateSummary{}, nil
+	}
+	return r.ruleSetUpdater.UpdateNow(ctx)
+}
+
 func (r *Router) Rules() []adapter.Rule {
 	return r.rules
 }

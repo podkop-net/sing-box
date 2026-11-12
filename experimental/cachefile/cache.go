@@ -2,6 +2,7 @@ package cachefile
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"os"
@@ -25,12 +26,18 @@ var (
 	bucketExpand   = []byte("group_expand")
 	bucketMode     = []byte("clash_mode")
 	bucketRuleSet  = []byte("rule_set")
+	// when each remote rule set was last found up to date (podkop-engine)
+	bucketRuleSetChecked = []byte("rule_set_checked")
 
 	bucketNameList = []string{
 		string(bucketSelected),
 		string(bucketExpand),
 		string(bucketMode),
 		string(bucketRuleSet),
+		string(bucketRuleSetChecked),
+		string(bucketRuleSetFile),
+		string(bucketUTLSChoice),
+		string(bucketDetectOutcome),
 		string(bucketRDRC),
 		string(bucketDNSCache),
 	}
@@ -466,9 +473,30 @@ func (c *CacheFile) LoadRuleSet(tag string) *adapter.SavedBinary {
 	return &savedSet
 }
 
-func (c *CacheFile) SaveRuleSet(tag string, set *adapter.SavedBinary) error {
+var _ adapter.RuleSetCheckCache = (*CacheFile)(nil)
+
+// LoadRuleSetChecked is when the rule set was last found up to date, the zero time when
+// that is not kept.
+func (c *CacheFile) LoadRuleSetChecked(tag string) time.Time {
+	var at time.Time
+	_ = c.view(func(t *bbolt.Tx) error {
+		bucket := c.bucket(t, bucketRuleSetChecked)
+		if bucket == nil {
+			return nil
+		}
+		if value := bucket.Get([]byte(tag)); len(value) == 8 {
+			at = time.Unix(0, int64(binary.BigEndian.Uint64(value)))
+		}
+		return nil
+	})
+	return at
+}
+
+// StoreRuleSetChecked keeps when the rule set was found up to date: eight bytes, where a
+// save of the rule set writes its whole content again.
+func (c *CacheFile) StoreRuleSetChecked(tag string, at time.Time) error {
 	return c.batch(func(t *bbolt.Tx) error {
-		bucket, err := c.createBucket(t, bucketRuleSet)
+		bucket, err := c.createBucket(t, bucketRuleSetChecked)
 		if err != nil {
 			return err
 		}
