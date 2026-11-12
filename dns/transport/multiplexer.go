@@ -48,6 +48,7 @@ type queryMultiplexer struct {
 	reuseState     atomic.Int32
 	demoteFailures atomic.Int32
 	keepIdle       atomic.Bool
+	shared         atomic.Int32 // queries on the shared connection, not yet ended (podkop-engine)
 
 	probeAccess   sync.Mutex
 	probeEpoch    uint32
@@ -156,7 +157,36 @@ func (m *queryMultiplexer) dispatch(ctx context.Context, message *mDNS.Msg, call
 		go m.exchangeSingle(ctx, message, callback)
 		return
 	}
+	if m.options.probeReuse {
+		// the place on the shared connection is taken here, before the goroutine registers the
+		// query: a burst of queries counted by what is registered would pass the limit together
+		if m.shared.Add(1) > pipelineMaxInflight {
+			m.shared.Add(-1)
+			go m.exchangeSingle(ctx, message, callback)
+			return
+		}
+		callback = m.releaseShared(callback)
+	}
 	go m.exchangeAsync(ctx, message, callback, retryReadError)
+}
+
+// Some servers reset a TCP/TLS connection that carries too many queries at once:
+// Yandex DNS over TLS does with more than about 20. Queries beyond this limit on the
+// shared connection get a connection of their own instead.
+const pipelineMaxInflight = 16
+
+// releaseShared gives the place of a query on the shared connection back when its callback is
+// called, which is once for every query (an answer, an error, the end of its context or of the
+// connection). A query sent again after a read error is dispatched anew and holds a second
+// place until it ends: the limit errs on the safe side.
+func (m *queryMultiplexer) releaseShared(callback func(response *mDNS.Msg, err error)) func(response *mDNS.Msg, err error) {
+	var released atomic.Bool
+	return func(response *mDNS.Msg, err error) {
+		if released.CompareAndSwap(false, true) {
+			m.shared.Add(-1)
+		}
+		callback(response, err)
+	}
 }
 
 func (m *queryMultiplexer) exchangeSingle(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
