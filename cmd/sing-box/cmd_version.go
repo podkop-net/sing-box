@@ -60,5 +60,7 @@ func printVersion(cmd *cobra.Command, args []string) {
 		version += "CGO: disabled\n"
 	}
 
+	version += versionLine()
+
 	os.Stdout.WriteString(version)
 }
