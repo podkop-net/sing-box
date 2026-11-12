@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/bbolt"
@@ -61,6 +62,7 @@ type CacheFile struct {
 	optimisticTimeout  time.Duration
 	DB                 *bbolt.DB
 	dbAccess           sync.RWMutex
+	generation         atomic.Uint64 // counts resetDB: what was saved before is gone
 	saveMetadataAccess sync.Mutex
 	saveMetadata       *adapter.FakeIPMetadata
 	saveMetadataTimer  *time.Timer
@@ -327,6 +329,7 @@ func (c *CacheFile) resetDB(failedDB *bbolt.DB, reason any) {
 		return
 	}
 	c.logger.Error("database corrupted: ", reason, ": resetting")
+	c.generation.Add(1)
 	failedDB.Close()
 	filemanager.Remove(c.ctx, c.path)
 	db, err := bbolt.Open(c.path, 0o666, &bbolt.Options{Timeout: time.Second})
@@ -500,11 +503,7 @@ func (c *CacheFile) StoreRuleSetChecked(tag string, at time.Time) error {
 		if err != nil {
 			return err
 		}
-		setBinary, err := set.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(tag), setBinary)
+		return bucket.Put([]byte(tag), binary.BigEndian.AppendUint64(nil, uint64(at.UnixNano())))
 	})
 }
 

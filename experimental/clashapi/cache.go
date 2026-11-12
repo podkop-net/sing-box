@@ -20,14 +20,19 @@ func cacheRouter(ctx context.Context) http.Handler {
 
 func flushFakeip(ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cacheFile := service.FromContext[adapter.CacheFile](ctx)
-		if cacheFile != nil {
-			err := cacheFile.FakeIPReset()
-			if err != nil {
-				render.Status(r, http.StatusInternalServerError)
-				render.JSON(w, r, newError(err.Error()))
-				return
-			}
+		var err error
+		// the store keeps the map in memory: resetting the cache file alone would leave
+		// it answering
+		transportManager := service.FromContext[adapter.DNSTransportManager](ctx)
+		if transportManager != nil && transportManager.FakeIP() != nil {
+			err = transportManager.FakeIP().Store().Reset()
+		} else if cacheFile := service.FromContext[adapter.CacheFile](ctx); cacheFile != nil {
+			err = cacheFile.FakeIPReset()
+		}
+		if err != nil {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, newError(err.Error()))
+			return
 		}
 		render.NoContent(w, r)
 	}
