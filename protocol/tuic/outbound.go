@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/readwait"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -47,7 +48,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
-	tlsConfig, err := tls.NewClient(ctx, logger, options.Server, common.PtrValueOrDefault(options.TLS))
+	tlsConfig, err := tls.NewClient(ctx, logger, options.Server, tls.QUICClientOptions(logger, common.PtrValueOrDefault(options.TLS)))
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +105,11 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		return h.client.DialConn(ctx, destination)
+		conn, err := h.client.DialConn(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
+		return readwait.NewQUICStreamConn(conn), nil
 	case N.NetworkUDP:
 		if h.udpStream {
 			h.logger.InfoContext(ctx, "outbound stream packet connection to ", destination)

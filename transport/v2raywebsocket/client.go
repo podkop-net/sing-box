@@ -81,6 +81,10 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if c.maxEarlyData > 0 {
 		return &EarlyWebsocketConn{Client: c, rawConn: conn, create: make(chan struct{})}, nil
 	}
+	// the upgrade knows only its own deadline: the end of ctx has to reach it (podkop-engine). The
+	// watcher ends with the dial, so an upgraded connection does not die with ctx
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 	websocketConn, err := c.upgrade(conn, &c.requestURL, c.headers)
 	if err != nil {
 		return nil, err

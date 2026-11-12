@@ -82,6 +82,11 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// the upgrade reads with no deadline: the end of ctx has to reach it (podkop-engine). The
+	// watcher ends with the dial, so an upgraded connection does not die with ctx
+	handshakeConn := conn
+	stop := context.AfterFunc(ctx, func() { handshakeConn.Close() })
+	defer stop()
 	request := &http.Request{
 		Method: http.MethodGet,
 		URL:    &c.requestURL,
