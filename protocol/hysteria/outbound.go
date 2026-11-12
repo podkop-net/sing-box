@@ -47,7 +47,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		Context:        ctx,
 		Logger:         logger,
 		ServerAddress:  options.Server,
-		Options:        common.PtrValueOrDefault(options.TLS),
+		Options:        tls.QUICClientOptions(logger, common.PtrValueOrDefault(options.TLS)),
 		DomainResolver: options.DomainResolver,
 	})
 	if err != nil {
