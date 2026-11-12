@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"unsafe"
 
+	"github.com/sagernet/sing-box/common/domainset"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -80,7 +81,7 @@ func Read(reader io.Reader, recover bool) (ruleSetCompat option.PlainRuleSetComp
 	ruleSetCompat.Version = version
 	for i := range length {
 		var rule option.HeadlessRule
-		rule, err = readRule(bReader, recover, 0)
+		rule, err = readRule(bReader, recover, sets, 0)
 		if err != nil {
 			err = E.Cause(err, "read rule[", i, "]")
 			return
@@ -123,7 +124,7 @@ func Write(writer io.Writer, ruleSet option.PlainRuleSet, generateVersion uint8)
 
 const maxLogicalRuleDepth = 100
 
-func readRule(reader varbin.Reader, recover bool, depth int) (rule option.HeadlessRule, err error) {
+func readRule(reader varbin.Reader, recover bool, sets bool, depth int) (rule option.HeadlessRule, err error) {
 	if depth > maxLogicalRuleDepth {
 		err = E.New("logical rule nested too deep")
 		return
@@ -136,10 +137,10 @@ func readRule(reader varbin.Reader, recover bool, depth int) (rule option.Headle
 	switch ruleType {
 	case 0:
 		rule.Type = C.RuleTypeDefault
-		rule.DefaultOptions, err = readDefaultRule(reader, recover)
+		rule.DefaultOptions, err = readDefaultRule(reader, recover, sets)
 	case 1:
 		rule.Type = C.RuleTypeLogical
-		rule.LogicalOptions, err = readLogicalRule(reader, recover, depth)
+		rule.LogicalOptions, err = readLogicalRule(reader, recover, sets, depth)
 	default:
 		err = E.New("unknown rule type: ", ruleType)
 	}
@@ -157,7 +158,7 @@ func writeRule(writer varbin.Writer, rule option.HeadlessRule, generateVersion u
 	}
 }
 
-func readDefaultRule(reader varbin.Reader, recover bool) (rule option.DefaultHeadlessRule, err error) {
+func readDefaultRule(reader varbin.Reader, recover bool, sets bool) (rule option.DefaultHeadlessRule, err error) {
 	var lastItemType uint8
 	for {
 		var itemType uint8
@@ -327,7 +328,13 @@ func writeDefaultRule(writer varbin.Writer, rule option.DefaultHeadlessRule, gen
 		if err != nil {
 			return err
 		}
-		err = domain.NewMatcher(rule.Domain, rule.DomainSuffix, generateVersion == C.RuleSetVersion1).Write(writer)
+		// what domain.NewMatcher(...).Write writes, built with a fraction of its memory
+		var matcher []byte
+		matcher, err = domainset.Encode(rule.Domain, rule.DomainSuffix, generateVersion == C.RuleSetVersion1)
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(matcher)
 		if err != nil {
 			return err
 		}
@@ -614,7 +621,7 @@ func writeRuleItemCIDR(writer varbin.Writer, itemType uint8, value []string) err
 	return writeIPSet(writer, ipSet)
 }
 
-func readLogicalRule(reader varbin.Reader, recovery bool, depth int) (logicalRule option.LogicalHeadlessRule, err error) {
+func readLogicalRule(reader varbin.Reader, recovery bool, sets bool, depth int) (logicalRule option.LogicalHeadlessRule, err error) {
 	mode, err := reader.ReadByte()
 	if err != nil {
 		return
@@ -634,7 +641,7 @@ func readLogicalRule(reader varbin.Reader, recovery bool, depth int) (logicalRul
 	}
 	for i := range length {
 		var rule option.HeadlessRule
-		rule, err = readRule(reader, recovery, depth+1)
+		rule, err = readRule(reader, recovery, sets, depth+1)
 		if err != nil {
 			err = E.Cause(err, "read logical rule [", i, "]")
 			return

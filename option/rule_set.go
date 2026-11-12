@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/sagernet/sing-box/common/cidrset"
+	"github.com/sagernet/sing-box/common/domainset/succinct"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/schema"
 	"github.com/sagernet/sing/common"
@@ -94,7 +96,7 @@ func (r *RuleSet) UnmarshalJSON(bytes []byte) error {
 		switch r.Format {
 		case "":
 			return E.New("missing format")
-		case C.RuleSetFormatSource, C.RuleSetFormatBinary:
+		case C.RuleSetFormatSource, C.RuleSetFormatBinary, C.RuleSetFormatText:
 		default:
 			return E.New("unknown rule-set format: " + r.Format)
 		}
@@ -142,7 +144,7 @@ func (r RuleSet) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
 			return nil, err
 		}
 		tagNode := schema.ListableOf(schema.StringNode())
-		formatNode := schema.StringEnum(C.RuleSetFormatSource, C.RuleSetFormatBinary)
+		formatNode := schema.StringEnum(C.RuleSetFormatSource, C.RuleSetFormatBinary, C.RuleSetFormatText)
 
 		inlineVariant := schema.StrictObject()
 		inlineVariant.Properties.Put("type", schema.StringEnum(C.RuleSetTypeInline, ""))
@@ -277,6 +279,7 @@ type DefaultHeadlessRule struct {
 	Invert bool `json:"invert,omitempty"`
 
 	DomainMatcher *domain.Matcher `json:"-"`
+	DomainSet     *succinct.Set   `json:"-"` // domain and domain_suffix as common/domainset builds them
 	SourceIPSet   *netipx.IPSet   `json:"-"`
 	IPSet         *netipx.IPSet   `json:"-"`
 
