@@ -52,6 +52,17 @@ const (
 )
 
 func Read(reader io.Reader, recover bool) (ruleSetCompat option.PlainRuleSetCompat, err error) {
+	return read(reader, recover, false)
+}
+
+// ReadSets is Read for a rule set that is matched: the lists of source_ip_cidr and
+// ip_cidr come as cidrset.Set (SourceIPRanges, IPRanges), read into ranges of their own,
+// not as netipx.IPSet.
+func ReadSets(reader io.Reader) (option.PlainRuleSetCompat, error) {
+	return read(reader, false, true)
+}
+
+func read(reader io.Reader, recover bool, sets bool) (ruleSetCompat option.PlainRuleSetCompat, err error) {
 	var magicBytes [3]byte
 	_, err = io.ReadFull(reader, magicBytes[:])
 	if err != nil {
@@ -193,6 +204,10 @@ func readDefaultRule(reader varbin.Reader, recover bool, sets bool) (rule option
 		case ruleItemDomainRegex:
 			rule.DomainRegex, err = readRuleItemString(reader)
 		case ruleItemSourceIPCIDR:
+			if sets {
+				rule.SourceIPRanges, err = readIPRanges(reader, true)
+				break
+			}
 			rule.SourceIPSet, err = readIPSet(reader)
 			if err != nil {
 				return
@@ -201,6 +216,10 @@ func readDefaultRule(reader varbin.Reader, recover bool, sets bool) (rule option
 				rule.SourceIPCIDR = common.Map(rule.SourceIPSet.Prefixes(), netip.Prefix.String)
 			}
 		case ruleItemIPCIDR:
+			if sets {
+				rule.IPRanges, err = readIPRanges(reader, false)
+				break
+			}
 			rule.IPSet, err = readIPSet(reader)
 			if err != nil {
 				return

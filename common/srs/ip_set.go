@@ -7,6 +7,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/sagernet/sing-box/common/cidrset"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/varbin"
 
@@ -50,6 +51,42 @@ func readIPSet(reader varbin.Reader) (*netipx.IPSet, error) {
 		mySet.rr = append(mySet.rr, myIPRange{from: from, to: to})
 	}
 	return (*netipx.IPSet)(unsafe.Pointer(mySet)), nil
+}
+
+// readIPRanges is readIPSet into a cidrset.Set: the ranges go into room made of the size
+// the file tells (a million at most at first: the count is only the file's word), and are
+// merged as netipx merges them. A range a netipx.IPSet would hold out of order, or of two
+// families, makes no set: it is an error.
+func readIPRanges(reader varbin.Reader, source bool) (*cidrset.Set, error) {
+	version, err := reader.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+	if version != 1 {
+		return nil, os.ErrInvalid
+	}
+	var length uint64
+	err = binary.Read(reader, binary.BigEndian, &length)
+	if err != nil {
+		return nil, err
+	}
+	var builder cidrset.Builder
+	builder.Grow(int(min(length, 1<<20)))
+	for range length {
+		var from, to netip.Addr
+		from, err = readIPSetAddr(reader)
+		if err != nil {
+			return nil, err
+		}
+		to, err = readIPSetAddr(reader)
+		if err != nil {
+			return nil, err
+		}
+		if !builder.AddRange(netipx.IPRangeFrom(from, to)) {
+			return nil, os.ErrInvalid
+		}
+	}
+	return builder.Set(cidrset.Describe(source, []string{"<binary>"}, 1)), nil
 }
 
 func readIPSetAddr(reader varbin.Reader) (netip.Addr, error) {
