@@ -194,6 +194,15 @@ func (s *RemoteRuleSet) loadBytes(content []byte) error {
 		if err != nil {
 			return err
 		}
+	case C.RuleSetFormatText:
+		var skipped ruletext.Skipped
+		ruleSet, skipped, err = ruletext.ReadContext(s.ctx, content)
+		if err != nil {
+			return err
+		}
+		if skipped.Count > 0 {
+			s.logger.Warn("rule-set ", s.tag, ": ", skipped.Count, " line(s) are neither a domain nor an IP CIDR and are left out, the first: ", logText(E.New(skipped.First)))
+		}
 	default:
 		return E.New("unknown rule-set format: ", s.options.Format)
 	}

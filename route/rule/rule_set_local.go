@@ -114,7 +114,16 @@ func (s *LocalRuleSet) reloadFile(path string) error {
 			return err
 		}
 		defer setFile.Close()
-		ruleSet, err = srs.Read(setFile, false)
+		ruleSet, err = srs.ReadSets(contextReader{s.ctx, setFile})
+		if err != nil {
+			return err
+		}
+	case C.RuleSetFormatText:
+		content, err := filemanager.ReadFile(s.ctx, path)
+		if err != nil {
+			return err
+		}
+		ruleSet, _, err = ruletext.ReadContext(s.ctx, content)
 		if err != nil {
 			return err
 		}
