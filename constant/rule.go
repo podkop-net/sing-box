@@ -16,6 +16,9 @@ const (
 	RuleSetTypeRemote   = "remote"
 	RuleSetFormatSource = "source"
 	RuleSetFormatBinary = "binary"
+	// RuleSetFormatText is a list written as plain text, a domain or an IP CIDR a line
+	// (common/ruletext).
+	RuleSetFormatText = "text"
 )
 
 const RuleSetTagPlaceholder = "{tag}"
