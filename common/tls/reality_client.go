@@ -30,7 +30,6 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -60,8 +59,10 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if options.UTLS == nil || !options.UTLS.Enabled {
 		return nil, E.New("uTLS is required by reality client")
 	}
-	if options.Spoof != "" || options.SpoofMethod != "" {
-		return nil, E.New("spoof is unsupported in reality")
+
+	classicFingerprint, err := checkRealityFingerprint(options.UTLS.Fingerprint)
+	if err != nil {
+		return nil, err
 	}
 
 	uClient, err := newUTLSClient(ctx, logger, serverAddress, options, allowEmptyServerName)
@@ -77,6 +78,10 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("invalid public_key")
 	}
 	var shortID [8]byte
+	// hex.Decode writes past a destination shorter than its input (podkop-engine)
+	if len(options.Reality.ShortID) > 2*len(shortID) {
+		return nil, E.New("invalid short_id")
+	}
 	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
 	if err != nil {
 		return nil, E.Cause(err, "decode short_id")
@@ -85,7 +90,18 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("invalid short_id")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
+	realityConfig := &RealityClientConfig{ctx: ctx, uClient: uClient.(*UTLSClientConfig), publicKey: publicKey, shortID: shortID, outcome: new(detectOutcomeWriter)}
+	realityConfig.fingerprint = options.UTLS.Fingerprint
+	if realityConfig.fingerprint == "" {
+		realityConfig.fingerprint = "chrome"
+	}
+	if classicFingerprint {
+		realityConfig.classicFingerprint = options.UTLS.Fingerprint
+		if logger != nil {
+			logger.Warn("uTLS fingerprint ", options.UTLS.Fingerprint, " carries no X25519MLKEM768 key share: ", realityHybridKeyShareNote, realityHybridKeyShareAdvice)
+		}
+	}
+	var config Config = realityConfig
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -146,31 +162,31 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	if err != nil {
 		return nil, err
 	}
-	for _, extension := range uConn.Extensions {
-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
-			})
-		}
-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
-			})
-		}
+	uConn, err := newUClient(conn, uConfig, e.uClient.id)
+	if err != nil {
+		return nil, err
 	}
+	verifier.UConn = uConn
+	// X25519MLKEM768 is kept as the fingerprint carries it: REALITY servers
+	// since Xray-core v26.9.8 (XTLS/REALITY@8cdf7bf) reject a Client Hello
+	// without an X25519MLKEM768 key share placed before the optional X25519 one.
 	err = uConn.BuildHandshakeState()
 	if err != nil {
 		return nil, err
 	}
-
-	if len(uConfig.NextProtos) > 0 {
-		for _, extension := range uConn.Extensions {
-			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
-				alpnExtension.AlpnProtocols = uConfig.NextProtos
-				break
-			}
+	if e.uClient.noMLKEM {
+		// a candidate of the fingerprint fallback: the ClientHello as stock sing-box sends it
+		dropMLKEM(uConn)
+		err = uConn.BuildHandshakeState()
+		if err != nil {
+			return nil, err
 		}
 	}
+
+	// The ALPN of the ClientHello is the fingerprint's: BuildHandshakeState has already put
+	// its list in uConfig.NextProtos, and changing the extension here would not reach the
+	// wire before the session ID is sealed below anyway. Only "randomized" reads the
+	// configured ALPN, when it builds its spec.
 
 	hello := uConn.HandshakeState.Hello
 	hello.SessionId = make([]byte, 32)
@@ -184,9 +200,11 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 	binary.BigEndian.PutUint64(hello.SessionId, uint64(nowTime.Unix()))
 
-	hello.SessionId[0] = 1
-	hello.SessionId[1] = 8
-	hello.SessionId[2] = 1
+	// Client version checked against the server's minClientVer
+	// (Xray-core v26.7.x defaults to 26.3.27 and refuses older clients).
+	hello.SessionId[0] = 26
+	hello.SessionId[1] = 3
+	hello.SessionId[2] = 27
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
 	if debug.Enabled {
@@ -200,7 +218,12 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	if keyShareKeys == nil {
 		return nil, E.New("nil KeyShareKeys")
 	}
+	// Same share the server picks: plain X25519 if present,
+	// otherwise the X25519 part of X25519MLKEM768.
 	ecdheKey := keyShareKeys.Ecdhe
+	if ecdheKey == nil {
+		ecdheKey = keyShareKeys.MlkemEcdhe
+	}
 	if ecdheKey == nil {
 		return nil, E.New("nil ecdheKey")
 	}
@@ -227,6 +250,11 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 
 	err = uConn.HandshakeContext(ctx)
 	if err != nil {
+		if verifier.rejected && e.classicFingerprint != "" {
+			// the server passed the connection on to its target, and the certificate of
+			// the target is not valid here: the cause is the same as below
+			return nil, e.verificationFailed(err)
+		}
 		return nil, err
 	}
 
@@ -236,9 +264,10 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 
 	if !verifier.verified {
 		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
-		return nil, E.New("reality verification failed")
+		return nil, e.verificationFailed(nil)
 	}
 
+	releaseHandshakeState(uConn)
 	return &realityClientConnWrapper{uConn}, nil
 }
 
@@ -288,6 +317,8 @@ type realityVerifier struct {
 	serverName string
 	authKey    []byte
 	verified   bool
+	// the certificate is not the server's and did not pass the system verification
+	rejected bool
 }
 
 func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -309,6 +340,7 @@ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChain
 		opts.Intermediates.AddCert(cert)
 	}
 	if _, err := certs[0].Verify(opts); err != nil {
+		c.rejected = true
 		return err
 	}
 	return nil

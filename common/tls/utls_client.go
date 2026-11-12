@@ -90,7 +90,11 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos}, nil
+	uConn, err := newUClient(conn, c.config.Clone(), c.id)
+	if err != nil {
+		return nil, err
+	}
+	return &utlsALPNWrapper{utlsConnWrapper{uConn}, c.config.NextProtos, c.noMLKEM}, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
@@ -165,6 +169,11 @@ type utlsALPNWrapper struct {
 }
 
 func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
+	if c.UConn.HandshakeState.Hello == nil {
+		// the handshake is done and its state released (releaseHandshakeState): there is
+		// no Client Hello to rebuild, the connection only reports that it is complete
+		return c.UConn.HandshakeContext(ctx)
+	}
 	if len(c.nextProtocols) > 0 {
 		err := c.BuildHandshakeState()
 		if err != nil {
@@ -181,7 +190,34 @@ func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
 			}
 		}
 	}
-	return c.UConn.HandshakeContext(ctx)
+	if c.noMLKEM {
+		err := c.BuildHandshakeState()
+		if err != nil {
+			return err
+		}
+		dropMLKEM(c.UConn)
+		err = c.BuildHandshakeState()
+		if err != nil {
+			return err
+		}
+	}
+	err := c.UConn.HandshakeContext(ctx)
+	if err != nil {
+		return err
+	}
+	releaseHandshakeState(c.UConn)
+	return nil
+}
+
+// releaseHandshakeState drops what only the handshake reads: the ClientHello, the private
+// keys of the key shares (an ML-KEM-768 decapsulation key takes ~8 KiB) and the extension
+// objects. The connection keeps them for its whole life otherwise; after the handshake
+// uTLS works through the embedded Conn, which does not use them.
+func releaseHandshakeState(uConn *utls.UConn) {
+	uConn.HandshakeState.Hello = nil
+	uConn.HandshakeState.ServerHello = nil
+	uConn.HandshakeState.State13 = utls.TLS13OnlyState{}
+	uConn.Extensions = nil
 }
 
 func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -353,17 +389,20 @@ var (
 func init() {
 	modernFingerprints := []utls.ClientHelloID{
 		utls.HelloChrome_Auto,
-		utls.HelloFirefox_Auto,
-		utls.HelloEdge_Auto,
-		utls.HelloSafari_Auto,
-		utls.HelloIOS_Auto,
+		helloFirefox148,
+		helloSafari26_3,
 	}
 	randomFingerprint = modernFingerprints[rand.Intn(len(modernFingerprints))]
 
 	weights := utls.DefaultWeights
 	weights.TLSVersMax_Set_VersionTLS13 = 1
 	weights.FirstKeyShare_Set_CurveP256 = 0
-	randomizedFingerprint = utls.HelloRandomized
+	// X25519MLKEM768 always offered: REALITY servers since Xray-core v26.9.8 refuse a
+	// Client Hello without it (its key share: randomizedSpec).
+	weights.CurveIDs_Append_X25519 = 1
+	// ALPN always sent, as Xray-core does: without it gRPC and HTTP/2 transports cannot
+	// agree on h2, for as long as the process keeps the seed.
+	randomizedFingerprint = utls.HelloRandomizedALPN
 	randomizedFingerprint.Seed, _ = utls.NewPRNGSeed()
 	randomizedFingerprint.Weights = &weights
 }
@@ -375,11 +414,11 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	case "chrome", "":
 		return utls.HelloChrome_Auto, nil
 	case "firefox":
-		return utls.HelloFirefox_Auto, nil
+		return helloFirefox148, nil
 	case "edge":
 		return utls.HelloEdge_Auto, nil
 	case "safari":
-		return utls.HelloSafari_Auto, nil
+		return helloSafari26_3, nil
 	case "360":
 		return utls.Hello360_Auto, nil
 	case "qq":
