@@ -1,0 +1,299 @@
+package route
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"net"
+	"net/netip"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/sniff"
+	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	R "github.com/sagernet/sing-box/route/rule"
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+
+	"github.com/stretchr/testify/require"
+)
+
+type lockedBuffer struct {
+	access sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.access.Lock()
+	defer b.access.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.access.Lock()
+	defer b.access.Unlock()
+	return b.buffer.String()
+}
+
+// lines returns the log lines of level and above debug.
+func (b *lockedBuffer) lines() []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+		if line != "" && !strings.HasPrefix(line, "DEBUG") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// A real logger: it panics on argument types it does not format.
+func newLoggedRouter(t *testing.T) (*Router, *lockedBuffer) {
+	output := new(lockedBuffer)
+	factory := log.NewDefaultFactory(context.Background(), log.Formatter{BaseTime: time.Now(), DisableColors: true}, output, "", nil, false)
+	require.NoError(t, factory.Start())
+	t.Cleanup(func() { factory.Close() })
+	return &Router{ctx: context.Background(), logger: factory.NewLogger("router")}, output
+}
+
+type fakeFakeIPStore struct {
+	adapter.FakeIPStore
+	prefix netip.Prefix
+}
+
+func (s fakeFakeIPStore) Contains(address netip.Addr) bool { return s.prefix.Contains(address) }
+
+func (s fakeFakeIPStore) Lookup(netip.Addr) (string, bool) { return "", false }
+
+type fakeFakeIPTransport struct {
+	adapter.FakeIPTransport
+	store adapter.FakeIPStore
+}
+
+func (t fakeFakeIPTransport) Store() adapter.FakeIPStore { return t.store }
+
+type fakeDNSTransportManager struct {
+	adapter.DNSTransportManager
+	fakeIP adapter.FakeIPTransport
+}
+
+func (m fakeDNSTransportManager) FakeIP() adapter.FakeIPTransport { return m.fakeIP }
+
+type fakeDNSRouter struct {
+	adapter.DNSRouter
+}
+
+func (fakeDNSRouter) LookupReverseMapping(netip.Addr) (string, bool) { return "", false }
+
+type fakeDirectOutbound struct {
+	adapter.Outbound
+}
+
+func (fakeDirectOutbound) Type() string      { return C.TypeDirect }
+func (fakeDirectOutbound) Tag() string       { return "direct-out" }
+func (fakeDirectOutbound) Network() []string { return []string{N.NetworkTCP, N.NetworkUDP} }
+
+type fakeDefaultOutboundManager struct {
+	adapter.OutboundManager
+}
+
+func (fakeDefaultOutboundManager) Default() adapter.Outbound { return fakeDirectOutbound{} }
+
+// closedPacketConn is the connection of a refused session: the router only closes it.
+type closedPacketConn struct {
+	N.PacketConn
+}
+
+func (closedPacketConn) Close() error { return nil }
+
+func routeRefused(t *testing.T, router *Router, network string, metadata adapter.InboundContext) {
+	closed := make(chan error, 1)
+	onClose := func(err error) { closed <- err }
+	if network == N.NetworkTCP {
+		conn, peer := net.Pipe()
+		defer peer.Close()
+		router.RouteConnectionEx(context.Background(), conn, metadata, onClose)
+	} else {
+		router.RoutePacketConnectionEx(context.Background(), closedPacketConn{}, metadata, onClose)
+	}
+	select {
+	case err := <-closed:
+		require.Error(t, err, "the connection is refused")
+	default:
+		t.Fatal("the connection was not refused")
+	}
+}
+
+// A connection to a FakeIP address the store has no record for is refused by design: the
+// log says so at the warn level, with the address, not as an error of the router.
+func TestMissingFakeIPRecordIsLoggedAsWarning(t *testing.T) {
+	router, output := newLoggedRouter(t)
+	router.dnsTransport = fakeDNSTransportManager{fakeIP: fakeFakeIPTransport{store: fakeFakeIPStore{prefix: netip.MustParsePrefix("198.18.0.0/15")}}}
+	metadata := adapter.InboundContext{
+		Inbound:     "tproxy-in",
+		Source:      M.ParseSocksaddr("192.168.1.2:40000"),
+		Destination: M.ParseSocksaddr("198.18.0.5:22"),
+	}
+	routeRefused(t, router, N.NetworkTCP, metadata)
+	routeRefused(t, router, N.NetworkUDP, metadata)
+	// the call of old inbounds returns when the connection or the router is closed
+	routerContext, stopRouter := context.WithCancel(context.Background())
+	stopRouter()
+	router.ctx = routerContext
+	require.NoError(t, router.RoutePacketConnection(context.Background(), closedPacketConn{}, metadata))
+
+	lines := output.lines()
+	require.Len(t, lines, 3, output.String())
+	for _, line := range lines {
+		require.True(t, strings.HasPrefix(line, "WARN"), line)
+		require.Contains(t, line, "no fakeip record")
+		require.Contains(t, line, "198.18.0.5:22")
+	}
+}
+
+// waitLoopWindowClosed waits until the refusals of no inbound are being counted.
+func waitLoopWindowClosed(t *testing.T, router *Router) {
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		router.loopRefusals.access.Lock()
+		open := len(router.loopRefusals.windows)
+		router.loopRefusals.access.Unlock()
+		if open == 0 {
+			return
+		}
+		require.False(t, time.Now().After(deadline), "the window stays open after the refusals stopped")
+	}
+}
+
+// The refusal of a connection that would be dialed back to its inbound is logged once,
+// then counted: one line per interval while the refusals go on.
+func TestLoopRefusalsAreCounted(t *testing.T) {
+	defer func() { loopRefusalLogInterval = 10 * time.Second }()
+	router, output := newLoggedRouter(t)
+	dnsIn := M.ParseSocksaddr("127.0.0.42:53")
+	router.inbound = fakeInboundManager{inbounds: map[string]adapter.Inbound{"dns-in": fakeListenInbound{addr: dnsIn}}}
+	router.outbound = fakeDefaultOutboundManager{}
+	router.dnsTransport = fakeDNSTransportManager{}
+	router.dns = fakeDNSRouter{}
+	metadata := adapter.InboundContext{
+		Inbound:     "dns-in",
+		Source:      M.ParseSocksaddr("127.0.0.1:40000"),
+		Destination: dnsIn,
+	}
+
+	// The counting, without the clock: the interval never ends by itself here, the test
+	// ends it by hand. The timers armed meanwhile do not fire while the test runs.
+	loopRefusalLogInterval = time.Hour
+	for range 20 {
+		routeRefused(t, router, N.NetworkUDP, metadata)
+	}
+	routeRefused(t, router, N.NetworkTCP, metadata)
+	lines := output.lines()
+	require.Len(t, lines, 1, output.String())
+	require.True(t, strings.HasPrefix(lines[0], "ERROR"), lines[0])
+	require.Contains(t, lines[0], "refused packet to the address of inbound dns-in (127.0.0.42:53): not hijacked, would loop")
+	router.loopRefusals.flush(router.logger, "dns-in")
+	lines = output.lines()
+	require.Len(t, lines, 2, output.String())
+	require.True(t, strings.HasPrefix(lines[1], "ERROR"), lines[1])
+	require.Contains(t, lines[1], "inbound dns-in: 20 more refused in 1h0m0s, the last: refused connection to the address of inbound dns-in (127.0.0.42:53)")
+	// an interval without refusals closes the window, silently
+	router.loopRefusals.flush(router.logger, "dns-in")
+	router.loopRefusals.access.Lock()
+	open := len(router.loopRefusals.windows)
+	router.loopRefusals.access.Unlock()
+	require.Zero(t, open)
+	require.Len(t, output.lines(), 2)
+
+	// The clock: refusals that come later are logged anew, the one that follows at once is
+	// counted, and the window closes by itself after an interval without refusals.
+	loopRefusalLogInterval = 2 * time.Second
+	routeRefused(t, router, N.NetworkUDP, metadata)
+	routeRefused(t, router, N.NetworkUDP, metadata)
+	require.Len(t, output.lines(), 3, output.String())
+	waitLoopWindowClosed(t, router)
+	lines = output.lines()
+	require.Len(t, lines, 4, output.String())
+	require.Contains(t, lines[3], "inbound dns-in: 1 more refused in 2s, the last: refused packet")
+}
+
+// onePacket delivers the same packet on every read.
+type onePacket struct {
+	N.PacketConn
+}
+
+func (onePacket) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	buffer.Write([]byte("packet"))
+	return M.ParseSocksaddr("192.0.2.1:443"), nil
+}
+
+func (onePacket) SetReadDeadline(time.Time) error { return nil }
+
+func panickingSniffer(context.Context, *adapter.InboundContext, []byte) error {
+	var empty []byte
+	_ = empty[1]
+	return nil
+}
+
+func panickingStreamSniffer(context.Context, *adapter.InboundContext, io.Reader) error {
+	return panickingSniffer(nil, nil, nil)
+}
+
+// A sniffer that panics on what a client sends panics for every such connection: its stack
+// is logged for the first one and then at most once per interval, with the number of
+// panics in between, and the error kept in the metadata of each connection is one line.
+func TestSnifferPanicStackIsLoggedOncePerInterval(t *testing.T) {
+	router, output := newLoggedRouter(t)
+	action := &R.RuleActionSniff{
+		PacketSniffers: []sniff.PacketSniffer{panickingSniffer},
+		StreamSniffers: []sniff.StreamSniffer{panickingStreamSniffer},
+	}
+	sniffPacket := func() {
+		var metadata adapter.InboundContext
+		_, packetBuffers, fatalErr := router.actionSniff(context.Background(), &metadata, action, nil, onePacket{}, nil, nil)
+		require.NoError(t, fatalErr)
+		N.ReleaseMultiPacketBuffer(packetBuffers)
+		require.ErrorIs(t, metadata.SniffError, sniff.ErrSnifferPanicked)
+		require.Contains(t, metadata.SniffError.Error(), "index out of range")
+		require.NotContains(t, metadata.SniffError.Error(), "\n", "the error of the connection carries no stack")
+	}
+	sniffStream := func() {
+		var metadata adapter.InboundContext
+		conn, peer := net.Pipe()
+		defer conn.Close()
+		defer peer.Close()
+		go peer.Write([]byte("stream"))
+		buffer, _, fatalErr := router.actionSniff(context.Background(), &metadata, action, conn, nil, nil, nil)
+		require.NoError(t, fatalErr)
+		buffer.Release()
+		require.ErrorIs(t, metadata.SniffError, sniff.ErrSnifferPanicked)
+		require.NotContains(t, metadata.SniffError.Error(), "\n", "the error of the connection carries no stack")
+	}
+	sniffPacket()
+	for range 3 {
+		sniffPacket()
+		sniffStream()
+	}
+	logged := output.String()
+	require.Equal(t, 1, strings.Count(logged, " [running]:"), logged)
+	require.Contains(t, logged, "panickingSniffer")
+	errorLines := 0
+	for _, line := range output.lines() {
+		if strings.HasPrefix(line, "ERROR") {
+			errorLines++
+			require.Contains(t, line, "sniffer panicked: runtime error: index out of range")
+		}
+	}
+	require.Equal(t, 1, errorLines, logged)
+
+	// the interval is over
+	snifferPanicLogInterval = time.Nanosecond
+	defer func() { snifferPanicLogInterval = time.Minute }()
+	sniffPacket()
+	logged = output.String()
+	require.Equal(t, 2, strings.Count(logged, " [running]:"), logged)
+	require.Contains(t, logged, "6 more since the last stack was logged")
+}

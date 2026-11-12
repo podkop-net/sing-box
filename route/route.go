@@ -63,7 +63,7 @@ func (r *Router) RouteConnectionEx(ctx context.Context, conn net.Conn, metadata 
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		if E.IsClosedOrCanceled(err) || R.IsRejected(err) {
 			r.logger.DebugContext(ctx, "connection closed: ", err)
-		} else {
+		} else if !r.logRefused(ctx, metadata.Destination, err) {
 			r.logger.ErrorContext(ctx, err)
 		}
 	}
@@ -166,7 +166,7 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	}
 	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	onClose = registerInterrupt(chain, conn, onClose)
-	outbound := chain[len(chain)-1]
+	outbound := dialTarget(chain)
 	if outboundHandler, isHandler := outbound.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
@@ -236,7 +236,7 @@ func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, m
 		conn.Close()
 		if E.IsClosedOrCanceled(err) || R.IsRejected(err) {
 			r.logger.DebugContext(ctx, "connection closed: ", err)
-		} else {
+		} else if !r.logRefused(ctx, metadata.Destination, err) {
 			r.logger.ErrorContext(ctx, err)
 		}
 	}
@@ -253,7 +253,7 @@ func (r *Router) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn,
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		if E.IsClosedOrCanceled(err) || R.IsRejected(err) {
 			r.logger.DebugContext(ctx, "connection closed: ", err)
-		} else {
+		} else if !r.logRefused(ctx, metadata.Destination, err) {
 			r.logger.ErrorContext(ctx, err)
 		}
 	}
@@ -349,7 +349,7 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	}
 	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	onClose = registerInterrupt(chain, conn, onClose)
-	outbound := chain[len(chain)-1]
+	outbound := dialTarget(chain)
 	if outboundHandler, isHandler := outbound.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
@@ -583,6 +583,27 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
 	return result
 }
 
+// errMissingFakeIPRecord: a connection to a FakeIP address the store has no record for. The
+// store forgets an address that was given out shortly before a crash, or that nobody used
+// for a long time; a client may still hold it.
+var errMissingFakeIPRecord = E.New("missing fakeip record")
+
+// logRefused logs a connection the router refuses by design, which is no failure of the
+// router: it tells whether err was such a refusal. destination is where the connection
+// came in for.
+func (r *Router) logRefused(ctx context.Context, destination M.Socksaddr, err error) bool {
+	if errors.Is(err, errMissingFakeIPRecord) {
+		r.logger.WarnContext(ctx, "connection to ", destination, " refused: no fakeip record (the address was given out shortly before a crash, was flushed, or was unused for a long time); the client gets a new one when it resolves the name again")
+		return true
+	}
+	var loop *inboundLoopError
+	if errors.As(err, &loop) {
+		r.loopRefusals.refused(ctx, r.logger, loop)
+		return true
+	}
+	return false
+}
+
 func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.InboundContext) error {
 	r.searchProcessInfo(ctx, metadata)
 	if r.neighborResolver != nil && metadata.SourceMACAddress == nil && metadata.Source.Addr.IsValid() {
@@ -605,7 +626,7 @@ func (r *Router) prepareMatchMetadata(ctx context.Context, metadata *adapter.Inb
 	if metadata.Destination.Addr.IsValid() && r.dnsTransport.FakeIP() != nil && r.dnsTransport.FakeIP().Store().Contains(metadata.Destination.Addr) {
 		domain, loaded := r.dnsTransport.FakeIP().Store().Lookup(metadata.Destination.Addr)
 		if !loaded {
-			return E.New("missing fakeip record, try enable `experimental.cache_file`")
+			return errMissingFakeIPRecord
 		}
 		if domain != "" {
 			metadata.OriginDestination = metadata.Destination
@@ -639,6 +660,23 @@ func (r *Router) matchRule(
 	buffers []*buf.Buffer, packetBuffers []*N.PacketBuffer, fatalErr error,
 ) {
 	fatalErr = r.prepareMatchMetadata(ctx, metadata)
+	// A connection to a FakeIP address without a record is not refused at once: if a rule
+	// sniffs it and the client names the domain itself (TLS, HTTP, QUIC), that domain is
+	// where it goes, as if the record were there. Without a name it is refused once the
+	// rules are through.
+	missingFakeIP := errors.Is(fatalErr, errMissingFakeIPRecord)
+	if missingFakeIP {
+		fatalErr = nil
+		defer func() {
+			if missingFakeIP && fatalErr == nil {
+				selectedRule = nil
+				buf.ReleaseMulti(buffers)
+				N.ReleaseMultiPacketBuffer(packetBuffers)
+				buffers, packetBuffers = nil, nil
+				fatalErr = errMissingFakeIPRecord
+			}
+		}()
+	}
 	if fatalErr != nil {
 		return
 	}
@@ -719,6 +757,16 @@ match:
 			if newErr != nil {
 				fatalErr = newErr
 				return
+			}
+			if missingFakeIP && M.IsDomainName(metadata.Domain) {
+				missingFakeIP = false
+				metadata.OriginDestination = metadata.Destination
+				metadata.Destination = M.Socksaddr{
+					Fqdn: metadata.Domain,
+					Port: metadata.Destination.Port,
+				}
+				metadata.FakeIP = true
+				r.logger.InfoContext(ctx, "missing fakeip record, sniffed domain used: ", metadata.Domain)
 			}
 		case *R.RuleActionResolve:
 			fatalErr = r.actionResolve(ctx, metadata, action)
