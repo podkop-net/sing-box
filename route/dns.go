@@ -13,6 +13,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/udpnat2"
 
 	mDNS "github.com/miekg/dns"
 )
@@ -28,7 +29,7 @@ func (r *Router) hijackDNSStream(ctx context.Context, conn net.Conn, metadata ad
 		conn.SetReadDeadline(time.Now().Add(C.DNSTimeout))
 		err = dnsOutbound.HandleStreamDNSRequest(ctx, r.dns, conn, metadata)
 		if err != nil {
-			if !E.IsClosedOrCanceled(err) {
+			if !E.IsClosedOrCanceled(err) && !dns.IsLoggedFailure(err) {
 				return err
 			} else {
 				return nil
@@ -43,11 +44,14 @@ func (r *Router) hijackDNSPacket(ctx context.Context, conn N.PacketConn, packetB
 	if err != nil {
 		N.ReleaseMultiPacketBuffer(packetBuffers)
 		err = E.Cause(err, "report handshake success")
+	} else if natConn, isNatConn := conn.(udpnat.Conn); isNatConn {
+		r.hijackDNSNatConn(ctx, natConn, packetBuffers, metadata, onClose) // see dns_nat.go
+		return nil
 	} else {
 		err = dnsOutbound.NewDNSPacketConnection(ctx, r.dns, conn, packetBuffers, metadata)
 	}
 	N.CloseOnHandshakeFailure(conn, onClose, err)
-	if err != nil && !E.IsClosedOrCanceled(err) {
+	if err != nil && !E.IsClosedOrCanceled(err) && !dns.IsLoggedFailure(err) {
 		return E.Cause(err, "process DNS packet")
 	}
 	return nil
@@ -67,7 +71,7 @@ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.P
 		if exchangeErr == nil {
 			exchangeErr = r.writeDNSPacketResponse(&message, response, writer, destination)
 		}
-		if exchangeErr != nil && !R.IsRejected(exchangeErr) && !E.IsClosedOrCanceled(exchangeErr) {
+		if exchangeErr != nil && !R.IsRejected(exchangeErr) && !E.IsClosedOrCanceled(exchangeErr) && !dns.IsLoggedFailure(exchangeErr) {
 			r.logger.ErrorContext(ctx, E.Cause(exchangeErr, "process DNS packet"))
 		}
 	})
