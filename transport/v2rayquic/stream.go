@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go"
+	"github.com/sagernet/sing-box/common/readwait"
 	qtls "github.com/sagernet/sing-quic"
+	N "github.com/sagernet/sing/common/network"
 )
 
 type StreamWrapper struct {
@@ -19,6 +21,16 @@ type StreamWrapper struct {
 func (s *StreamWrapper) Read(p []byte) (n int, err error) {
 	n, err = s.Stream.Read(p)
 	return n, qtls.WrapError(err)
+}
+
+// CreateReadWaiter lets the copy loop wait for data with Peek before it takes a buffer
+// (podkop-engine, see common/readwait).
+func (s *StreamWrapper) CreateReadWaiter() (N.ReadWaiter, bool) {
+	peekBuffer := make([]byte, 1)
+	return readwait.NewPeekWaiter(s, func() error {
+		_, err := s.Stream.Peek(peekBuffer)
+		return err
+	}), true
 }
 
 func (s *StreamWrapper) Write(p []byte) (n int, err error) {
