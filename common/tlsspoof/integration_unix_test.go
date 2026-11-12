@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"io"
 	"net"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +39,9 @@ func TestIntegrationSpoofer(t *testing.T) {
 			t.Run(family.name+"/"+tc.name, func(t *testing.T) {
 				if tc.method == MethodWrongTimestamp && runtime.GOOS == "darwin" {
 					t.Skip("wrong-timestamp is not supported on macOS")
+				}
+				if tc.method == MethodWrongTimestamp && tcpTimestampsOff() {
+					t.Skip("wrong-timestamp is refused on a connection without TCP timestamps")
 				}
 				client, serverPort := family.dial(t)
 				spoofer, err := newRawSpoofer(client, tc.method)
@@ -182,4 +187,9 @@ func runInjectsThenForwardsRealCH(t *testing.T, network, address string) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("echo server did not receive real ClientHello")
 	}
+}
+
+func tcpTimestampsOff() bool {
+	setting, err := os.ReadFile("/proc/sys/net/ipv4/tcp_timestamps")
+	return err == nil && strings.TrimSpace(string(setting)) == "0"
 }
