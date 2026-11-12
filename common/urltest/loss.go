@@ -184,10 +184,10 @@ type lossState struct {
 func (s *HistoryStorage) StoreLossSample(tag string, sample LossSample) {
 	s.access.Lock()
 	defer s.access.Unlock()
-	state := s.losses[tag]
+	state := s.detail.losses[tag]
 	if state == nil {
 		state = &lossState{}
-		s.losses[tag] = state
+		s.detail.losses[tag] = state
 	}
 	kept := state.samples[:0]
 	for _, old := range state.samples {
@@ -210,10 +210,10 @@ func (s *HistoryStorage) StoreLossSample(tag string, sample LossSample) {
 func (s *HistoryStorage) StoreLossFailure(tag string, at time.Time) int {
 	s.access.Lock()
 	defer s.access.Unlock()
-	state := s.losses[tag]
+	state := s.detail.losses[tag]
 	if state == nil {
 		state = &lossState{}
-		s.losses[tag] = state
+		s.detail.losses[tag] = state
 	}
 	state.lastAttempt = at
 	state.failures++
@@ -227,7 +227,7 @@ func (s *HistoryStorage) LossAttempt(tag string) (time.Time, int) {
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	if state := s.losses[tag]; state != nil {
+	if state := s.detail.losses[tag]; state != nil {
 		return state.lastAttempt, state.failures
 	}
 	return time.Time{}, 0
@@ -237,10 +237,10 @@ func (s *HistoryStorage) LossAttempt(tag string) (time.Time, int) {
 func (s *HistoryStorage) StoreLossNotCounted(tag string, at time.Time) {
 	s.access.Lock()
 	defer s.access.Unlock()
-	state := s.losses[tag]
+	state := s.detail.losses[tag]
 	if state == nil {
 		state = &lossState{}
-		s.losses[tag] = state
+		s.detail.losses[tag] = state
 	}
 	state.notCounted = at
 	state.lastAttempt = at
@@ -254,7 +254,7 @@ func (s *HistoryStorage) LossNotCounted(tag string) time.Time {
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	if state := s.losses[tag]; state != nil {
+	if state := s.detail.losses[tag]; state != nil {
 		return state.notCounted
 	}
 	return time.Time{}
@@ -286,7 +286,7 @@ func (s *HistoryStorage) LossWindows(tag string, now time.Time) []LossWindow {
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	state := s.losses[tag]
+	state := s.detail.losses[tag]
 	if state == nil || len(state.samples) == 0 {
 		return nil
 	}
@@ -323,7 +323,7 @@ func (s *HistoryStorage) LastLossSample(tag string) (LossSample, bool) {
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	state := s.losses[tag]
+	state := s.detail.losses[tag]
 	if state == nil || len(state.samples) == 0 {
 		return LossSample{}, false
 	}
@@ -338,7 +338,7 @@ func (s *HistoryStorage) LossRTT(tag string, now time.Time) time.Duration {
 	}
 	s.access.RLock()
 	defer s.access.RUnlock()
-	state := s.losses[tag]
+	state := s.detail.losses[tag]
 	if state == nil {
 		return 0
 	}
