@@ -64,6 +64,12 @@ func UTP(_ context.Context, metadata *adapter.InboundContext, packet []byte) err
 	if version != 1 || ty > 4 {
 		return os.ErrInvalid
 	}
+	// podkop-engine: a WireGuard handshake initiation (148 bytes, the type 1 as four
+	// little-endian bytes) reads as a uTP data packet without extensions and with
+	// connection id 0; it began every plain WireGuard tunnel taken for BitTorrent
+	if len(packet) == 148 && packet[1] == 0 && packet[2] == 0 && packet[3] == 0 {
+		return os.ErrInvalid
+	}
 
 	// Validate the extensions
 	extension := packet[1]
