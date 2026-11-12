@@ -12,6 +12,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/vless/encryption"
 	"github.com/sagernet/sing-box/transport/v2ray"
 	"github.com/sagernet/sing-vmess/packetaddr"
 	"github.com/sagernet/sing-vmess/vless"
@@ -45,6 +46,8 @@ type Outbound struct {
 	transport       adapter.V2RayClientTransport
 	packetAddr      bool
 	xudp            bool
+	// encryption is VLESS Encryption between the transport and VLESS, nil without it
+	encryption *encryption.ClientInstance
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
@@ -72,6 +75,28 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, err
 		}
 		outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
+	}
+	if options.Encryption != "" && options.Encryption != "none" {
+		outbound.encryption, err = encryption.NewClient(options.Encryption)
+		if err != nil {
+			return nil, E.Cause(err, "encryption")
+		}
+	}
+	// With VLESS Encryption Vision works on that layer, whatever the transport under
+	// it is, as in Xray (podkop-engine).
+	if options.Flow != "" && outbound.encryption == nil {
+		switch transportType := common.PtrValueOrDefault(options.Transport).Type; transportType {
+		case C.V2RayTransportTypeXHTTP:
+			// Vision needs the TLS connection itself; over XHTTP Xray has it only
+			// with VLESS Encryption (podkop-engine).
+			return nil, E.New("flow ", options.Flow, " is not supported over the xhttp transport without VLESS Encryption")
+		case C.V2RayTransportTypeWebsocket, C.V2RayTransportTypeGRPC, C.V2RayTransportTypeHTTP, C.V2RayTransportTypeQUIC:
+			// Not an error: a configuration with such an outbound starts today, with
+			// this one outbound dead, and must go on starting (podkop-engine).
+			logger.Warn("flow ", options.Flow, " does not work over the ", transportType, " transport: it needs the TLS connection itself, every connection of this outbound will fail")
+		case C.V2RayTransportTypeHTTPUpgrade:
+			logger.Warn("flow ", options.Flow, " over the httpupgrade transport is refused by Xray servers")
+		}
 	}
 	if options.Transport != nil {
 		outbound.transport, err = v2ray.NewClientTransport(ctx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
@@ -201,6 +226,10 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	if err != nil {
 		return nil, err
 	}
+	conn, err = h.encrypt(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
@@ -242,6 +271,10 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	}
 	if err != nil {
 		common.Close(conn)
+		return nil, err
+	}
+	conn, err = h.encrypt(ctx, conn)
+	if err != nil {
 		return nil, err
 	}
 	if h.xudp {
