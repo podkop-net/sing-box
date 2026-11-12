@@ -47,6 +47,75 @@ type RealityClientConfig struct {
 	uClient   *UTLSClientConfig
 	publicKey []byte
 	shortID   [8]byte
+	// the name of a uTLS fingerprint without an X25519MLKEM768 key share, otherwise empty
+	classicFingerprint string
+	// that fingerprint is one the fingerprint fallback has gone on to, not the configured one
+	classicFallback bool
+	// the configured fingerprint name, for the block detector's key when the fallback is off
+	// (podkop-engine); it defaults to "chrome", as the fallback does
+	fingerprint string
+	// what the block detector reads of the server when the fallback is off, shared with the
+	// clones (podkop-engine)
+	outcome *detectOutcomeWriter
+}
+
+// REALITY servers since Xray-core v26.9.8 (XTLS/REALITY@8cdf7bf) take a Client Hello
+// without an X25519MLKEM768 key share for a stranger and pass it on to the target, whose
+// certificate then fails the verification. Older servers accept such a Client Hello, so
+// the fingerprints that carry only X25519 are not refused, but the cause is named.
+const (
+	realityHybridKeyShareNote = "REALITY servers since Xray-core v26.9.8 reject a Client Hello without an X25519MLKEM768 key share"
+	// what to configure in place of such a fingerprint
+	realityHybridKeyShareAdvice = ", use chrome, firefox, safari, random or randomized"
+)
+
+// realityFallbackRequestWait bounds the request a client that failed the verification sends
+// to the target, as a browser would, before the error returns: the fingerprint fallback tries
+// its next candidate only after it. The common targets of REALITY answer their whole first page
+// within 1.34 s of the handshake from a datacenter, and www.microsoft.com did not answer at all
+// (lab/runs/2026-11-28-reality-fallback); without a bound such a target holds every candidate
+// for the whole handshake timeout.
+const realityFallbackRequestWait = 2 * time.Second
+
+// realityStrangerError is the failure of a handshake with a fingerprint without the
+// X25519MLKEM768 key share that the server answered as it answers a stranger, with the
+// certificate of its target: what a server since Xray-core v26.9.8 does with every such
+// Client Hello, whatever it did before it was updated.
+type realityStrangerError struct {
+	error
+}
+
+func (e *realityStrangerError) Unwrap() error {
+	return e.error
+}
+
+// checkRealityFingerprint refuses the uTLS fingerprints REALITY cannot work with and
+// reports whether the named one lacks the X25519MLKEM768 key share.
+func checkRealityFingerprint(name string) (classic bool, err error) {
+	switch name {
+	case "android", "360":
+		// Client Hellos of TLS 1.2: no key share to derive the authentication key from
+		return false, E.New("uTLS fingerprint ", name, " is unsupported in reality: a TLS 1.2 Client Hello without a key share, use chrome, firefox, safari, random or randomized")
+	case "edge", "ios", "qq":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// verificationFailed is the error of a failed verification, cause being what the
+// handshake itself failed with, if it did. It names the fingerprint that may be the
+// cause, and what to configure in its place when it is the configured one.
+func (e *RealityClientConfig) verificationFailed(cause error) error {
+	failure := &realityVerifyError{cause: cause}
+	if e.classicFingerprint == "" {
+		return failure
+	}
+	failure.note = ", possibly because of the uTLS fingerprint " + e.classicFingerprint + ": " + realityHybridKeyShareNote
+	if !e.classicFallback {
+		failure.note += realityHybridKeyShareAdvice
+	}
+	return &realityStrangerError{failure}
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -261,7 +330,11 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	if !verifier.verified {
-		realityClientFallback(ctx, uConn, e.uClient.ServerName(), e.uClient.id)
+		// the request a browser would make goes out before the error returns (the caller closes
+		// the connection then), within realityFallbackRequestWait (podkop-engine)
+		fallbackCtx, cancel := context.WithTimeout(ctx, realityFallbackRequestWait)
+		realityClientFallback(fallbackCtx, uConn, e.uClient.ServerName(), e.uClient.id)
+		cancel()
 		return nil, e.verificationFailed(nil)
 	}
 
@@ -383,4 +456,8 @@ func (c *realityClientConnWrapper) ReaderReplaceable() bool {
 
 func (c *realityClientConnWrapper) WriterReplaceable() bool {
 	return false
+}
+
+func (e *RealityClientConfig) spoofs() bool {
+	return e.uClient.spoof != ""
 }

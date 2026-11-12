@@ -273,6 +273,7 @@ func TestRealityVerificationFailureNamesFingerprint(t *testing.T) {
 			// a copy, as the transports that set their own ALPN make
 			_, err = ClientHandshake(ctx, client, config.Clone())
 			require.Error(t, err)
+			require.ErrorIs(t, err, ErrRealityVerification)
 			require.True(t, strings.HasPrefix(err.Error(), "reality verification failed"), err.Error())
 			if !testCase.named {
 				require.Equal(t, "reality verification failed", err.Error())
@@ -337,8 +338,10 @@ func TestRealityRejectedCertificateNamesFingerprint(t *testing.T) {
 			if !testCase.named {
 				require.NotContains(t, err.Error(), "uTLS fingerprint")
 				require.NotContains(t, err.Error(), "reality verification failed")
+				require.NotErrorIs(t, err, ErrRealityVerification)
 				return
 			}
+			require.ErrorIs(t, err, ErrRealityVerification)
 			require.True(t, strings.HasPrefix(err.Error(), "reality verification failed"), err.Error())
 			require.Contains(t, err.Error(), "uTLS fingerprint "+testCase.fingerprint+":")
 			require.Contains(t, err.Error(), "Xray-core v26.9.8")

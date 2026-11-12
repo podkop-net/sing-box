@@ -7,6 +7,21 @@ type ExperimentalOptions struct {
 	ClashAPI  *ClashAPIOptions  `json:"clash_api,omitempty"`
 	V2RayAPI  *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
 	Debug     *DebugOptions     `json:"debug,omitempty"`
+	// podkop-engine
+	UTLSFallback *UTLSFallbackOptions `json:"utls_fallback,omitempty"`
+}
+
+// UTLSFallbackOptions turn the uTLS fingerprint fallback of TLS clients on or off for the
+// whole configuration (podkop-engine): a client with a uTLS fingerprint tries the
+// fingerprint without its X25519MLKEM768 key share, then firefox, then the fingerprint as it
+// is, and keeps the first that the server takes and the path lets through (see
+// common/tls/hello_watch.go). Without the option the environment decides
+// (SING_BOX_UTLS_FALLBACK, any value turns it on). With it the environment is not read.
+// Fingerprints is no longer used: it is read so that configurations written for the list
+// of earlier revisions stay valid.
+type UTLSFallbackOptions struct {
+	Enabled      bool                       `json:"enabled,omitempty"`
+	Fingerprints badoption.Listable[string] `json:"fingerprints,omitempty"`
 }
 
 type CacheFileOptions struct {
