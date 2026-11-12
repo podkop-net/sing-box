@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/probesock"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common/bufio"
@@ -98,7 +99,7 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 		return d.dialer.DialContext(ctx, network, destination)
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+	addresses, err := d.router.Lookup(probesock.Without(ctx), destination.Fqdn, d.queryOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +131,7 @@ func (d *resolveDialer) ListenPacketWithDestination(ctx context.Context, destina
 		return conn, netip.Addr{}, err
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+	addresses, err := d.router.Lookup(probesock.Without(ctx), destination.Fqdn, d.queryOptions)
 	if err != nil {
 		return nil, netip.Addr{}, err
 	}
@@ -163,7 +164,7 @@ func (d *resolveParallelNetworkDialer) DialParallelNetwork(ctx context.Context, 
 	}
 	if len(destinationAddresses) == 0 && destination.IsDomain() {
 		ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-		destinationAddresses, err = d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+		destinationAddresses, err = d.router.Lookup(probesock.Without(ctx), destination.Fqdn, d.queryOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -192,7 +193,7 @@ func (d *resolveParallelNetworkDialer) ListenSerialNetworkPacket(ctx context.Con
 	}
 	if len(destinationAddresses) == 0 && destination.IsDomain() {
 		ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-		destinationAddresses, err = d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+		destinationAddresses, err = d.router.Lookup(probesock.Without(ctx), destination.Fqdn, d.queryOptions)
 		if err != nil {
 			return nil, netip.Addr{}, err
 		}
