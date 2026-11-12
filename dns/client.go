@@ -51,6 +51,8 @@ type Client struct {
 	cache             *freelru.Cache[dnsCacheKey, *dns.Msg]
 	cacheLock         compatible.Map[dnsExchangeKey, chan struct{}]
 	backgroundRefresh compatible.Map[dnsCacheKey, struct{}]
+	failures          failureLog
+	ipv6IfNoIPv4      bool
 }
 
 type ClientOptions struct {
