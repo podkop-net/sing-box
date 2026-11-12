@@ -59,6 +59,7 @@ type Box struct {
 	internalService     []adapter.LifecycleService
 	ntpService          *ntp.Service
 	scope               *adapter.Scope
+	hot                 hotOutbounds // outbounds changed while the box runs (podkop-engine)
 }
 
 type Options struct {
