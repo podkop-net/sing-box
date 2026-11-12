@@ -28,6 +28,7 @@ import (
 	"unsafe"
 
 	"github.com/sagernet/sing-box/adapter"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/debug"
@@ -227,9 +228,16 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
-	verifier.UConn = uConn
-	err := uConn.BuildHandshakeState()
+	// fragment and record_fragment act on this connection too: upstream wraps only the uTLS
+	// client (UTLSClientConfig.Client), so on REALITY both were silently ignored. The record
+	// layer is below the handshake: the server reassembles the same ClientHello and the
+	// REALITY authentication in it still verifies (podkop-engine).
+	if e.uClient.fragment || e.uClient.recordFragment {
+		conn = tf.NewConn(conn, e.uClient.ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
+	}
+	// the forged ClientHello goes before the real one on the same connection, as with any
+	// other TLS client; REALITY authenticates by the real one
+	conn, err := applyTLSSpoof(conn, e.uClient.spoof, e.uClient.spoofMethod)
 	if err != nil {
 		return nil, err
 	}
