@@ -188,6 +188,12 @@ func (s *ECHClientConfig) Clone() Config {
 	}
 }
 
+// spoofs answers for the configuration it wraps (podkop-engine).
+func (s *ECHClientConfig) spoofs() bool {
+	spoofing, canSpoof := s.ECHCapableConfig.(spoofingConfig)
+	return canSpoof && spoofing.spoofs()
+}
+
 func UnmarshalECHKeys(raw []byte) ([]tls.EncryptedClientHelloKey, error) {
 	var keys []tls.EncryptedClientHelloKey
 	rawString := cryptobyte.String(raw)

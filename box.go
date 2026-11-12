@@ -144,6 +144,10 @@ func New(options Options) (*Box, error) {
 
 	ctx = pause.WithDefaultManager(ctx)
 	experimentalOptions := common.PtrValueOrDefault(options.Experimental)
+	// Read by the TLS clients of the outbounds (common/tls). Registered also when the
+	// configuration has none: where the instances of a process share the registry, a
+	// configuration loaded again without the option would keep that of the one before.
+	service.MustRegister[*option.UTLSFallbackOptions](ctx, experimentalOptions.UTLSFallback)
 	debugOptions := common.PtrValueOrDefault(experimentalOptions.Debug)
 	err := checkDebugOptions(debugOptions)
 	if err != nil {

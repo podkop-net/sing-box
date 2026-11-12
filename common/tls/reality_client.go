@@ -49,6 +49,77 @@ type RealityClientConfig struct {
 	uClient   *UTLSClientConfig
 	publicKey []byte
 	shortID   [8]byte
+	// the name of a uTLS fingerprint without an X25519MLKEM768 key share, otherwise empty
+	classicFingerprint string
+	// that fingerprint is one the fingerprint fallback has gone on to, not the configured one
+	classicFallback bool
+	// the configured fingerprint name, for the block detector's key when the fallback is off
+	// (podkop-engine); it defaults to "chrome", as the fallback does
+	fingerprint string
+	// what the block detector reads of the server when the fallback is off, shared with the
+	// clones (podkop-engine)
+	outcome *detectOutcomeWriter
+}
+
+// REALITY servers since Xray-core v26.9.8 (XTLS/REALITY@8cdf7bf) take a Client Hello
+// without an X25519MLKEM768 key share for a stranger and pass it on to the target, whose
+// certificate then fails the verification. Older servers accept such a Client Hello, so
+// the fingerprints that carry only X25519 are not refused, but the cause is named.
+const (
+	realityHybridKeyShareNote = "REALITY servers since Xray-core v26.9.8 reject a Client Hello without an X25519MLKEM768 key share"
+	// what to configure in place of such a fingerprint
+	realityHybridKeyShareAdvice = ", use chrome, firefox, safari, random or randomized"
+	// the text every failed verification begins with
+	realityVerificationFailed = "reality verification failed"
+)
+
+// realityStrangerError is the failure of a handshake with a fingerprint without the
+// X25519MLKEM768 key share that the server answered as it answers a stranger, with the
+// certificate of its target: what a server since Xray-core v26.9.8 does with every such
+// Client Hello, whatever it did before it was updated.
+type realityStrangerError struct {
+	error
+}
+
+func (e *realityStrangerError) Unwrap() error {
+	return e.error
+}
+
+// checkRealityFingerprint refuses the uTLS fingerprints REALITY cannot work with and
+// reports whether the named one lacks the X25519MLKEM768 key share.
+func checkRealityFingerprint(name string) (classic bool, err error) {
+	switch name {
+	case "android", "360":
+		// Client Hellos of TLS 1.2: no key share to derive the authentication key from
+		return false, E.New("uTLS fingerprint ", name, " is unsupported in reality: a TLS 1.2 Client Hello without a key share, use chrome, firefox, safari, random or randomized")
+	case "edge", "ios", "qq":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// verificationFailed is the error of a failed verification, cause being what the
+// handshake itself failed with, if it did. It names the fingerprint that may be the
+// cause, and what to configure in its place when it is the configured one.
+func (e *RealityClientConfig) verificationFailed(cause error) error {
+	text := realityVerificationFailed
+	if e.classicFingerprint != "" {
+		text += ", possibly because of the uTLS fingerprint " + e.classicFingerprint + ": " + realityHybridKeyShareNote
+		if !e.classicFallback {
+			text += realityHybridKeyShareAdvice
+		}
+	}
+	var err error
+	if cause != nil {
+		err = E.Cause(cause, text)
+	} else {
+		err = E.New(text)
+	}
+	if e.classicFingerprint != "" {
+		return &realityStrangerError{err}
+	}
+	return err
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -385,4 +456,8 @@ func (c *realityClientConnWrapper) ReaderReplaceable() bool {
 
 func (c *realityClientConnWrapper) WriterReplaceable() bool {
 	return false
+}
+
+func (e *RealityClientConfig) spoofs() bool {
+	return e.uClient.spoof != ""
 }

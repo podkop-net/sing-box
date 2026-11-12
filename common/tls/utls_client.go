@@ -39,6 +39,10 @@ type UTLSClientConfig struct {
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+	// the fingerprint fallback, shared with the clones; nil when off
+	fallback *utlsFallback
+	// the ClientHello without the X25519MLKEM768 key share: a candidate of the fallback
+	noMLKEM bool
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -115,6 +119,8 @@ func (c *UTLSClientConfig) Clone() Config {
 		recordFragment:        c.recordFragment,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
+		fallback:              c.fallback,
+		noMLKEM:               c.noMLKEM,
 	}
 	cloned.SetServerName(cloned.serverName)
 	return cloned
@@ -166,6 +172,8 @@ func (c *utlsConnWrapper) WriterReplaceable() bool {
 type utlsALPNWrapper struct {
 	utlsConnWrapper
 	nextProtocols []string
+	// the ClientHello goes without the X25519MLKEM768 key share
+	noMLKEM bool
 }
 
 func (c *utlsALPNWrapper) HandshakeContext(ctx context.Context) error {
@@ -356,6 +364,7 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		recordFragment:        options.RecordFragment,
 		spoof:                 spoof,
 		spoofMethod:           spoofMethod,
+		fallback:              newUTLSFallback(ctx, logger, options.UTLS.Fingerprint, id, options.Reality != nil && options.Reality.Enabled, spoof != ""),
 	}
 	config.SetServerName(serverName)
 	if options.ECH != nil && options.ECH.Enabled {
@@ -434,4 +443,8 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	default:
 		return utls.ClientHelloID{}, E.New("unknown uTLS fingerprint: ", name)
 	}
+}
+
+func (c *UTLSClientConfig) spoofs() bool {
+	return c.spoof != ""
 }

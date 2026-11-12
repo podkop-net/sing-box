@@ -40,6 +40,16 @@ func parseTLSSpoofOptions(serverName string, options option.OutboundTLSOptions) 
 	return spoof, method, nil
 }
 
+// spoofingConfig is a client configuration that may send a forged ClientHello first
+// (podkop-engine). A configuration that wraps another answers for it.
+type spoofingConfig interface {
+	spoofs() bool
+}
+
+func (c *STDClientConfig) spoofs() bool {
+	return c.spoof != ""
+}
+
 func applyTLSSpoof(conn net.Conn, spoof string, method tlsspoof.Method) (net.Conn, error) {
 	if spoof == "" {
 		return conn, nil
@@ -176,19 +186,75 @@ func (d *defaultDialer) DialTLSContext(ctx context.Context, destination M.Socksa
 }
 
 func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr, echRetry bool) (Conn, error) {
-	conn, err := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
-	if err != nil {
-		return nil, err
+	// Inside the connection of another outbound the socket is not the server's: there is
+	// no ClientHello of this client to watch on it, and a forged one would be sent to the
+	// server of the tunnel, into its connection (podkop-engine).
+	tunnel := throughTunnel(d.dialer)
+	var fallback fingerprintDial
+	if fallbackConfig, hasFallback := d.config.(fingerprintFallbackConfig); hasFallback && !tunnel {
+		fallback = fallbackConfig.fingerprintDial()
 	}
-	tlsConn, err := aTLS.ClientHandshake(ctx, conn, d.config)
-	if err != nil {
+	if tunnel {
+		if spoofing, canSpoof := d.config.(spoofingConfig); canSpoof && spoofing.spoofs() {
+			return nil, E.New("tls.spoof does not work through a detour to a proxy outbound")
+		}
+	}
+	if fallback != nil {
+		err := fallback.ready(ctx, destination)
+		if err != nil {
+			return nil, err
+		}
+		defer fallback.done()
+	}
+	for {
+		conn, err := d.dialer.DialContext(ctx, N.NetworkTCP, destination)
+		if err != nil {
+			return nil, err
+		}
+		config := d.config
+		var watch *helloWatch
+		if fallback != nil {
+			var watched bool
+			config, watched = fallback.attempt(conn)
+			if watched {
+				watch = watchClientHello(conn)
+			}
+		}
+		tlsConn, err := aTLS.ClientHandshake(ctx, conn, config)
+		unanswered := watch.stop()
+		if fallback == nil && !tunnel {
+			// the fallback is off, so nothing else records the outcome for the block detector.
+			// Only for a direct dial: a handshake through a detour times out on the tunnel, not
+			// on the server's path, so recording it would feed the detector a false failure.
+			if recorder, ok := d.config.(detectRecorder); ok {
+				recorder.recordDetectOutcome(ctx, destination, err)
+			}
+		}
+		// a handshake that completed in the instant the watch gave the connection up has
+		// a closed socket under it
+		if err == nil && !unanswered {
+			if fallback != nil {
+				fallback.answered()
+			}
+			return withReadWait(tlsConn), nil
+		}
 		conn.Close()
+		if unanswered {
+			again, fallbackErr := fallback.unanswered(destination)
+			if again {
+				continue
+			}
+			return nil, fallbackErr
+		}
 		var echErr *tls.ECHRejectionError
 		if echRetry && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			if echConfig, isECH := d.config.(ECHCapableConfig); isECH {
 				echConfig.SetECHConfigList(echErr.RetryConfigList)
 				return d.dialContext(ctx, destination, false)
 			}
+		}
+		if fallback != nil && fallback.failed(ctx, destination, err) {
+			continue
 		}
 		return nil, err
 	}
