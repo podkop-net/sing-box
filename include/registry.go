@@ -19,29 +19,15 @@ import (
 	"github.com/sagernet/sing-box/dns/transport/mdns"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/protocol/anytls"
-	"github.com/sagernet/sing-box/protocol/block"
-	"github.com/sagernet/sing-box/protocol/bridge"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/mixed"
-	"github.com/sagernet/sing-box/protocol/naive"
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
-	"github.com/sagernet/sing-box/protocol/shadowtls"
-	"github.com/sagernet/sing-box/protocol/snell"
 	"github.com/sagernet/sing-box/protocol/socks"
-	"github.com/sagernet/sing-box/protocol/ssh"
-	"github.com/sagernet/sing-box/protocol/tor"
 	"github.com/sagernet/sing-box/protocol/trojan"
-	"github.com/sagernet/sing-box/protocol/tun"
 	"github.com/sagernet/sing-box/protocol/vless"
-	"github.com/sagernet/sing-box/protocol/vmess"
-	"github.com/sagernet/sing-box/service/api"
-	originca "github.com/sagernet/sing-box/service/origin_ca"
-	"github.com/sagernet/sing-box/service/resolved"
-	"github.com/sagernet/sing-box/service/ssmapi"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -52,25 +38,11 @@ func Context(ctx context.Context) context.Context {
 func InboundRegistry() *inbound.Registry {
 	registry := inbound.NewRegistry()
 
-	tun.RegisterInbound(registry)
-	redirect.RegisterRedirect(registry)
 	redirect.RegisterTProxy(registry)
 	direct.RegisterInbound(registry)
-
-	socks.RegisterInbound(registry)
-	http.RegisterInbound(registry)
 	mixed.RegisterInbound(registry)
+	registerNonPodkopInbounds(registry)
 
-	shadowsocks.RegisterInbound(registry)
-	snell.RegisterInbound(registry)
-	vmess.RegisterInbound(registry)
-	trojan.RegisterInbound(registry)
-	naive.RegisterInbound(registry)
-	shadowtls.RegisterInbound(registry)
-	vless.RegisterInbound(registry)
-	anytls.RegisterInbound(registry)
-
-	registerQUICInbounds(registry)
 	registerCloudflaredInbound(registry)
 	registerStubForRemovedInbounds(registry)
 
@@ -81,25 +53,19 @@ func OutboundRegistry() *outbound.Registry {
 	registry := outbound.NewRegistry()
 
 	direct.RegisterOutbound(registry)
-	bridge.RegisterOutbound(registry)
-
-	block.RegisterOutbound(registry)
+	registerNonPodkopOutbounds(registry)
 
 	group.RegisterSelector(registry)
-	group.RegisterURLTest(registry)
+	urltestgroup.RegisterURLTest(registry)
 
 	socks.RegisterOutbound(registry)
-	http.RegisterOutbound(registry)
 	shadowsocks.RegisterOutbound(registry)
-	snell.RegisterOutbound(registry)
-	vmess.RegisterOutbound(registry)
 	trojan.RegisterOutbound(registry)
-	registerNaiveOutbound(registry)
-	tor.RegisterOutbound(registry)
-	ssh.RegisterOutbound(registry)
-	shadowtls.RegisterOutbound(registry)
 	vless.RegisterOutbound(registry)
-	anytls.RegisterOutbound(registry)
+	// podkop writes no http outbound itself, but a local HTTP proxy (opera-proxy and the
+	// like) set as a raw outbound is common, and it costs a few kilobytes
+	http.RegisterOutbound(registry)
+	registerFullOutbounds(registry)
 
 	registerQUICOutbounds(registry)
 	registerStubForRemovedOutbounds(registry)
@@ -131,7 +97,7 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 	fakeip.RegisterTransport(registry)
 	resolved.RegisterTransport(registry)
 
-	registerQUICTransports(registry)
+	registerNonPodkopDNSTransports(registry)
 	registerDHCPTransport(registry)
 	registerTailscaleTransport(registry)
 	registerOpenConnectDNSTransport(registry)
@@ -143,15 +109,12 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 func ServiceRegistry() *service.Registry {
 	registry := service.NewRegistry()
 
-	api.RegisterService(registry)
-	resolved.RegisterService(registry)
-	ssmapi.RegisterService(registry)
+	registerAPIService(registry)
+	registerNonPodkopServices(registry)
 
-	registerQUICServices(registry)
 	registerDERPService(registry)
 	registerCCMService(registry)
 	registerOCMService(registry)
-	registerOOMKillerService(registry)
 	registerUSBIPServices(registry)
 
 	return registry
@@ -162,7 +125,7 @@ func CertificateProviderRegistry() *certificate.Registry {
 
 	registerACMECertificateProvider(registry)
 	registerTailscaleCertificateProvider(registry)
-	originca.RegisterCertificateProvider(registry)
+	registerNonPodkopCertificateProviders(registry)
 
 	return registry
 }
