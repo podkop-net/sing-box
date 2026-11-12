@@ -1,0 +1,767 @@
+package dns
+
+import (
+	"context"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/option"
+	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+
+	mDNS "github.com/miekg/dns"
+)
+
+// fallbackTestTransport is a DNS server with the fallback state whose exchanges are
+// answered by a function of the test.
+type fallbackTestTransport struct {
+	TransportAdapter
+	access  sync.Mutex
+	handler func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error)
+	calls   int
+}
+
+func (t *fallbackTestTransport) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+func (t *fallbackTestTransport) Reset()                                         {}
+
+func (t *fallbackTestTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+	t.access.Lock()
+	t.calls++
+	handler := t.handler
+	t.access.Unlock()
+	return handler(ctx, message)
+}
+
+func (t *fallbackTestTransport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
+	go func() {
+		callback(t.Exchange(ctx, message))
+	}()
+}
+
+func (t *fallbackTestTransport) serve(handler func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error)) {
+	t.access.Lock()
+	t.handler = handler
+	t.access.Unlock()
+}
+
+func (t *fallbackTestTransport) asked() int {
+	t.access.Lock()
+	defer t.access.Unlock()
+	return t.calls
+}
+
+var errFallbackTestServer = E.New("connection reset")
+
+// The server of the tests answers 5.6.7.8, the provider (testResolver) 1.2.3.4.
+func fallbackTestAnswers(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+	response := new(mDNS.Msg)
+	response.SetReply(message)
+	response.Answer = []mDNS.RR{&mDNS.A{Hdr: mDNS.RR_Header{Name: message.Question[0].Name, Rrtype: mDNS.TypeA, Class: mDNS.ClassINET, Ttl: 300}, A: net.IPv4(5, 6, 7, 8)}}
+	return response, nil
+}
+
+func fallbackTestFails(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+	return nil, errFallbackTestServer
+}
+
+func fallbackTestServfail(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+	response := new(mDNS.Msg)
+	response.SetRcode(message, mDNS.RcodeServerFailure)
+	return response, nil
+}
+
+// newFallbackTest returns a server that qualifies for the fallback, with the decision
+// taken and the provider's servers known, so that ubus is never asked: a read of the
+// list fails and is counted.
+func newFallbackTest(providers ...M.Socksaddr) (*fallbackTestTransport, *fallbackServer, *atomic.Int32) {
+	reads := new(atomic.Int32)
+	state := &fallbackServer{
+		options:  option.RemoteDNSServerOptions{DNSServerAddressOptions: option.DNSServerAddressOptions{Server: "77.88.8.8"}},
+		eligible: true,
+		dialer:   N.SystemDialer,
+		providers: &providerSet{
+			read: func(ctx context.Context) ([]netifdInterface, error) {
+				reads.Add(1)
+				return nil, E.New("no ubus in tests")
+			},
+			servers: providers,
+			readAt:  time.Now(),
+		},
+	}
+	state.decideOnce.Do(func() { state.decided.Store(true) })
+	transport := &fallbackTestTransport{
+		TransportAdapter: TransportAdapter{transportType: "test", transportTag: "dns-server", fallback: state},
+		handler:          fallbackTestAnswers,
+	}
+	return transport, state, reads
+}
+
+func fallbackTestExchange(transport *fallbackTestTransport, state *fallbackServer) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return fallbackTestAnswer(exchangeWithFallback(ctx, context.Background(), nil, transport, state, freshTestQuery()))
+}
+
+// fallbackTestAnswer names who answered: "server" or "provider" with the TTL, else the
+// rcode.
+func fallbackTestAnswer(response *mDNS.Msg, err error) (string, error) {
+	if err != nil {
+		return "", err
+	}
+	if response.Rcode != mDNS.RcodeSuccess || len(response.Answer) != 1 {
+		return mDNS.RcodeToString[response.Rcode], nil
+	}
+	record := response.Answer[0].(*mDNS.A)
+	switch {
+	case record.A.Equal(net.IPv4(5, 6, 7, 8)) && record.Hdr.Ttl == 300:
+		return "server", nil
+	case record.A.Equal(net.IPv4(1, 2, 3, 4)) && record.Hdr.Ttl == fallbackMaxTTL:
+		return "provider", nil
+	}
+	return record.String(), nil
+}
+
+type fallbackTestState struct {
+	failures      int
+	providerFails int
+	down          bool
+	unusable      bool
+	probeIn       time.Duration
+	probeEvery    time.Duration
+}
+
+func (s *fallbackServer) testState() fallbackTestState {
+	s.access.Lock()
+	defer s.access.Unlock()
+	now := time.Now()
+	return fallbackTestState{s.failures, s.providerFails, s.down, now.Before(s.unusableUntil), s.probeAt.Sub(now), s.probeEvery}
+}
+
+func waitFallbackTest(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !condition(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting until %s", what)
+		}
+	}
+}
+
+// The decisions of exchangeWithFallback: who answers a query and what it does to the
+// state of the server.
+func TestExchangeWithFallback(t *testing.T) {
+	t.Parallel()
+	expect := func(t *testing.T, transport *fallbackTestTransport, state *fallbackServer, want string, wantErr error) {
+		t.Helper()
+		got, err := fallbackTestExchange(transport, state)
+		if got != want || err != wantErr {
+			t.Fatalf("answered by %q (%v), want %q (%v)", got, err, want, wantErr)
+		}
+	}
+	for _, test := range []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"a server that answers is asked alone", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			expect(t, transport, state, "server", nil)
+			transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+				return nil, RcodeNameError
+			})
+			expect(t, transport, state, "", RcodeNameError)
+			if got := state.testState(); got.failures != 0 || got.down {
+				t.Errorf("state %+v after answers of the server", got)
+			}
+		}},
+		{"two failures in a row set the server aside", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			transport.serve(fallbackTestFails)
+			expect(t, transport, state, "provider", nil)
+			if got := state.testState(); got.failures != 1 || got.down {
+				t.Fatalf("state %+v after one failure", got)
+			}
+			expect(t, transport, state, "provider", nil)
+			got := state.testState()
+			if !got.down || got.probeEvery != fallbackProbeFirst || got.probeIn < fallbackProbeFirst-5*time.Second {
+				t.Fatalf("state %+v after two failures, want down and a probe in %v", got, fallbackProbeFirst)
+			}
+			// set aside: the provider answers and the server is not asked before the probe
+			expect(t, transport, state, "provider", nil)
+			if asked := transport.asked(); asked != 2 {
+				t.Errorf("server asked %d times, want 2", asked)
+			}
+		}},
+		{"an answer between failures clears the count", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			for _, between := range []func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error){
+				fallbackTestAnswers,
+				func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) { return nil, RcodeNameError },
+			} {
+				transport.serve(fallbackTestFails)
+				expect(t, transport, state, "provider", nil)
+				transport.serve(between)
+				fallbackTestExchange(transport, state)
+				if got := state.testState(); got.failures != 0 {
+					t.Fatalf("state %+v after an answer of the server", got)
+				}
+			}
+			transport.serve(fallbackTestFails)
+			expect(t, transport, state, "provider", nil)
+			if got := state.testState(); got.failures != 1 || got.down {
+				t.Errorf("state %+v, want one failure", got)
+			}
+		}},
+		{"a query given up by its caller counts nothing", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			for i := 0; i < 3; i++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+					cancel()
+					<-ctx.Done()
+					return nil, ctx.Err()
+				})
+				response, err := exchangeWithFallback(ctx, context.Background(), nil, transport, state, freshTestQuery())
+				if response != nil || err != context.Canceled {
+					t.Fatalf("got %v, %v, want the error of the caller's context", response, err)
+				}
+			}
+			if got := state.testState(); got.failures != 0 || got.providerFails != 0 || got.down {
+				t.Errorf("state %+v after queries their callers gave up", got)
+			}
+		}},
+		{"a probe that is answered brings the server back", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			transport.serve(fallbackTestFails)
+			expect(t, transport, state, "provider", nil)
+			expect(t, transport, state, "provider", nil)
+			due := func() {
+				state.access.Lock()
+				state.probeAt = time.Now().Add(-time.Second)
+				state.access.Unlock()
+			}
+			// the server still fails: the probe is sent, the next one comes later
+			due()
+			expect(t, transport, state, "provider", nil)
+			waitFallbackTest(t, "the server is probed", func() bool { return transport.asked() == 3 })
+			got := state.testState()
+			if !got.down || got.probeEvery != 2*fallbackProbeFirst || got.probeIn < fallbackProbeFirst-5*time.Second {
+				t.Fatalf("state %+v after a failed probe, want down and the next probe in %v", got, fallbackProbeFirst)
+			}
+			expect(t, transport, state, "provider", nil)
+			if asked := transport.asked(); asked != 3 {
+				t.Fatalf("server asked %d times, want 3: no probe is due", asked)
+			}
+			// a SERVFAIL is not the answer that brings it back
+			transport.serve(fallbackTestServfail)
+			due()
+			expect(t, transport, state, "provider", nil)
+			waitFallbackTest(t, "the server is probed again", func() bool { return transport.asked() == 4 })
+			transport.serve(fallbackTestAnswers)
+			due()
+			expect(t, transport, state, "provider", nil) // the query that carried the probe
+			waitFallbackTest(t, "the server is back", func() bool { return !state.isDown() })
+			expect(t, transport, state, "server", nil)
+			if got := state.testState(); got.failures != 0 {
+				t.Errorf("state %+v after the server came back", got)
+			}
+		}},
+		{"a SERVFAIL of the server is replaced by the provider's answer", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			for i := 0; i < 3; i++ {
+				transport.serve(fallbackTestServfail)
+				expect(t, transport, state, "provider", nil)
+				transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+					return nil, RcodeServerFailure
+				})
+				expect(t, transport, state, "provider", nil)
+			}
+			if got := state.testState(); got.failures != 0 || got.down {
+				t.Errorf("state %+v: a SERVFAIL counted against the server", got)
+			}
+		}},
+		{"a SERVFAIL of the server stays when the provider has no better answer", func(t *testing.T) {
+			for _, provider := range []int{mDNS.RcodeServerFailure, mDNS.RcodeRefused} {
+				transport, state, _ := newFallbackTest(testResolver(t, provider))
+				transport.serve(fallbackTestServfail)
+				expect(t, transport, state, "SERVFAIL", nil)
+				transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+					return nil, RcodeServerFailure
+				})
+				expect(t, transport, state, "", RcodeServerFailure)
+				if got := state.testState(); got.failures != 0 || got.down || got.unusable {
+					t.Errorf("provider answers %s: state %+v", mDNS.RcodeToString[provider], got)
+				}
+			}
+		}},
+		{"the provider failing twice in a row switches the fallback off", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeRefused))
+			transport.serve(fallbackTestFails)
+			expect(t, transport, state, "", errFallbackTestServer)
+			if got := state.testState(); got.providerFails != 1 || got.unusable {
+				t.Fatalf("state %+v after one failure of the provider", got)
+			}
+			expect(t, transport, state, "", errFallbackTestServer)
+			if got := state.testState(); !got.unusable || got.failures != 0 || got.down {
+				t.Fatalf("state %+v after two failures of the provider, want no fallback for a while", got)
+			}
+			if state.usable(context.Background(), nil) {
+				t.Error("fallback still usable")
+			}
+			// without the fallback the server is asked alone
+			expect(t, transport, state, "", errFallbackTestServer)
+			transport.serve(fallbackTestAnswers)
+			expect(t, transport, state, "server", nil)
+		}},
+		{"an answer of the provider clears its failure count", func(t *testing.T) {
+			refused, good := testResolver(t, mDNS.RcodeRefused), testResolver(t, mDNS.RcodeSuccess)
+			transport, state, _ := newFallbackTest(refused)
+			transport.serve(fallbackTestFails)
+			setProviders := func(server M.Socksaddr) {
+				state.providers.access.Lock()
+				state.providers.servers = []M.Socksaddr{server}
+				state.providers.access.Unlock()
+			}
+			for i := 0; i < 2; i++ {
+				setProviders(refused)
+				expect(t, transport, state, "", errFallbackTestServer)
+				setProviders(good)
+				expect(t, transport, state, "provider", nil)
+				if got := state.testState(); got.providerFails != 0 || got.unusable {
+					t.Fatalf("state %+v after an answer of the provider", got)
+				}
+				state.success() // not the subject here
+			}
+		}},
+		{"a server set aside is asked when the provider fails too", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeRefused))
+			state.access.Lock()
+			state.down, state.probeEvery, state.probeAt = true, fallbackProbeFirst, time.Now().Add(fallbackProbeFirst)
+			state.access.Unlock()
+			expect(t, transport, state, "server", nil)
+			if got := state.testState(); !got.down || got.providerFails != 1 {
+				t.Fatalf("state %+v after one failure of the provider", got)
+			}
+			expect(t, transport, state, "server", nil)
+			if got := state.testState(); got.down || !got.unusable {
+				t.Fatalf("state %+v after two failures of the provider, want the server back and no fallback for a while", got)
+			}
+		}},
+		{"no provider known", func(t *testing.T) {
+			transport, state, reads := newFallbackTest()
+			transport.serve(fallbackTestFails)
+			for i := 0; i < 3; i++ {
+				expect(t, transport, state, "", errFallbackTestServer)
+			}
+			if got := state.testState(); got.failures != 0 || got.providerFails != 0 || got.down || got.unusable {
+				t.Errorf("state %+v without provider servers", got)
+			}
+			if reads.Load() != 0 {
+				t.Errorf("the list was read %d times", reads.Load())
+			}
+		}},
+		{"a server that does not qualify is asked alone", func(t *testing.T) {
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			state.eligible = false
+			transport.serve(fallbackTestFails)
+			for i := 0; i < 3; i++ {
+				expect(t, transport, state, "", errFallbackTestServer)
+			}
+			transport.serve(fallbackTestServfail)
+			expect(t, transport, state, "SERVFAIL", nil)
+			if got := state.testState(); got.failures != 0 || got.down {
+				t.Errorf("state %+v of a server without the fallback", got)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			test.run(t)
+		})
+	}
+}
+
+// A server that stays silent is given up after fallbackPrimaryTimeout, well before the
+// deadline of the query, and the provider answers. The real timeout, once.
+func TestFallbackPrimaryTimeout(t *testing.T) {
+	t.Parallel()
+	transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+	transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	startAt := time.Now()
+	got, err := fallbackTestExchange(transport, state) // the query has 10 s
+	elapsed := time.Since(startAt)
+	if got != "provider" || err != nil {
+		t.Fatalf("answered by %q (%v), want the provider", got, err)
+	}
+	if elapsed < fallbackPrimaryTimeout-500*time.Millisecond || elapsed > fallbackPrimaryTimeout+3*time.Second {
+		t.Errorf("answered after %v, want about %v", elapsed, fallbackPrimaryTimeout)
+	}
+	if got := state.testState(); got.failures != 1 || got.down {
+		t.Errorf("state %+v, want one failure", got)
+	}
+}
+
+// Client.exchangeTransport and exchangeTransportAsync, the path of queries hijacked from
+// clients: every query gets one answer, through the fallback when the server has one.
+func TestExchangeTransportFallback(t *testing.T) {
+	t.Parallel()
+	client := &Client{ctx: context.Background()}
+	exchangeAsync := func(t *testing.T, transport adapter.DNSTransport) (string, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		type result struct {
+			response *mDNS.Msg
+			err      error
+		}
+		results := make(chan result, 4)
+		client.exchangeTransportAsync(ctx, transport, freshTestQuery(), func(response *mDNS.Msg, err error) {
+			results <- result{response, err}
+		})
+		var first result
+		select {
+		case first = <-results:
+		case <-ctx.Done():
+			t.Fatal("the callback was not called")
+		}
+		select {
+		case <-results:
+			t.Fatal("the callback was called twice")
+		case <-time.After(200 * time.Millisecond):
+		}
+		return fallbackTestAnswer(first.response, first.err)
+	}
+	exchange := func(t *testing.T, transport adapter.DNSTransport) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return fallbackTestAnswer(client.exchangeTransport(ctx, transport, freshTestQuery()))
+	}
+	for _, test := range []struct {
+		name     string
+		exchange func(t *testing.T, transport adapter.DNSTransport) (string, error)
+	}{
+		{"exchangeTransport", exchange},
+		{"exchangeTransportAsync", exchangeAsync},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			// with the fallback
+			transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			if got, err := test.exchange(t, transport); got != "server" || err != nil {
+				t.Errorf("answered by %q (%v), want the server", got, err)
+			}
+			transport.serve(fallbackTestFails)
+			if got, err := test.exchange(t, transport); got != "provider" || err != nil {
+				t.Errorf("answered by %q (%v), want the provider", got, err)
+			}
+			if got := state.testState(); got.failures != 1 {
+				t.Errorf("state %+v, want one failure", got)
+			}
+			// a server that does not qualify
+			transport, state, _ = newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+			state.eligible = false
+			if got, err := test.exchange(t, transport); got != "server" || err != nil {
+				t.Errorf("answered by %q (%v), want the server", got, err)
+			}
+			transport.serve(fallbackTestFails)
+			if got, err := test.exchange(t, transport); got != "" || err != errFallbackTestServer {
+				t.Errorf("answered by %q (%v), want the error of the server", got, err)
+			}
+			// a server without the fallback state (the fallback is not enabled)
+			transport, _, _ = newFallbackTest()
+			transport.fallback = nil
+			if got, err := test.exchange(t, transport); got != "server" || err != nil {
+				t.Errorf("answered by %q (%v), want the server", got, err)
+			}
+			if asked := transport.asked(); asked != 1 {
+				t.Errorf("server asked %d times, want 1", asked)
+			}
+		})
+	}
+}
+
+// One event that fails many queries at once, as a closed connection they shared does, is
+// one failure of the server; a query that starts after it and fails is the second.
+func TestFallbackCountsBatchOnce(t *testing.T) {
+	t.Parallel()
+	const batch = 20
+	transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+	var waiting sync.WaitGroup
+	waiting.Add(batch)
+	reset := make(chan struct{})
+	transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+		waiting.Done()
+		<-reset
+		return nil, errFallbackTestServer
+	})
+	answers := make(chan string, batch)
+	for i := 0; i < batch; i++ {
+		go func() {
+			got, _ := fallbackTestExchange(transport, state)
+			answers <- got
+		}()
+	}
+	waiting.Wait()
+	close(reset)
+	for i := 0; i < batch; i++ {
+		if got := <-answers; got != "provider" {
+			t.Errorf("answered by %q, want the provider", got)
+		}
+	}
+	if got := state.testState(); got.failures != 1 || got.down {
+		t.Fatalf("state %+v after %d queries failed at once, want one failure", got, batch)
+	}
+	transport.serve(fallbackTestFails)
+	if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+		t.Fatalf("answered by %q (%v), want the provider", got, err)
+	}
+	if got := state.testState(); !got.down {
+		t.Errorf("state %+v after a later failure, want the server set aside", got)
+	}
+}
+
+// A failure counts against the server only when the provider resolved the name: a name
+// that the provider cannot resolve either says nothing about the server.
+func TestFallbackCountsResolvedOnly(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		provider int
+		answer   string
+		down     bool
+	}{
+		{mDNS.RcodeSuccess, "provider", true},
+		{mDNS.RcodeNameError, "NXDOMAIN", true},
+		{mDNS.RcodeServerFailure, "SERVFAIL", false},
+		{mDNS.RcodeNotImplemented, "NOTIMP", false},
+	} {
+		transport, state, _ := newFallbackTest(testResolver(t, test.provider))
+		transport.serve(fallbackTestFails)
+		for i := 0; i < 3; i++ {
+			if got, err := fallbackTestExchange(transport, state); got != test.answer || err != nil {
+				t.Fatalf("provider answers %s: got %q (%v)", test.answer, got, err)
+			}
+		}
+		if got := state.testState(); got.down != test.down || (!test.down && got.failures != 0) {
+			t.Errorf("provider answers %s: state %+v, want down %v", test.answer, got, test.down)
+		}
+	}
+}
+
+// A network reset forgives what the fallback learned on the old network.
+func TestFallbackNetworkReset(t *testing.T) {
+	t.Parallel()
+	newRouter := func(transport adapter.DNSTransport) *Router {
+		return &Router{transport: &TransportManager{transports: []adapter.DNSTransport{transport}}}
+	}
+	t.Run("the provider is usable again", func(t *testing.T) {
+		t.Parallel()
+		transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+		for i := 0; i < fallbackProviderAfter+1; i++ {
+			state.providerFailed(context.Background(), nil, "dns-server", E.New("timeout"))
+		}
+		if got := state.testState(); !got.unusable || got.providerFails != 1 {
+			t.Fatalf("state %+v before the reset", got)
+		}
+		newRouter(transport).ResetNetwork()
+		if got := state.testState(); got.unusable || got.providerFails != 0 {
+			t.Errorf("state %+v after the reset, want the provider usable", got)
+		}
+		transport.serve(fallbackTestFails)
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Errorf("answered by %q (%v), want the provider", got, err)
+		}
+	})
+	t.Run("a server set aside is probed at once", func(t *testing.T) {
+		t.Parallel()
+		transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+		state.access.Lock()
+		state.down, state.probeEvery, state.probeAt = true, fallbackProbeMax, time.Now().Add(fallbackProbeMax)
+		state.access.Unlock()
+		newRouter(transport).ResetNetwork()
+		if got := state.testState(); !got.down || got.probeIn > 0 || got.probeEvery != fallbackProbeFirst {
+			t.Fatalf("state %+v after the reset, want down and a probe due, the next in %v", got, fallbackProbeFirst)
+		}
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Errorf("answered by %q (%v), want the provider", got, err)
+		}
+		waitFallbackTest(t, "the server is back", func() bool { return !state.isDown() })
+	})
+	t.Run("failures around the reset do not add up", func(t *testing.T) {
+		t.Parallel()
+		transport, state, _ := newFallbackTest(testResolver(t, mDNS.RcodeSuccess))
+		router := newRouter(transport)
+		transport.serve(fallbackTestFails)
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Fatalf("answered by %q (%v), want the provider", got, err)
+		}
+		// a query on its way when the network is reset fails with the connections
+		transport.serve(func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+			router.ResetNetwork()
+			return nil, errFallbackTestServer
+		})
+		if got, err := fallbackTestExchange(transport, state); got != "provider" || err != nil {
+			t.Fatalf("answered by %q (%v), want the provider", got, err)
+		}
+		if got := state.testState(); got.failures != 0 || got.down {
+			t.Errorf("state %+v, want no failure counted on the new network yet", got)
+		}
+	})
+}
+
+// When none of the provider's servers answers, the list is read again, since it may have
+// changed without a network reset, but not at every such query: not sooner than
+// providerRetryAfter after the last read. A network reset reads it at the next use.
+func TestProviderListRereadAfterMiss(t *testing.T) {
+	t.Parallel()
+	_, state, reads := newFallbackTest(testResolver(t, mDNS.RcodeRefused))
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := state.exchangeProvider(ctx, context.Background(), nil, freshTestQuery())
+		cancel()
+		if err == nil || err == errNoProviders {
+			t.Fatalf("query %d: got %v, want the refusal of the provider", i, err)
+		}
+	}
+	if reads.Load() != 0 {
+		t.Fatalf("the list was read %d times right after it was read", reads.Load())
+	}
+	state.providers.access.Lock()
+	state.providers.readAt = time.Now().Add(-providerRetryAfter - time.Second)
+	state.providers.access.Unlock()
+	state.providers.list(context.Background(), nil)
+	state.providers.list(context.Background(), nil)
+	if reads.Load() != 1 {
+		t.Fatalf("the list was read %d times %v after the last read, want 1", reads.Load(), providerRetryAfter)
+	}
+	state.providers.forget()
+	state.providers.list(context.Background(), nil)
+	if reads.Load() != 2 {
+		t.Errorf("the list was read %d times, want 2: a reset reads it at the next use", reads.Load())
+	}
+}
+
+// The first query to a server decides whether the fallback applies and reads the
+// provider's servers. A hijacked query does not wait for that on the goroutine of its
+// caller, which reads the next queries of the client.
+func TestExchangeTransportAsyncFirstQuery(t *testing.T) {
+	t.Parallel()
+	read := make(chan struct{})
+	state := &fallbackServer{
+		options: option.RemoteDNSServerOptions{DNSServerAddressOptions: option.DNSServerAddressOptions{Server: "77.88.8.8"}},
+		providers: &providerSet{read: func(ctx context.Context) ([]netifdInterface, error) {
+			<-read
+			return nil, E.New("no ubus in tests")
+		}},
+	}
+	transport := &fallbackTestTransport{
+		TransportAdapter: TransportAdapter{transportType: "test", transportTag: "dns-server", fallback: state},
+		handler:          fallbackTestAnswers,
+	}
+	client := &Client{ctx: context.Background()}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	results := make(chan error, 4)
+	returned := make(chan struct{})
+	go func() {
+		client.exchangeTransportAsync(ctx, transport, freshTestQuery(), func(response *mDNS.Msg, err error) {
+			results <- err
+		})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Error("exchangeTransportAsync waits for the read of the provider's servers")
+	}
+	close(read)
+	<-returned
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Errorf("query %d: %v", i, err)
+			}
+		case <-ctx.Done():
+			t.Fatalf("query %d: the callback was not called", i)
+		}
+		if !state.eligible {
+			t.Fatal("the server does not qualify: its first query read no provider list")
+		}
+		if i == 0 { // the decision is taken now
+			client.exchangeTransportAsync(ctx, transport, freshTestQuery(), func(response *mDNS.Msg, err error) {
+				results <- err
+			})
+		}
+	}
+	select {
+	case <-results:
+		t.Error("a callback was called twice")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// The first hijacked query to a server that turns out not to qualify is decided on the
+// goroutine as well and is then answered by the server alone, once; the provider's
+// servers are not read for it.
+func TestExchangeTransportAsyncFirstQueryNoFallback(t *testing.T) {
+	t.Parallel()
+	reads := new(atomic.Int32)
+	state := &fallbackServer{
+		options: option.RemoteDNSServerOptions{DNSServerAddressOptions: option.DNSServerAddressOptions{Server: "192.168.1.1"}},
+		providers: &providerSet{read: func(ctx context.Context) ([]netifdInterface, error) {
+			reads.Add(1)
+			return nil, E.New("no ubus in tests")
+		}},
+	}
+	transport := &fallbackTestTransport{
+		TransportAdapter: TransportAdapter{transportType: "test", transportTag: "dns-server", fallback: state},
+		handler:          fallbackTestAnswers,
+	}
+	client := &Client{ctx: context.Background()}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type result struct {
+		response *mDNS.Msg
+		err      error
+	}
+	results := make(chan result, 4)
+	// the first query takes the decision, the second finds it taken, the third fails
+	for i, want := range []string{"server", "server", ""} {
+		var wantErr error
+		if want == "" {
+			transport.serve(fallbackTestFails)
+			wantErr = errFallbackTestServer
+		}
+		client.exchangeTransportAsync(ctx, transport, freshTestQuery(), func(response *mDNS.Msg, err error) {
+			results <- result{response, err}
+		})
+		select {
+		case answer := <-results:
+			if got, err := fallbackTestAnswer(answer.response, answer.err); got != want || err != wantErr {
+				t.Errorf("query %d: answered by %q (%v), want %q (%v)", i, got, err, want, wantErr)
+			}
+		case <-ctx.Done():
+			t.Fatalf("query %d: the callback was not called", i)
+		}
+		if !state.decided.Load() || state.eligible {
+			t.Fatalf("query %d: decided %v, want a server that does not qualify", i, state.decided.Load())
+		}
+	}
+	select {
+	case <-results:
+		t.Error("a callback was called twice")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if asked := transport.asked(); asked != 3 {
+		t.Errorf("server asked %d times, want 3", asked)
+	}
+	if reads.Load() != 0 {
+		t.Errorf("the provider's servers were read %d times for a server without the fallback", reads.Load())
+	}
+}

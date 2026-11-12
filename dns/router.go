@@ -54,6 +54,10 @@ type Router struct {
 	rulesAccess           sync.RWMutex
 	started               bool
 	closing               bool
+	// providers are the provider's servers of the fallback of this box (podkop-engine)
+	providers *providerSet
+	// ipv6IfNoIPv4 is dns.ipv6_if_no_ipv4 (podkop-engine, dns/client_ipv6.go)
+	ipv6IfNoIPv4 bool
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOptions) (*Router, error) {
@@ -66,7 +70,13 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		rawRules:              make([]option.DNSRule, 0, len(options.Rules)),
 		rules:                 make([]adapter.DNSRule, 0, len(options.Rules)),
 		defaultDomainStrategy: C.DomainStrategy(options.Strategy),
+		providers:             newProviderSet(),
 	}
+	// the transports of this box find the provider's servers of its fallback here
+	if service.RegistryFromContext(ctx) != nil {
+		service.MustRegister[*providerSet](ctx, router.providers)
+	}
+
 	if options.DNSClientOptions.IndependentCache {
 		deprecated.Report(ctx, deprecated.OptionIndependentDNSCache)
 	}
@@ -543,7 +553,7 @@ func (r *Router) settleDNSFutures(ctx context.Context, message *mDNS.Msg, state 
 			continue
 		}
 		future.settled = true
-		if future.err != nil && !future.terminal {
+		if future.err != nil && !future.terminal && !IsLoggedFailure(future.err) {
 			r.logger.ErrorContext(ctx, E.Cause(future.err, "exchange failed for ", FormatQuestion(message.Question[0].String())))
 		}
 		if future.tag == "" {
@@ -1366,7 +1376,7 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 				r.logger.DebugContext(ctx, "lookup rejected for ", domain)
 			} else if errors.Is(err, ErrNotCached) {
 				r.logger.DebugContext(ctx, "cache-only lookup missed for ", domain)
-			} else {
+			} else if !IsLoggedFailure(err) {
 				r.logger.ErrorContext(ctx, E.Cause(err, "lookup failed for ", domain))
 			}
 		}
@@ -1498,6 +1508,12 @@ func (r *Router) LookupECHPublicName(domain string) string {
 func (r *Router) ResetNetwork() {
 	for _, transport := range r.transport.Transports() {
 		transport.Reset()
+		if state := fallbackFor(transport); state != nil {
+			state.reset()
+		}
+	}
+	if r.providers != nil {
+		r.providers.forget() // the output device may have changed
 	}
 }
 

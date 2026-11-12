@@ -52,6 +52,7 @@ type Outbound struct {
 	dialer         parallelResolveDialer
 	domainStrategy C.DomainStrategy
 	isEmpty        bool
+	dialerOptions  option.DialerOptions
 	myAddresses    common.TypedValue[[]netip.Prefix]
 	icmpPort       *ping.Port
 }
@@ -81,6 +82,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		isEmpty: reflect.DeepEqual(options.DialerOptions, option.DialerOptions{
 			AbstractDialerOptions: option.AbstractDialerOptions{UDPFragmentDefault: true},
 		}),
+		dialerOptions: options.DialerOptions,
 	}
 	//nolint:staticcheck
 	if options.ProxyProtocol != 0 {
@@ -295,4 +297,9 @@ func (h *Outbound) ListenSerialNetworkPacket(ctx context.Context, destination M.
 
 func (h *Outbound) IsEmpty() bool {
 	return h.isEmpty
+}
+
+// DialerOptions returns the dial fields of the outbound (read by the DNS fallback).
+func (h *Outbound) DialerOptions() option.DialerOptions {
+	return h.dialerOptions
 }
