@@ -308,11 +308,7 @@ func (r *Router) matchDNS(ctx context.Context, rules []adapter.DNSRule, allowFak
 		metadata.ResetRuleCache()
 		metadata.DestinationAddressMatchFromResponse = false
 		if currentRule.LegacyPreMatch(metadata) {
-			if ruleDescription := currentRule.String(); ruleDescription != "" {
-				r.logger.DebugContext(ctx, "match[", currentRuleIndex, "] ", currentRule, " => ", currentRule.Action())
-			} else {
-				r.logger.DebugContext(ctx, "match[", currentRuleIndex, "] => ", currentRule.Action())
-			}
+			r.logger.DebugContext(ctx, R.MatchLine{Prefix: "match", Index: currentRuleIndex, Rule: currentRule})
 			switch action := currentRule.Action().(type) {
 			case *R.RuleActionDNSRoute:
 				transport, loaded := r.transport.Transport(action.Server)
@@ -428,11 +424,7 @@ func (r *Router) resolveDNSRoute(server string, routeOptions R.RuleActionDNSRout
 }
 
 func (r *Router) logRuleMatch(ctx context.Context, ruleIndex int, currentRule adapter.DNSRule) {
-	if ruleDescription := currentRule.String(); ruleDescription != "" {
-		r.logger.DebugContext(ctx, "match[", ruleIndex, "] ", currentRule, " => ", currentRule.Action())
-	} else {
-		r.logger.DebugContext(ctx, "match[", ruleIndex, "] => ", currentRule.Action())
-	}
+	r.logger.DebugContext(ctx, R.MatchLine{Prefix: "match", Index: ruleIndex, Rule: currentRule})
 }
 
 type exchangeWithRulesResult struct {
