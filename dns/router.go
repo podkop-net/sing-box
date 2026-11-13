@@ -1084,7 +1084,7 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
 		}, nil
 	}
 	if isResolverDiscoveryQuery(message.Question[0]) {
-		r.logger.DebugContext(ctx, "rejected resolver discovery query ", FormatQuestion(message.Question[0].String()))
+		r.logger.DebugContext(ctx, "rejected resolver discovery query ", QuestionLine{message.Question[0]})
 		return nil, &mDNS.Msg{
 			MsgHdr: mDNS.MsgHdr{
 				Id:                 message.Id,
@@ -1104,7 +1104,7 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
 	rules := r.rules
 	legacyDNSMode := r.legacyDNSMode
 	r.rulesAccess.RUnlock()
-	r.logger.DebugContext(ctx, "exchange ", FormatQuestion(message.Question[0].String()))
+	r.logger.DebugContext(ctx, "exchange ", QuestionLine{message.Question[0]})
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Destination = M.Socksaddr{}
 	metadata.QueryType = message.Question[0].Qtype
