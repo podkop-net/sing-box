@@ -53,8 +53,10 @@ type RemoteRuleSet struct {
 	updateInterval time.Duration
 	httpClient     *http.Client
 	// the clients a fetch that failed through httpClient is repeated through, in order
-	// (option.HTTPClientOptions.Fallback)
+	// (option.HTTPClientOptions.Fallback); the downloader of the http client when it has
+	// outbounds (adapter.HTTPDownloaders)
 	fallbacks      []ruleSetFallback
+	downloader     adapter.HTTPDownloader
 	access         sync.RWMutex
 	rules          []adapter.HeadlessRule
 	metadata       adapter.RuleSetMetadata
@@ -142,6 +144,14 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	for _, fallback := range fallbacks {
 		startContext.Register(fallback.Transport)
 		s.fallbacks = append(s.fallbacks, ruleSetFallback{tag: fallback.Tag, client: &http.Client{Transport: fallback.Transport}})
+	}
+	s.downloader, err = s.resolveDownloader()
+	if err != nil {
+		return E.Cause(err, "create rule-set http client")
+	}
+	if s.downloader != nil {
+		// the downloads of the start share the connections of the ways, closed when it is over
+		startContext.Register(s.downloader.Hold())
 	}
 	s.loadCached()
 	var loadedFromInitialPath bool
@@ -450,12 +460,17 @@ var (
 type stallResetReader struct {
 	reader io.Reader
 	reset  func()
+	// progress, when given, is told the size of every read that carries data
+	progress func(int)
 }
 
 func (r *stallResetReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	if n > 0 {
 		r.reset()
+		if r.progress != nil {
+			r.progress(n)
+		}
 	}
 	return n, err
 }
@@ -531,14 +546,18 @@ func describeRuleSetBody(response *http.Response, size int64, sample []byte) str
 	return description.String()
 }
 
-// fetch downloads the list through the http client of the rule-set and, while that fails, through
-// each of its fallback clients in turn. Each way has the whole stall timeout of its own; the start
+// fetch downloads the list through the downloader of the http client of the rule-set when it has
+// outbounds (fetchWays); else through the client and, while that fails, through each of its
+// fallback clients in turn. Each way has the whole stall timeout of its own; the start
 // deadline bounds them all. The error is that of every way.
 func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	if isStart {
 		var stop context.CancelFunc
 		ctx, stop = context.WithTimeout(ctx, ruleSetStartDeadline)
 		defer stop()
+	}
+	if s.downloader != nil {
+		return s.fetchWays(ctx, isStart)
 	}
 	err := s.fetchThrough(ctx, s.httpClient, isStart)
 	if err == nil || len(s.fallbacks) == 0 {
@@ -560,8 +579,26 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	return E.Errors(errs...)
 }
 
-// fetchThrough downloads the list through client.
+// fetchThrough downloads the list through client and takes it.
 func (s *RemoteRuleSet) fetchThrough(ctx context.Context, client *http.Client, isStart bool) error {
+	fetched, err := s.download(ctx, client, isStart, s.lastEtag, nil)
+	if err != nil {
+		return err
+	}
+	return s.apply(fetched)
+}
+
+// ruleSetFetched is what a download of the list brought: the answer that it is not modified,
+// or the body of a 200.
+type ruleSetFetched struct {
+	notModified bool
+	response    *http.Response
+	content     []byte
+}
+
+// download downloads the list through client, bounded by the stall timeout, as new if it is not
+// etag. progress, when given, is told the headers (0) and every part of the body.
+func (s *RemoteRuleSet) download(ctx context.Context, client *http.Client, isStart bool, etag string, progress func(int)) (*ruleSetFetched, error) {
 	s.logger.Debug("updating rule-set ", s.tag, " from URL: ", s.url)
 	// a group that switches members closes the connections it does not know as routed
 	// ones: a list half downloaded through it would wait for the next update_interval
@@ -588,10 +625,10 @@ func (s *RemoteRuleSet) fetchThrough(ctx context.Context, client *http.Client, i
 	}
 	request, err := http.NewRequest("GET", s.url, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if s.lastEtag != "" {
-		request.Header.Set("If-None-Match", s.lastEtag)
+	if etag != "" {
+		request.Header.Set("If-None-Match", etag)
 	}
 	if !isStart {
 		defer client.CloseIdleConnections()
@@ -603,18 +640,38 @@ func (s *RemoteRuleSet) fetchThrough(ctx context.Context, client *http.Client, i
 			// next batch of rule-sets into the same wait
 			client.Transport.(adapter.HTTPTransport).Reset()
 		}
-		return describe(err)
+		return nil, describe(err)
 	}
 	defer response.Body.Close()
 	stall.Reset(ruleSetStallTimeout)
+	if progress != nil {
+		progress(0)
+	}
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
+		return &ruleSetFetched{notModified: true, response: response}, nil
+	default:
+		return nil, E.New("unexpected status: ", response.Status)
+	}
+	body := &stallResetReader{reader: response.Body, reset: func() { stall.Reset(ruleSetStallTimeout) }, progress: progress}
+	content, err := s.readRuleSetBody(response, body)
+	// the transfer is over: parsing a large list must not look like a stalled download
+	stall.Stop()
+	if err != nil {
+		return nil, describe(err)
+	}
+	return &ruleSetFetched{response: response, content: content}, nil
+}
+
+// apply takes what a download brought.
+func (s *RemoteRuleSet) apply(fetched *ruleSetFetched) error {
+	if fetched.notModified {
 		s.lastUpdated = time.Now()
 		if checks, kept := s.cacheFile.(adapter.RuleSetCheckCache); kept {
 			// the time alone: a save of the set writes the whole list again, at every
 			// update_interval, to a cache file that may be on flash
-			err = checks.StoreRuleSetChecked(s.tag, s.lastUpdated)
+			err := checks.StoreRuleSetChecked(s.tag, s.lastUpdated)
 			if err != nil {
 				s.logger.Error("save rule-set updated time: ", err)
 				return nil
@@ -624,7 +681,7 @@ func (s *RemoteRuleSet) fetchThrough(ctx context.Context, client *http.Client, i
 			if savedRuleSet != nil {
 				savedRuleSet.LastUpdated = s.lastUpdated
 				savedRuleSet.URLHash = s.urlHash[:]
-				err = s.cacheFile.SaveRuleSet(s.tag, savedRuleSet)
+				err := s.cacheFile.SaveRuleSet(s.tag, savedRuleSet)
 				if err != nil {
 					s.logger.Error("save rule-set updated time: ", err)
 					return nil
@@ -633,22 +690,14 @@ func (s *RemoteRuleSet) fetchThrough(ctx context.Context, client *http.Client, i
 		}
 		s.logger.Info("update rule-set ", s.tag, ": not modified")
 		return nil
-	default:
-		return E.New("unexpected status: ", response.Status)
 	}
-	body := &stallResetReader{reader: response.Body, reset: func() { stall.Reset(ruleSetStallTimeout) }}
-	content, err := s.readRuleSetBody(response, body)
-	// the transfer is over: parsing a large list must not look like a stalled download
-	stall.Stop()
-	if err != nil {
-		return describe(err)
-	}
+	response, content := fetched.response, fetched.content
 	// a rule-set closed while its list came in does not parse it: the parse of a big list
 	// is the most an update costs, and a box that replaces this one fetches its own
 	if s.ctx.Err() != nil {
 		return s.ctx.Err()
 	}
-	err = s.commitBytes(content)
+	err := s.commitBytes(content)
 	if err != nil {
 		return E.Cause(err, "read rule-set (", describeRuleSetBody(response, int64(len(content)), content), ")")
 	}

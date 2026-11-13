@@ -44,6 +44,12 @@ type _HTTPClientOptions struct {
 	// repeat it through, in order (adapter.HTTPClientFallbacks). Their own fallbacks are not
 	// followed.
 	Fallback badoption.Listable[string] `json:"fallback,omitempty"`
+
+	// Outbounds are the ways a download through this client may take, the first one the
+	// default first try (adapter.HTTPDownloaders): a caller that knows the downloader tries
+	// them as it orders them; any other caller goes through the first. Not with detour or
+	// fallback.
+	Outbounds badoption.Listable[string] `json:"outbounds,omitempty" reference:"outbound"`
 }
 
 type (

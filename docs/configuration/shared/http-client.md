@@ -19,6 +19,7 @@ When object:
   "disable_version_fallback": false,
   "headers": {},
   "fallback": [],
+  "outbounds": [],
 
   ... // HTTP2 Fields
 
@@ -102,6 +103,31 @@ A remote rule-set whose download through this client fails (an error, an unexpec
 no data for the stall timeout, or content that is not a rule-set) repeats it through each
 fallback client in turn, until one brings the list. The fallbacks of a fallback client are not
 followed. Other users of the client do not fall back.
+
+#### outbounds
+
+Tags of outbounds a download through this client may go through, the first one the default
+first try. Only for a client of top-level `http_clients`; not with `detour` or `fallback`. A
+user of the client that does not know the ways (any but a remote rule-set) goes through the
+first one.
+
+A remote rule-set downloads through the ways in this order, for the host of its URL:
+
+1. the way that brought the last file from this host;
+2. the first way of the list;
+3. the ways that brought a file from another host, the fastest first;
+4. the ways the URL tests passed, the lowest delay first (a group by the outbound it uses now);
+5. the ways not known yet, in the order of the list;
+6. the ways that failed for this host, the oldest failure first.
+
+No way is left out, but those the program that runs the box excludes (a group while it uses an
+excluded outbound). The next way starts beside those under way when none of them showed
+progress for 4 s (no answer yet), or a body has paused for 1 s (3 s once 1 MiB of it came); at
+most three at once. The first way that brings a list that parses wins and the
+others are stopped; a body that is not a rule-set (a page served with status 200) fails its way.
+When the first way failed for the host the last time, the second starts with it. What the
+downloads found is kept for the life of the box, and across boxes when the program that runs
+them keeps it.
 
 ### HTTP2 Fields
 
