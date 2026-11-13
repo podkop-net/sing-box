@@ -28,6 +28,9 @@ type Manager struct {
 	defaultTag               string
 	defaultTransport         *sharedManagedTransport
 	defaultTransportFallback func() (*ManagedTransport, error)
+	// the downloaders of the clients with outbounds, by tag, and what their downloads found
+	downloaders map[string]*Downloader
+	memory      *DownloadMemory
 }
 
 type sharedManagedTransport struct {
@@ -44,12 +47,17 @@ func NewManager(ctx context.Context, logger log.ContextLogger, clients []option.
 	if defaultTag == "" && len(clients) > 0 {
 		defaultTag = clients[0].Tag
 	}
+	memory := service.PtrFromContext[DownloadMemory](ctx)
+	if memory == nil {
+		memory = NewDownloadMemory()
+	}
 	return &Manager{
 		ctx:              ctx,
 		logger:           logger,
 		defines:          defines,
 		sharedTransports: make(map[string]*sharedManagedTransport),
 		defaultTag:       defaultTag,
+		memory:           memory,
 	}
 }
 
@@ -64,6 +72,12 @@ func (m *Manager) Name() string {
 func (m *Manager) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
+	}
+	for _, define := range m.defines {
+		err := checkOutbounds(define)
+		if err != nil {
+			return err
+		}
 	}
 	if m.defaultTag != "" {
 		sharedTransport, err := m.resolveShared(m.defaultTag)
@@ -104,7 +118,7 @@ func (m *Manager) ResolveTransport(ctx context.Context, logger logger.ContextLog
 			if !loaded {
 				return nil, E.New("http_client not found: ", options.Tag)
 			}
-			resolvedOptions := define.Options()
+			resolvedOptions := clientOptions(define)
 			resolvedOptions.ResolveOnDetour = true
 			transport, err := NewTransport(ctx, logger, options.Tag, resolvedOptions)
 			if err != nil {
@@ -143,7 +157,7 @@ func (m *Manager) resolveShared(tag string) (*sharedManagedTransport, error) {
 	if !loaded {
 		return nil, E.New("http_client not found: ", tag)
 	}
-	transport, err := NewTransport(m.ctx, m.logger, tag, define.Options())
+	transport, err := NewTransport(m.ctx, m.logger, tag, clientOptions(define))
 	if err != nil {
 		return nil, E.Cause(err, "create shared http_client[", tag, "]")
 	}
