@@ -200,3 +200,7 @@ require (
 )
 
 replace github.com/sagernet/sing-vmess => github.com/FiyeroT/sing-vmess v0.2.9-pdk.2
+
+// Chrome's QUIC ClientHello in the order of the CPU: ChaCha20 first without AES hardware, as Chrome
+// does
+replace github.com/sagernet/quic-go => github.com/podkop-net/quic-go v0.61.0-sing-box-mod.12-pdk.1
