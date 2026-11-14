@@ -1,3 +1,5 @@
+//go:build !podkop_slim || podkop_full
+
 package main
 
 import (
