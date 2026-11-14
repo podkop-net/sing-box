@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/sagernet/sing-box/common/warm"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/option"
 
@@ -43,7 +44,9 @@ func (t *UDPTransport) exchangeQueryAsync(ctx context.Context, message *mDNS.Msg
 		t.multiplexer.ExchangeAsync(ctx, message, callback)
 		return
 	}
-	go func() {
+	// a warm goroutine (common/warm): the exchange from a socket of its own, run for every
+	// query, is deeper than the stack a new goroutine has
+	warm.Go(func() {
 		callback(dns.ExchangeFresh(ctx, t.dialer, t.serverAddr, message))
-	}()
+	})
 }

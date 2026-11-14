@@ -13,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/compatible"
 	"github.com/sagernet/sing-box/common/interrupt"
+	"github.com/sagernet/sing-box/common/warm"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -432,13 +433,14 @@ func (c *Client) exchange(ctx context.Context, transport adapter.DNSTransport, m
 
 func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool, callback func(response *dns.Msg, err error)) {
 	if c.mayAskIPv6(transport, message, options) {
-		// the A question may have to go out: not on the caller's goroutine
-		go func() {
+		// the A question may have to go out: not on the caller's goroutine; a warm one
+		// (common/warm), the two exchanges are deeper than the stack a new goroutine has
+		warm.Go(func() {
 			if c.noIPv4(ctx, transport, message, options, responseChecker) {
 				options.Strategy = C.DomainStrategyPreferIPv4
 			}
 			callback(c.exchange(ctx, transport, message, options, responseChecker))
-		}()
+		})
 		return
 	}
 	if options.Timeout == 0 {
