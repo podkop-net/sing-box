@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/warm"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	R "github.com/sagernet/sing-box/route/rule"
@@ -106,15 +107,18 @@ func (h *dnsNatHandler) NewPacketEx(buffer *buf.Buffer, destination M.Socksaddr)
 	metadata := h.metadata
 	// Not on the caller: udpnat calls NewPacketEx from the reading loop of the inbound,
 	// which serves every session, and an exchange can wait (a new FakeIP address is
-	// written to the cache file, a DoT connection is being set up). The goroutine lives as
-	// long as ExchangeAsync itself, not for the session.
-	go h.router.dns.ExchangeAsync(adapter.WithContext(h.ctx, &metadata), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, exchangeErr error) {
-		if exchangeErr == nil {
-			exchangeErr = h.router.writeDNSPacketResponse(&message, response, h.conn, destination)
-		}
-		if exchangeErr != nil && !R.IsRejected(exchangeErr) && !E.IsClosedOrCanceled(exchangeErr) && !dns.IsLoggedFailure(exchangeErr) {
-			h.router.logger.ErrorContext(h.ctx, E.Cause(exchangeErr, "process DNS packet"))
-		}
+	// written to the cache file, a DoT connection is being set up). The goroutine is busy
+	// as long as ExchangeAsync itself, not for the session; a warm one (common/warm): the
+	// DNS rules and the exchange are deeper than the stack a new goroutine has.
+	warm.Go(func() {
+		h.router.dns.ExchangeAsync(adapter.WithContext(h.ctx, &metadata), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, exchangeErr error) {
+			if exchangeErr == nil {
+				exchangeErr = h.router.writeDNSPacketResponse(&message, response, h.conn, destination)
+			}
+			if exchangeErr != nil && !R.IsRejected(exchangeErr) && !E.IsClosedOrCanceled(exchangeErr) && !dns.IsLoggedFailure(exchangeErr) {
+				h.router.logger.ErrorContext(h.ctx, E.Cause(exchangeErr, "process DNS packet"))
+			}
+		})
 	})
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/common/listener"
+	"github.com/sagernet/sing-box/common/warm"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -125,6 +126,13 @@ func (i *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 }
 
 func (i *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	// udpnat calls it on a new goroutine for every new session, and a resolver such as
+	// dnsmasq asks each query from a port of its own: the route of the session, deeper than
+	// the stack a new goroutine has, runs on a warm one
+	warm.Go(func() { i.newPacketConnection(ctx, conn, source, destination, onClose) })
+}
+
+func (i *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	i.logger.InfoContext(ctx, "inbound packet connection from ", source)
 	var metadata adapter.InboundContext
 	metadata.Inbound = i.Tag()
