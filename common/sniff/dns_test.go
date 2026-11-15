@@ -87,12 +87,15 @@ func TestSniffPacketAfterDNS(t *testing.T) {
 		{"dns query", testDNSQuery, C.ProtocolDNS},
 		{"ntp request", testNTPRequest, C.ProtocolNTP},
 		{"dtls record", testDTLSHello, C.ProtocolDTLS},
+		// a DHT query: DNS (a question count of ASCII), QUIC (no version of it) and STUN (no
+		// magic cookie) take none
+		{"dht query", "64313a6164323a696432303a6162636465666768696a3031323334353637383965313a71343a70696e67313a74323a6161313a79313a7165", C.ProtocolBitTorrent},
 	} {
 		packet, err := hex.DecodeString(test.packet)
 		require.NoError(t, err, test.name)
 		var metadata adapter.InboundContext
 		err = sniff.PeekPacket(context.TODO(), &metadata, packet,
-			sniff.DomainNameQuery, sniff.QUICClientHello, sniff.STUNMessage, sniff.UTP, sniff.UDPTracker, sniff.DTLSRecord, sniff.NTP)
+			sniff.DomainNameQuery, sniff.QUICClientHello, sniff.STUNMessage, sniff.DHT, sniff.UTP, sniff.UDPTracker, sniff.DTLSRecord, sniff.NTP)
 		require.NoError(t, err, test.name)
 		require.Equal(t, test.protocol, metadata.Protocol, test.name)
 	}
@@ -100,7 +103,7 @@ func TestSniffPacketAfterDNS(t *testing.T) {
 	require.NoError(t, err)
 	var metadata adapter.InboundContext
 	err = sniff.PeekPacket(context.TODO(), &metadata, response,
-		sniff.DomainNameQuery, sniff.QUICClientHello, sniff.STUNMessage, sniff.UTP, sniff.UDPTracker, sniff.DTLSRecord, sniff.NTP)
+		sniff.DomainNameQuery, sniff.QUICClientHello, sniff.STUNMessage, sniff.DHT, sniff.UTP, sniff.UDPTracker, sniff.DTLSRecord, sniff.NTP)
 	require.Error(t, err, "a DNS response is no protocol of any sniffer")
 	require.Empty(t, metadata.Protocol)
 }

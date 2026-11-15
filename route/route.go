@@ -35,6 +35,7 @@ var defaultPacketSniffers = []sniff.PacketSniffer{
 	sniff.DomainNameQuery,
 	sniff.QUICClientHello,
 	sniff.STUNMessage,
+	sniff.DHT,
 	sniff.UTP,
 	sniff.UDPTracker,
 	sniff.DTLSRecord,
