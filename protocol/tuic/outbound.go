@@ -181,3 +181,19 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	})
 	return nil
 }
+
+// QUICStats tells the counts of the QUIC connection the connections of the outbound are streams
+// of (podkop-engine, adapter.QUICStatsOutbound).
+func (h *Outbound) QUICStats() (adapter.QUICStats, bool) {
+	stats, connection, active := h.client.ConnectionStats()
+	if !active {
+		return adapter.QUICStats{}, false
+	}
+	return adapter.QUICStats{
+		Connection:          connection,
+		PeerPacketsReceived: stats.PeerPacketsReceived,
+		PeerPacketsMissing:  stats.PeerPacketsMissing,
+		SmoothedRTT:         stats.SmoothedRTT,
+		MinRTT:              stats.MinRTT,
+	}, true
+}

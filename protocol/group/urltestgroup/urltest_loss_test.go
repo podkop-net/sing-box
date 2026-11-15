@@ -27,12 +27,82 @@ import (
 // The weight is the crossing of the prices of report 02: a server 20 ms away with 0.8 % of
 // loss costs what a clean one 50 ms away does (delays in proportion to the RTT).
 func TestWeighDelayPrice(t *testing.T) {
-	near := func(percent float64) uint16 { return weighDelay(40, percent, 20*time.Millisecond) }
+	near := func(percent float64) uint16 { return weighDelay(40, percent, 20*time.Millisecond, tcpLossPrice) }
 	require.Equal(t, uint16(40), near(0))
 	require.InDelta(t, 100, float64(near(0.8)), 3)
 	require.Less(t, near(0.5), uint16(100))
 	require.Greater(t, near(1.2), uint16(100))
-	require.Equal(t, uint16(65535), weighDelay(60000, 50, time.Millisecond))
+	require.Equal(t, uint16(65535), weighDelay(60000, 50, time.Millisecond, tcpLossPrice))
+}
+
+// Over QUIC a loss costs a round of recovery: more the longer the RTT (grid g16 of lab/hy2, priced
+// over its cells of 0.5 to 2 %), where over TCP it costs most on a short path. An RTT below the
+// grid's 20 ms is priced as 20 ms: a heavy loss near weighs too.
+func TestWeighDelayQUICPrice(t *testing.T) {
+	quic := func(rtt time.Duration) uint16 { return weighDelay(100, 1, rtt, quicLossPrice) }
+	require.InDelta(t, 103, float64(quic(20*time.Millisecond)), 1)
+	require.Equal(t, quic(20*time.Millisecond), quic(10*time.Millisecond))
+	require.InDelta(t, 134, float64(quic(50*time.Millisecond)), 1)
+	require.InDelta(t, 144, float64(quic(100*time.Millisecond)), 1)
+	require.InDelta(t, 148, float64(quic(150*time.Millisecond)), 1)
+	require.Greater(t, weighDelay(100, 1, 20*time.Millisecond, tcpLossPrice), quic(20*time.Millisecond))
+	require.Greater(t, weighDelay(100, 10, time.Millisecond, quicLossPrice), uint16(125))
+}
+
+// testSelector is a member that is a group: it selects one outbound, as a selector does.
+type testSelector struct {
+	*testMember
+	selected adapter.Outbound
+}
+
+func (s testSelector) All() []string                                     { return nil }
+func (s testSelector) Selected(network string) adapter.Outbound          { return s.selected }
+func (s testSelector) AttachConnection(closer io.Closer) (detach func()) { return func() {} }
+
+// A member that is a group is priced as the outbound it selects, whose tag its loss is kept by: a
+// selector of a member over QUIC at QUIC's price, of one over TCP, or of none, at TCP's.
+func TestLossPriceOfNestedMember(t *testing.T) {
+	hysteria2, socks := newTestMember(C.TypeHysteria2, "a", dialWorking), newTestMember(C.TypeSOCKS, "b", dialWorking)
+	selector := func(selected adapter.Outbound) adapter.Outbound {
+		return testSelector{newTestMember(C.TypeSelector, "s", dialWorking), selected}
+	}
+	require.Equal(t, quicLossPrice, lossPriceOf(quicTestMember{hysteria2}))
+	require.Equal(t, quicLossPrice, lossPriceOf(selector(quicTestMember{hysteria2})))
+	require.Equal(t, quicLossPrice, lossPriceOf(selector(selector(quicTestMember{hysteria2}))))
+	require.Equal(t, tcpLossPrice, lossPriceOf(selector(socks)))
+	require.Equal(t, tcpLossPrice, lossPriceOf(selector(nil)))
+}
+
+// quicTestMember is a member over QUIC (adapter.QUICStatsOutbound).
+type quicTestMember struct {
+	*testMember
+}
+
+func (m quicTestMember) QUICStats() (adapter.QUICStats, bool) {
+	return adapter.QUICStats{}, false
+}
+
+// A member is weighed at the price of its transport: one over QUIC that loses 1 % 20 ms away stays
+// before a clean one 50 % slower (x1.03); one over TCP with the same loss and delay does not
+// (x2.85), by more than the tolerance of a switch.
+func TestLossModeQUICPrice(t *testing.T) {
+	for _, overQUIC := range []bool{true, false} {
+		a, b := newTestMember(C.TypeHysteria2, "a", dialWorking), newTestMember(C.TypeSOCKS, "b", dialWorking)
+		first := adapter.Outbound(a)
+		if overQUIC {
+			first = quicTestMember{a}
+		}
+		_, group := newModeGroup(t, modeLoss, []adapter.Outbound{first, b}, map[string]uint16{"a": 200, "b": 300}, func(group *URLTestGroup) {
+			storeLoss(group, "a", 1000, 10, 20*time.Millisecond)
+			storeLoss(group, "b", 1000, 0, 30*time.Millisecond)
+		})
+		tcp, _ := selectedTags(group)
+		if overQUIC {
+			require.Equal(t, "a", tcp)
+		} else {
+			require.Equal(t, "b", tcp)
+		}
+	}
 }
 
 func TestGroupModeOptions(t *testing.T) {

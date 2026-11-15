@@ -107,16 +107,57 @@ func groupMode(mode string, link string, interval time.Duration, threshold float
 	return mode, options, nil
 }
 
-// weighDelay is delay weighed by a loss of percent over a path with the RTT rtt.
-func weighDelay(delay uint16, percent float64, rtt time.Duration) uint16 {
+// lossPrice is what a page costs over a path, in report 02's form: page = a + perRTT·RTT +
+// p·(perLoss + perLossRTT·RTT) ms, the RTT in ms, p the loss in percent. A member with the loss p
+// is then as slow as one without loss whose delay is greater by the factor
+// 1 + p·(perLoss/RTT + perLossRTT)/perRTT, the slowdown, which a price may be fitted to directly
+// (perRTT 1). A slowdown below 1 is none. minRTT is the shortest RTT the price holds for (ms): a
+// shorter one is priced as it.
+type lossPrice struct {
+	perRTT, perLoss, perLossRTT float64
+	minRTT                      float64
+}
+
+// tcpLossPrice is report 02's price, measured on servers with CUBIC and BBR alike: every page
+// makes new connections to the server, and a lost handshake waits for the client's timer.
+var tcpLossPrice = lossPrice{perRTT: 4.85, perLoss: 155, perLossRTT: 1.2, minRTT: 5}
+
+// lossPriceOf is the price of the loss of a member: a member over QUIC (adapter.QUICStatsOutbound)
+// opens a stream of a connection it has for a page, and QUIC sends again what was lost within a
+// round trip. A member that is a group is priced as the member it selects (realOutbound).
+func lossPriceOf(member adapter.Outbound) lossPrice {
+	if _, isQUIC := realOutbound(member).(adapter.QUICStatsOutbound); isQUIC {
+		return quicLossPrice
+	}
+	return tcpLossPrice
+}
+
+// realOutbound is the outbound the connections of a member go through in the end: through a group
+// (a selector, another urltest) the one it selects, as group.RealTag names it, whose tag the loss
+// of the member is kept by; nil when a group selects none.
+func realOutbound(member adapter.Outbound) adapter.Outbound {
+	for member != nil {
+		nested, isGroup := member.(adapter.OutboundGroup)
+		if !isGroup {
+			return member
+		}
+		member = nested.Selected(N.NetworkTCP)
+	}
+	return nil
+}
+
+// weighDelay is delay weighed by a loss of percent over a path with the RTT rtt, at price.
+func weighDelay(delay uint16, percent float64, rtt time.Duration, price lossPrice) uint16 {
 	if percent <= 0 {
 		return delay
 	}
-	milliseconds := float64(rtt) / float64(time.Millisecond)
-	if milliseconds < 5 {
-		milliseconds = 5
+	milliseconds := max(float64(rtt)/float64(time.Millisecond), price.minRTT)
+	slowdown := 1 + percent*(price.perLoss/milliseconds+price.perLossRTT)/price.perRTT
+	if slowdown <= 1 {
+		// a loss makes no member faster
+		return delay
 	}
-	weighed := float64(delay) * (1 + percent*(155/milliseconds+1.2)/4.85)
+	weighed := float64(delay) * slowdown
 	if weighed > 65535 {
 		return 65535
 	}
@@ -128,6 +169,7 @@ type memberLoss struct {
 	percent float64 // over the window decided by
 	excess  float64 // less the loss of the line
 	rtt     time.Duration
+	price   lossPrice
 	known   bool
 }
 
@@ -148,7 +190,7 @@ func (g *URLTestGroup) lossView() lossView {
 		if !known {
 			continue
 		}
-		loss := memberLoss{percent: window.Rate(), rtt: g.history.LossRTT(tag, now), known: true}
+		loss := memberLoss{percent: window.Rate(), rtt: g.history.LossRTT(tag, now), price: lossPriceOf(member), known: true}
 		if counted == 0 || loss.percent < floor {
 			floor = loss.percent
 		}
@@ -176,7 +218,7 @@ func (v lossView) delay(tag string, history *adapter.URLTestHistory) uint16 {
 		// no RTT of its own: a URL test takes a few round trips
 		rtt = time.Duration(history.Delay) * time.Millisecond / 3
 	}
-	return weighDelay(history.Delay, loss.excess, rtt)
+	return weighDelay(history.Delay, loss.excess, rtt, loss.price)
 }
 
 // memberAlive tells whether a member may carry connections: it has a test result and has
@@ -303,7 +345,15 @@ func (g *URLTestGroup) probeLoss(tag string, member adapter.Outbound, size int64
 		return false
 	}
 	start := time.Now()
-	sample, err := urltest.LossProbe(ctx, g.loss.link, size, member)
+	var sample urltest.LossSample
+	var err error
+	// a member that is a group dials through the member it selects: the QUIC connection counted is
+	// that member's, the one its loss is kept by (tag)
+	if stats, isQUIC := realOutbound(member).(adapter.QUICStatsOutbound); isQUIC {
+		sample, err = urltest.LossProbeQUIC(ctx, g.loss.link, size, member, stats)
+	} else {
+		sample, err = urltest.LossProbe(ctx, g.loss.link, size, member)
+	}
 	if g.ctx.Err() != nil {
 		// the group was closed or replaced: after a swap the tag may be another outbound's
 		return false
@@ -315,7 +365,7 @@ func (g *URLTestGroup) probeLoss(tag string, member adapter.Outbound, size int64
 			sample.Reordered, " bytes reordered, RTT ", sample.RTT.Milliseconds(), "ms, ", sample.Received, " bytes in ",
 			sample.Elapsed.Milliseconds(), "ms")
 		return true
-	case errors.Is(err, urltest.ErrLossNotOwnConnection):
+	case errors.Is(err, urltest.ErrLossNotOwnConnection), errors.Is(err, urltest.ErrLossNoWindows):
 		g.history.StoreLossNotCounted(tag, time.Now())
 		g.logger.Info("outbound ", tag, " loss probe could not count, the member is chosen by its delay: ", err)
 	case g.networkChangedSince(start):

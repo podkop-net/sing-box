@@ -44,6 +44,11 @@ var ErrLossNotCounted = E.New("loss not counted")
 // own (a multiplexed transport, QUIC): probing the member again would not count either.
 var ErrLossNotOwnConnection = E.New("the probe had no connection of its own")
 
+// ErrLossNoWindows wraps ErrLossNotCounted when a probe over QUIC cannot ask for its download a
+// window at a time (LossProbeQUIC): the loss URL serves no ranges and has no "bytes" parameter.
+// Probing the member again with the same URL would not count either.
+var ErrLossNoWindows = E.New("the loss URL serves no ranges and has no bytes parameter")
+
 // lossStall is how long a body may bring nothing before the probe calls it stopped: a slow
 // path that keeps bringing data is counted as far as it came, not failed. A variable for the
 // tests, as lossClientTimeout.
