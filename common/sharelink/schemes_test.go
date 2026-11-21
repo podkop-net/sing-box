@@ -80,20 +80,36 @@ func TestSchemes(t *testing.T) {
 		"hysteria2 with a list of ports and speeds": {
 			"hysteria2://p@example.com:443,5000-6000/?upmbps=50&down=200%20Mbps&pinSHA256=AB%3ACD",
 			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":["443:443","5000:6000"],"up_mbps":50,"down_mbps":200,"password":"p","tls":{"enabled":true}}`,
-			[]string{"the pinned certificate (pcs, pinSHA256) is not supported"},
+			[]string{"the pinned certificate (pcs, pinSHA256) cannot be read"},
+		},
+		"hysteria2 with the pinned certificate of Hysteria": {
+			"hysteria2://p@example.com:443/?pinSHA256=0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"password":"p","tls":{"enabled":true,"certificate_sha256":"CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws="}}`, nil,
 		},
 		"hysteria2 with mport": {
 			"hysteria2://p@[2001:db8::1]:443?mport=20000-30000",
 			`{"type":"hysteria2","server":"2001:db8::1","server_port":443,"server_ports":"20000:30000","password":"p","tls":{"enabled":true}}`, nil,
 		},
 		"hysteria2 of Remnawave: obfuscation, port hopping and speeds in fm": {
-			"hysteria2://p@example.com:443/?sni=s.example.com&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"obfs pass"}},{"type":"noise"}],"quicParams":{"brutalUp":"50 mbps","brutalDown":200,"udpHop":{"ports":"20000-30000,40000","interval":"10-30"}}}`),
-			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":["20000:30000","40000:40000"],"hop_interval":"10s","up_mbps":50,"down_mbps":200,
+			"hysteria2://p@example.com:443/?sni=s.example.com&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"obfs pass"}}],"quicParams":{"brutalUp":"50 mbps","brutalDown":200,"udpHop":{"ports":"20000-30000,40000","interval":"10-30"}}}`),
+			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":["20000:30000","40000:40000"],"hop_interval":"10s","hop_interval_max":"30s","up_mbps":50,"down_mbps":200,
 			"obfs":{"type":"salamander","password":"obfs pass"},"password":"p","tls":{"enabled":true,"server_name":"s.example.com"}}`, nil,
 		},
 		"hysteria2 with fm that says what the link says already": {
 			"hysteria2://p@example.com:443/?obfs=salamander&obfs-password=link&mport=5000-6000&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"mask"}}],"quicParams":{"udpHop":{"ports":"1-2"}}}`),
 			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":"5000:6000","obfs":{"type":"salamander","password":"link"},"password":"p","tls":{"enabled":true}}`, nil,
+		},
+		"hysteria2 of Remnawave with gecko: salamander with a packet size, obfs=salamander in the link too": {
+			"hysteria2://p@example.com:443/?obfs=salamander&obfs-password=pw&fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"pw","packetSize":"600-1200"}}]}`),
+			`{"type":"hysteria2","server":"example.com","server_port":443,"obfs":{"type":"gecko","password":"pw","min_packet_size":600,"max_packet_size":1200},"password":"p","tls":{"enabled":true}}`, nil,
+		},
+		"hysteria2 with udphop": {
+			"hysteria2://p@example.com:443/?fm=" + uriComponent(`{"udp":[{"type":"udphop","settings":{"mode":"intervalRemote","interval":"10-30","remotePorts":"20000-30000,40000"}}]}`),
+			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":["20000:30000","40000:40000"],"hop_interval":"10s","hop_interval_max":"30s","password":"p","tls":{"enabled":true}}`, nil,
+		},
+		"hysteria2 with udphop and ports of its own: the interval of the mask": {
+			"hysteria2://p@example.com:443,5000-6000/?fm=" + uriComponent(`{"udp":[{"type":"udphop","settings":{"mode":"perConnRemote","interval":20,"remotePorts":7000}}]}`),
+			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":["443:443","5000:6000"],"hop_interval":"20s","password":"p","tls":{"enabled":true}}`, nil,
 		},
 		"vmess of Marzban: gRPC with type none, an IPv6 address in brackets": {
 			"vmess://" + b64(`{"add": "[2001:db8::10]", "aid": "0", "host": "", "id": "`+testUUID+`", "net": "grpc", "path": "svc", "port": 443, "ps": "m", "scy": "auto", "tls": "tls", "type": "none", "v": "2"}`),
@@ -176,9 +192,10 @@ func TestSchemeRefusals(t *testing.T) {
 		"hysteria://example.org:1?protocol=faketcp": "hysteria-protocol",
 		"hysteria://example.org:1?obfs=salamander":  "hysteria-obfs",
 		"tuic://token@example.org:443":              "tuic-v4",
-		"vmess://" + b64(`{"add":"h","port":1,"id":"`+testUUID+`","net":"kcp","type":"none","path":"seed"}`):        "kcp",
-		"vmess://" + b64(`{"add":"h","port":1,"id":"`+testUUID+`","net":"quic","host":"aes-128-gcm","path":"key"}`): "quic-security",
-		"hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"xdns"}]}`):                                 "finalmask",
+		"vmess://" + b64(`{"add":"h","port":1,"id":"`+testUUID+`","net":"kcp","type":"none","path":"seed"}`):                                              "kcp",
+		"vmess://" + b64(`{"add":"h","port":1,"id":"`+testUUID+`","net":"quic","host":"aes-128-gcm","path":"key"}`):                                       "quic-security",
+		"hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"xdns"}]}`):                                                                       "finalmask",
+		"hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"realm","settings":{"url":"realm://t@r.example.org/x","stunServers":["s:1"]}}]}`): "hysteria-realm",
 	} {
 		require.Equal(t, id, refusalID(t, link), link)
 	}

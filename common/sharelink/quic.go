@@ -3,7 +3,9 @@ package sharelink
 import (
 	"strconv"
 	"strings"
+	"time"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
@@ -124,7 +126,9 @@ func (d *decoder) hysteria2() (any, error) {
 }
 
 // hysteria2Mask reads "fm", the finalmask of Xray, in a Hysteria 2 link: Remnawave writes
-// the obfuscation, the port hopping and the speeds of its Hysteria inbounds there.
+// the obfuscation, the port hopping and the speeds of its Hysteria inbounds there. What the
+// link says itself (obfs, a list of ports) stands, apart from the packet size of salamander:
+// that makes Xray's gecko, which Remnawave writes into the link as obfs=salamander too.
 func (d *decoder) hysteria2Mask(options *option.Hysteria2OutboundOptions) error {
 	content := strings.TrimSpace(d.query["fm"])
 	if content == "" {
@@ -132,10 +136,8 @@ func (d *decoder) hysteria2Mask(options *option.Hysteria2OutboundOptions) error 
 	}
 	var mask struct {
 		UDP []struct {
-			Type     string `json:"type"`
-			Settings struct {
-				Password string `json:"password"`
-			} `json:"settings"`
+			Type     string          `json:"type"`
+			Settings json.RawMessage `json:"settings"`
 		} `json:"udp"`
 		QUIC struct {
 			BrutalUp   vmessText `json:"brutalUp"`
@@ -152,14 +154,27 @@ func (d *decoder) hysteria2Mask(options *option.Hysteria2OutboundOptions) error 
 		return nil
 	}
 	for _, entry := range mask.UDP {
-		switch strings.ToLower(entry.Type) {
-		case "salamander":
-			if options.Obfs == nil {
-				options.Obfs = &option.Hysteria2Obfs{Type: "salamander", Password: entry.Settings.Password}
-			}
+		kind := strings.ToLower(entry.Type)
+		switch kind {
 		case "noise":
+			d.warn("fm (finalmask): the mask noise is not applied: it is the client's own")
+		case "salamander", "udphop":
+		case "realm":
+			return refuse("hysteria-realm", "fm (finalmask) asks for the realm of Hysteria, which a link does not set: it has other servers asked, and may open ports of the gateway")
 		default:
 			return refuse("finalmask", "fm (finalmask) asks for the mask", shown(entry.Type), ", which is not supported: the server expects it")
+		}
+	}
+	for _, entry := range mask.UDP {
+		var err error
+		switch strings.ToLower(entry.Type) {
+		case "salamander":
+			err = d.salamanderMask(options, entry.Settings)
+		case "udphop":
+			err = d.udpHopMask(options, entry.Settings)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	if ports := string(mask.QUIC.UDPHop.Ports); ports != "" && len(options.ServerPorts) == 0 {
@@ -169,12 +184,10 @@ func (d *decoder) hysteria2Mask(options *option.Hysteria2OutboundOptions) error 
 		}
 		options.ServerPorts = badoption.Listable[string](ranges)
 		// seconds; a range of them is how often Xray hops, between the two
-		interval, _, _ := strings.Cut(string(mask.QUIC.UDPHop.Interval), "-")
-		if seconds, err := strconv.Atoi(strings.TrimSpace(interval)); err == nil && seconds > 0 {
-			err = options.HopInterval.UnmarshalJSON([]byte(strconv.Quote(strconv.Itoa(seconds) + "s")))
-			if err != nil {
-				return E.New("invalid hop interval in fm")
-			}
+		from, to, _ := strings.Cut(string(mask.QUIC.UDPHop.Interval), "-")
+		err = hopInterval(options, from, to)
+		if err != nil {
+			return err
 		}
 	}
 	if options.UpMbps == 0 {
@@ -182,6 +195,122 @@ func (d *decoder) hysteria2Mask(options *option.Hysteria2OutboundOptions) error 
 	}
 	if options.DownMbps == 0 {
 		options.DownMbps = megabits(string(mask.QUIC.BrutalDown))
+	}
+	return nil
+}
+
+// hopInterval sets how often the ports hop from a range of seconds: hop_interval, and
+// hop_interval_max when the range has two ends. Under 5 s Xray refuses it, and sing-quic
+// refuses every connection (hysteria/hop.go).
+func hopInterval(options *option.Hysteria2OutboundOptions, from, to string) error {
+	least, err := strconv.Atoi(strings.TrimSpace(from))
+	if err != nil || least <= 0 {
+		return nil
+	}
+	if least < 5 {
+		return E.New("fm (finalmask): the interval of the port hopping is under 5 s")
+	}
+	most, err := strconv.Atoi(strings.TrimSpace(to))
+	if err != nil {
+		most = least
+	}
+	options.HopInterval = badoption.Duration(time.Duration(least) * time.Second)
+	if most > least {
+		options.HopIntervalMax = badoption.Duration(time.Duration(most) * time.Second)
+	}
+	return nil
+}
+
+// salamanderMask reads the salamander mask. With a packet size Xray makes it gecko
+// (infra/conf Salamander.Build): the same framing as the gecko of sing-box (a flag 0x80,
+// a header of 5 bytes, 2 to 8 chunks, under salamander), which then replaces what obfs of
+// the link says.
+func (d *decoder) salamanderMask(options *option.Hysteria2OutboundOptions, content json.RawMessage) error {
+	var settings struct {
+		Password   string                  `json:"password"`
+		PacketSize *option.V2RayXHTTPRange `json:"packetSize"`
+	}
+	if len(content) > 0 && string(content) != "null" {
+		if err := json.Unmarshal(content, &settings); err != nil {
+			// the server expects the obfuscation: without it nothing connects (Xray refuses it too)
+			return E.New("fm (finalmask): the salamander mask cannot be read")
+		}
+	}
+	if settings.PacketSize != nil && settings.PacketSize.To > 0 {
+		least, most := int(settings.PacketSize.From), int(settings.PacketSize.To)
+		if least <= 0 || most > 2048 || least > most {
+			return E.New("fm (finalmask): the packet size of gecko is not between 1 and 2048 bytes")
+		}
+		options.Obfs = &option.Hysteria2Obfs{
+			Type:         C.Hysteria2ObfsTypeGecko,
+			Password:     settings.Password,
+			GeckoOptions: option.Hysteria2ObfsGecko{MinPacketSize: least, MaxPacketSize: most},
+		}
+		return nil
+	}
+	if options.Obfs == nil {
+		options.Obfs = &option.Hysteria2Obfs{Type: C.Hysteria2ObfsTypeSalamander, Password: settings.Password}
+	}
+	return nil
+}
+
+// udpHopMask reads the udphop mask, the hopping of Xray's client between ports (and
+// addresses): the ports become the server ports of sing-box's hopping, unless the link
+// names its own. The server listens on all of them either way.
+func (d *decoder) udpHopMask(options *option.Hysteria2OutboundOptions, content json.RawMessage) error {
+	var settings struct {
+		Mode        string                  `json:"mode"`
+		Interval    *option.V2RayXHTTPRange `json:"interval"`
+		RemoteIPs   []string                `json:"remoteIPs"`
+		RemotePorts json.RawMessage         `json:"remotePorts"`
+	}
+	if len(content) > 0 && string(content) != "null" {
+		if err := json.Unmarshal(content, &settings); err != nil {
+			d.warn("fm (finalmask): the udphop mask cannot be read and is ignored")
+			return nil
+		}
+	}
+	// Xray moves to the ports of remotePorts only in the modes intervalRemote and
+	// perConnRemote (udphop/conn.go); intervalLocal alone keeps the port of the link
+	remote := false
+	for _, mode := range strings.Split(settings.Mode, ",") {
+		switch strings.ToLower(strings.TrimSpace(mode)) {
+		case "intervalremote", "perconnremote":
+			remote = true
+		case "intervallocal":
+		default:
+			d.warn("fm (finalmask): udphop of an unknown mode is ignored")
+			return nil
+		}
+	}
+	if !remote {
+		d.warn("fm (finalmask): udphop of the local port only is not supported and is ignored")
+		return nil
+	}
+	if len(settings.RemoteIPs) > 0 {
+		d.warn("fm (finalmask): udphop between addresses (remoteIPs) is not supported, the address of the link is used")
+	}
+	var ports string
+	if len(settings.RemotePorts) > 0 && string(settings.RemotePorts) != "null" {
+		var text vmessText
+		if err := json.Unmarshal(settings.RemotePorts, &text); err != nil {
+			return E.New("fm (finalmask): the ports of udphop cannot be read")
+		}
+		ports = string(text)
+	}
+	if strings.TrimSpace(ports) == "" {
+		return nil
+	}
+	if len(options.ServerPorts) == 0 {
+		ranges, err := portRanges(ports)
+		if err != nil {
+			return err
+		}
+		options.ServerPorts = badoption.Listable[string](ranges)
+	}
+	// Xray's default is 30 s, sing-box's too
+	if options.HopInterval == 0 && settings.Interval != nil && settings.Interval.From > 0 {
+		return hopInterval(options, strconv.Itoa(int(settings.Interval.From)), strconv.Itoa(int(settings.Interval.To)))
 	}
 	return nil
 }

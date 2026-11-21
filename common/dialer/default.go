@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/finalmask"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/probesock"
 	C "github.com/sagernet/sing-box/constant"
@@ -57,6 +58,8 @@ type DefaultDialer struct {
 	fallbackNetworkType    []C.InterfaceType
 	networkFallbackDelay   time.Duration
 	networkLastFallback    common.TypedValue[time.Time]
+	// the masks of Xray's finalmask on the TCP connections (podkop-engine)
+	finalMask *finalmask.Masks
 }
 
 func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDialer, error) {
@@ -242,7 +245,12 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
 	}
 	tcpDialer4 := tfo.Dialer{Dialer: dialer4, DisableTFO: !options.TCPFastOpen}
 	tcpDialer6 := tfo.Dialer{Dialer: dialer6, DisableTFO: !options.TCPFastOpen}
+	finalMask, err := finalmask.New(options.FinalMask)
+	if err != nil {
+		return nil, err
+	}
 	defaultDialer := &DefaultDialer{
+		finalMask:              finalMask,
 		dialer4:                tcpDialer4,
 		dialer6:                tcpDialer6,
 		udpDialer4:             udpDialer4,
@@ -509,6 +517,8 @@ func (d *DefaultDialer) trackConn(ctx context.Context, destination M.Socksaddr, 
 			return nil, err
 		}
 		conn = &udpConn{Conn: conn, rawConn: rawConn}
+	} else if d.finalMask != nil {
+		conn = d.finalMask.Client(conn)
 	}
 	if d.connectionManager != nil {
 		conn = d.connectionManager.TrackConn(conn)

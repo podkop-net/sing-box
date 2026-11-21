@@ -2,9 +2,11 @@ package sharelink
 
 import (
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/sagernet/sing-box/common/finalmask"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -18,9 +20,10 @@ import (
 var knownKeys = make(map[string]bool)
 
 // The masks of Xray's finalmask ("fm") that are the client's own business: the server
-// is reached without them. Every other one changes what goes over the wire, and the
-// server expects it.
-var localMasks = map[string]bool{"fragment": true, "noise": true}
+// is reached without them (udphop, the hopping of the ports, is refused by Xray's server
+// side: transport/internet/finalmask/udphop/config.go). Every other one changes what goes
+// over the wire, and the server expects it.
+var localMasks = map[string]bool{"fragment": true, "noise": true, "udphop": true}
 
 // clientSide warns of the settings of Xray's client that a panel writes into a link: how
 // it fragments and pads its own packets. The server is reached without them.
@@ -34,7 +37,13 @@ func (d *decoder) clientSide() {
 	}
 }
 
-// finalMask reads "fm", the finalmask object of Xray.
+// finalMask reads "fm", the finalmask object of Xray. Its fragment masks of TCP become the
+// outbound's finalmask (the dialer cuts the ClientHello or the first writes as Xray does),
+// without their delays: a pause of this host is not a link's to set, and with none the
+// records of a ClientHello go out in one write, as Xray sends them with a delay of 0. A
+// noise mask and udphop are the client's own and are left out (a link of a transport over
+// TCP has no UDP of its own to hop); any other mask changes what goes over the wire, the
+// server expects it, and the link is refused.
 func (d *decoder) finalMask() error {
 	d.reads("fm")
 	content := strings.TrimSpace(d.query["fm"])
@@ -43,7 +52,8 @@ func (d *decoder) finalMask() error {
 	}
 	var mask struct {
 		TCP []struct {
-			Type string `json:"type"`
+			Type     string          `json:"type"`
+			Settings json.RawMessage `json:"settings"`
 		} `json:"tcp"`
 		UDP []struct {
 			Type string `json:"type"`
@@ -51,15 +61,82 @@ func (d *decoder) finalMask() error {
 	}
 	err := json.Unmarshal([]byte(content), &mask)
 	if err != nil {
-		d.warn("fm (finalmask) is not supported and cannot be read, the connection may not work")
+		d.warn("fm (finalmask) cannot be read and is ignored, the connection may not work")
 		return nil
 	}
-	for _, entry := range append(mask.TCP, mask.UDP...) {
+	for _, entry := range mask.TCP {
 		if !localMasks[strings.ToLower(entry.Type)] {
 			return refuse("finalmask", "fm (finalmask) asks for the mask", shown(entry.Type), ", which is not supported: the server expects it")
 		}
 	}
-	d.warn("fm (finalmask) is not supported and is ignored: what it sets is the client's own")
+	for _, entry := range mask.UDP {
+		if !localMasks[strings.ToLower(entry.Type)] {
+			return refuse("finalmask", "fm (finalmask) asks for the mask", shown(entry.Type), ", which is not supported: the server expects it")
+		}
+	}
+	var masks option.FinalMaskOptions
+	var ignored []string
+	for _, entry := range mask.TCP {
+		if !strings.EqualFold(entry.Type, "fragment") {
+			ignored = append(ignored, strings.ToLower(entry.Type))
+			continue
+		}
+		var settings struct {
+			Packets  string                   `json:"packets"`
+			Length   *option.V2RayXHTTPRange  `json:"length"`
+			Lengths  []option.V2RayXHTTPRange `json:"lengths"`
+			Delay    *option.V2RayXHTTPRange  `json:"delay"`
+			Delays   []option.V2RayXHTTPRange `json:"delays"`
+			MaxSplit *option.V2RayXHTTPRange  `json:"maxSplit"`
+		}
+		if len(entry.Settings) > 0 && string(entry.Settings) != "null" {
+			_, err = d.readObject("fm fragment", entry.Settings, &settings)
+			if err != nil {
+				d.warn("fm (finalmask): a fragment mask cannot be read and is ignored")
+				continue
+			}
+		}
+		fragment := option.FinalMaskTCPOptions{
+			Type:     "fragment",
+			Packets:  settings.Packets,
+			Length:   settings.Length,
+			Lengths:  settings.Lengths,
+			MaxSplit: settings.MaxSplit,
+		}
+		paused := settings.Delay != nil && settings.Delay.To > 0
+		for _, delay := range settings.Delays {
+			paused = paused || delay.To > 0
+		}
+		if paused {
+			if strings.EqualFold(strings.TrimSpace(settings.Packets), "tlshello") {
+				// Xray writes each record with its pause; without a pause the records still go in
+				// writes of their own (two delays of 0: not the one write of a single delay 0)
+				fragment.Delays = []option.V2RayXHTTPRange{{}, {}}
+			}
+			d.warn("fm (finalmask): the delays of the fragment mask are not applied, a pause of this host is not a link's to set")
+		}
+		_, err = finalmask.New(&option.FinalMaskOptions{TCP: []option.FinalMaskTCPOptions{fragment}})
+		if err != nil {
+			d.warn("fm (finalmask): a fragment mask is ignored: ", err.Error())
+			continue
+		}
+		masks.TCP = append(masks.TCP, fragment)
+	}
+	for _, entry := range mask.UDP {
+		ignored = append(ignored, strings.ToLower(entry.Type))
+	}
+	if len(ignored) > 0 {
+		slices.Sort(ignored)
+		ignored = slices.Compact(ignored)
+		if len(ignored) == 1 {
+			d.warn("fm (finalmask): the mask ", ignored[0], " is not applied: it is the client's own")
+		} else {
+			d.warn("fm (finalmask): the masks ", strings.Join(ignored, ", "), " are not applied: they are the client's own")
+		}
+	}
+	if len(masks.TCP) > 0 {
+		d.mask = &masks
+	}
 	return nil
 }
 

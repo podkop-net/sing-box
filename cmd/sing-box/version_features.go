@@ -22,4 +22,6 @@ var versionFeatures = []string{
 	"tools.decode-link",
 	// the uTLS fingerprint fallback (SING_BOX_UTLS_FALLBACK)
 	"tls.utls-fallback",
+	// the dialer option "finalmask": Xray's fragment mask on the TCP connections of an outbound
+	"dialer.finalmask",
 }

@@ -151,6 +151,18 @@ func Decode(link string) (*Outbound, []string, error) {
 		}
 		return nil, nil, err
 	}
+	if d.mask != nil {
+		// the masks of fm, for the dialer of the outbound
+		content, err := json.Marshal(d.mask)
+		if err != nil {
+			return nil, nil, err
+		}
+		masks, err := parseObject(content)
+		if err != nil {
+			return nil, nil, err
+		}
+		options.put("finalmask", masks)
+	}
 	err = d.fallback(linkScheme.outbound, options)
 	if err != nil {
 		return nil, nil, err
@@ -424,6 +436,8 @@ type decoder struct {
 	// the parameters the scheme reads
 	known    map[string]bool
 	warnings []string
+	// the masks of "fm" for the dialer of the outbound (finalmask)
+	mask *option.FinalMaskOptions
 }
 
 // reads marks the parameters the scheme reads: any other gets a warning.

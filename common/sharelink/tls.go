@@ -1,11 +1,14 @@
 package sharelink
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
 // The fingerprints sing-box knows by these names (common/tls/utls_client.go).
@@ -68,8 +71,9 @@ func (d *decoder) utlsOf(fingerprint string, reality bool) (*option.OutboundUTLS
 	return &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint}, nil
 }
 
-// The parameters of TLS every scheme reads the same way.
-func (d *decoder) tlsCommon(tlsOptions *option.OutboundTLSOptions) {
+// The parameters of TLS every scheme reads the same way. With REALITY no certificate is
+// verified, and a pin the link carries along is left out without a word.
+func (d *decoder) tlsCommon(tlsOptions *option.OutboundTLSOptions, reality bool) {
 	d.reads("sni", "servername", "peer", "allowinsecure", "allow_insecure", "insecure", "skip-cert-verify",
 		"alpn", "disable_sni", "nosni", "cert", "ech", "pcs", "pinsha256", "vcn", "cs")
 	tlsOptions.Enabled = true
@@ -86,10 +90,16 @@ func (d *decoder) tlsCommon(tlsOptions *option.OutboundTLSOptions) {
 		tlsOptions.Certificate = strings.Split(strings.ReplaceAll(certificate, "\r\n", "\n"), "\n")
 	}
 	tlsOptions.ECH = d.ech()
-	if d.first("pcs", "pinsha256") != "" && !tlsOptions.Insecure && len(tlsOptions.Certificate) == 0 {
-		// Xray and Hysteria pin the hash of a certificate, sing-box that of a public key:
-		// one cannot be made from the other
-		d.warn("the pinned certificate (pcs, pinSHA256) is not supported: the server is verified against the system roots, and one with a self-signed certificate is refused")
+	if pins := d.first("pcs", "pinsha256"); pins != "" && !reality && !tlsOptions.Insecure && len(tlsOptions.Certificate) == 0 {
+		// Xray (pinnedPeerCertSha256) and Hysteria pin the SHA-256 of the whole certificate,
+		// as certificate_sha256 does: a server whose certificate has one of them is taken
+		// without the system roots, a self-signed one too
+		hashes, err := certificateHashes(pins)
+		if err != nil {
+			d.warn("the pinned certificate (pcs, pinSHA256) cannot be read and is ignored (", err.Error(), "): the server is verified against the system roots")
+		} else {
+			tlsOptions.CertificateSHA256 = hashes
+		}
 	}
 	if names := splitList(d.query["vcn"]); len(names) > 0 && !tlsOptions.Insecure {
 		// Xray verifies the certificate by these names instead of the one it sends
@@ -163,7 +173,7 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 		return nil, refuse("security", "unsupported security", shown(security))
 	}
 	tlsOptions := new(option.OutboundTLSOptions)
-	d.tlsCommon(tlsOptions)
+	d.tlsCommon(tlsOptions, security == "reality")
 	var err error
 	tlsOptions.UTLS, err = d.utls(security == "reality")
 	if err != nil {
@@ -193,6 +203,31 @@ func (d *decoder) security(defaultSecurity string) (*option.OutboundTLSOptions, 
 // "fp" read it themselves.
 func (d *decoder) tlsAlways() *option.OutboundTLSOptions {
 	tlsOptions := new(option.OutboundTLSOptions)
-	d.tlsCommon(tlsOptions)
+	d.tlsCommon(tlsOptions, false)
 	return tlsOptions
+}
+
+// certificateHashes reads the pins of Xray's pcs and Hysteria's pinSHA256: SHA-256 hashes in
+// hexadecimal, with or without colons, separated by commas (infra/conf of Xray-core). The
+// message names no hash: a pin is part of the link.
+func certificateHashes(text string) (badoption.Listable[[]byte], error) {
+	var hashes badoption.Listable[[]byte]
+	for _, entry := range strings.Split(text, ",") {
+		entry = strings.ReplaceAll(strings.TrimSpace(entry), ":", "")
+		if entry == "" {
+			continue
+		}
+		hash, err := hex.DecodeString(entry)
+		if err != nil {
+			return nil, E.New("a hash is not hexadecimal")
+		}
+		if len(hash) != sha256.Size {
+			return nil, E.New("a hash is not 32 bytes long")
+		}
+		hashes = append(hashes, hash)
+	}
+	if len(hashes) == 0 {
+		return nil, E.New("no hash")
+	}
+	return hashes, nil
 }

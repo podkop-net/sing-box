@@ -8,6 +8,7 @@ anytls domain_resolver denied: another object
 anytls domain_strategy denied: deprecated
 anytls fallback_delay denied: the local route
 anytls fallback_network_type denied: the local route
+anytls finalmask.tcp sb
 anytls idle_session_check_interval sb
 anytls idle_session_timeout sb
 anytls inet4_bind_address denied: the local route
@@ -30,6 +31,7 @@ anytls tls.alpn sb
 anytls tls.certificate sb
 anytls tls.certificate_path denied: a local file
 anytls tls.certificate_public_key_sha256 sb
+anytls tls.certificate_sha256 sb
 anytls tls.cipher_suites sb
 anytls tls.client_certificate sb
 anytls tls.client_certificate_path denied: a local file
@@ -72,6 +74,7 @@ http domain_resolver denied: another object
 http domain_strategy denied: deprecated
 http fallback_delay denied: the local route
 http fallback_network_type denied: the local route
+http finalmask.tcp sb
 http headers sb
 http inet4_bind_address denied: the local route
 http inet6_bind_address denied: the local route
@@ -93,6 +96,7 @@ http tls.alpn sb
 http tls.certificate sb
 http tls.certificate_path denied: a local file
 http tls.certificate_public_key_sha256 sb
+http tls.certificate_sha256 sb
 http tls.cipher_suites sb
 http tls.client_certificate sb
 http tls.client_certificate_path denied: a local file
@@ -143,6 +147,7 @@ hysteria down sb
 hysteria down_mbps sb
 hysteria fallback_delay denied: the local route
 hysteria fallback_network_type denied: the local route
+hysteria finalmask.tcp sb
 hysteria hop_interval sb
 hysteria idle_timeout sb
 hysteria inet4_bind_address denied: the local route
@@ -172,6 +177,7 @@ hysteria tls.alpn sb
 hysteria tls.certificate sb
 hysteria tls.certificate_path denied: a local file
 hysteria tls.certificate_public_key_sha256 sb
+hysteria tls.certificate_sha256 sb
 hysteria tls.cipher_suites sb
 hysteria tls.client_certificate sb
 hysteria tls.client_certificate_path denied: a local file
@@ -222,6 +228,7 @@ hysteria2 domain_strategy denied: deprecated
 hysteria2 down_mbps sb
 hysteria2 fallback_delay denied: the local route
 hysteria2 fallback_network_type denied: the local route
+hysteria2 finalmask.tcp sb
 hysteria2 hop_interval sb
 hysteria2 hop_interval_max sb
 hysteria2 idle_timeout sb
@@ -255,6 +262,7 @@ hysteria2 tls.alpn sb
 hysteria2 tls.certificate sb
 hysteria2 tls.certificate_path denied: a local file
 hysteria2 tls.certificate_public_key_sha256 sb
+hysteria2 tls.certificate_sha256 sb
 hysteria2 tls.cipher_suites sb
 hysteria2 tls.client_certificate sb
 hysteria2 tls.client_certificate_path denied: a local file
@@ -299,6 +307,7 @@ naive domain_strategy denied: deprecated
 naive extra_headers sb
 naive fallback_delay denied: the local route
 naive fallback_network_type denied: the local route
+naive finalmask.tcp sb
 naive inet4_bind_address denied: the local route
 naive inet6_bind_address denied: the local route
 naive insecure_concurrency sb
@@ -323,6 +332,7 @@ naive tls.alpn sb
 naive tls.certificate sb
 naive tls.certificate_path denied: a local file
 naive tls.certificate_public_key_sha256 sb
+naive tls.certificate_sha256 sb
 naive tls.cipher_suites sb
 naive tls.client_certificate sb
 naive tls.client_certificate_path denied: a local file
@@ -368,6 +378,7 @@ shadowsocks domain_resolver denied: another object
 shadowsocks domain_strategy denied: deprecated
 shadowsocks fallback_delay denied: the local route
 shadowsocks fallback_network_type denied: the local route
+shadowsocks finalmask.tcp sb
 shadowsocks inet4_bind_address denied: the local route
 shadowsocks inet6_bind_address denied: the local route
 shadowsocks method sb
@@ -408,6 +419,7 @@ socks domain_resolver denied: another object
 socks domain_strategy denied: deprecated
 socks fallback_delay denied: the local route
 socks fallback_network_type denied: the local route
+socks finalmask.tcp sb
 socks inet4_bind_address denied: the local route
 socks inet6_bind_address denied: the local route
 socks netns denied: another object
@@ -438,6 +450,7 @@ trojan domain_resolver denied: another object
 trojan domain_strategy denied: deprecated
 trojan fallback_delay denied: the local route
 trojan fallback_network_type denied: the local route
+trojan finalmask.tcp sb
 trojan inet4_bind_address denied: the local route
 trojan inet6_bind_address denied: the local route
 trojan multiplex.brutal.down_mbps sb
@@ -467,6 +480,7 @@ trojan tls.alpn sb
 trojan tls.certificate sb
 trojan tls.certificate_path denied: a local file
 trojan tls.certificate_public_key_sha256 sb
+trojan tls.certificate_sha256 sb
 trojan tls.cipher_suites sb
 trojan tls.client_certificate sb
 trojan tls.client_certificate_path denied: a local file
@@ -522,6 +536,7 @@ trojan transport.download.tls.alpn sb
 trojan transport.download.tls.certificate sb
 trojan transport.download.tls.certificate_path denied: a local file
 trojan transport.download.tls.certificate_public_key_sha256 sb
+trojan transport.download.tls.certificate_sha256 sb
 trojan transport.download.tls.cipher_suites sb
 trojan transport.download.tls.client_certificate sb
 trojan transport.download.tls.client_certificate_path denied: a local file
@@ -624,6 +639,7 @@ tuic domain_resolver denied: another object
 tuic domain_strategy denied: deprecated
 tuic fallback_delay denied: the local route
 tuic fallback_network_type denied: the local route
+tuic finalmask.tcp sb
 tuic heartbeat sb
 tuic idle_timeout sb
 tuic inet4_bind_address denied: the local route
@@ -650,6 +666,7 @@ tuic tls.alpn sb
 tuic tls.certificate sb
 tuic tls.certificate_path denied: a local file
 tuic tls.certificate_public_key_sha256 sb
+tuic tls.certificate_sha256 sb
 tuic tls.cipher_suites sb
 tuic tls.client_certificate sb
 tuic tls.client_certificate_path denied: a local file
@@ -697,6 +714,7 @@ vless domain_strategy denied: deprecated
 vless encryption sb
 vless fallback_delay denied: the local route
 vless fallback_network_type denied: the local route
+vless finalmask.tcp sb
 vless flow sb
 vless inet4_bind_address denied: the local route
 vless inet6_bind_address denied: the local route
@@ -727,6 +745,7 @@ vless tls.alpn sb
 vless tls.certificate sb
 vless tls.certificate_path denied: a local file
 vless tls.certificate_public_key_sha256 sb
+vless tls.certificate_sha256 sb
 vless tls.cipher_suites sb
 vless tls.client_certificate sb
 vless tls.client_certificate_path denied: a local file
@@ -782,6 +801,7 @@ vless transport.download.tls.alpn sb
 vless transport.download.tls.certificate sb
 vless transport.download.tls.certificate_path denied: a local file
 vless transport.download.tls.certificate_public_key_sha256 sb
+vless transport.download.tls.certificate_sha256 sb
 vless transport.download.tls.cipher_suites sb
 vless transport.download.tls.client_certificate sb
 vless transport.download.tls.client_certificate_path denied: a local file
@@ -884,6 +904,7 @@ vmess domain_resolver denied: another object
 vmess domain_strategy denied: deprecated
 vmess fallback_delay denied: the local route
 vmess fallback_network_type denied: the local route
+vmess finalmask.tcp sb
 vmess global_padding sb
 vmess inet4_bind_address denied: the local route
 vmess inet6_bind_address denied: the local route
@@ -915,6 +936,7 @@ vmess tls.alpn sb
 vmess tls.certificate sb
 vmess tls.certificate_path denied: a local file
 vmess tls.certificate_public_key_sha256 sb
+vmess tls.certificate_sha256 sb
 vmess tls.cipher_suites sb
 vmess tls.client_certificate sb
 vmess tls.client_certificate_path denied: a local file
@@ -970,6 +992,7 @@ vmess transport.download.tls.alpn sb
 vmess transport.download.tls.certificate sb
 vmess transport.download.tls.certificate_path denied: a local file
 vmess transport.download.tls.certificate_public_key_sha256 sb
+vmess transport.download.tls.certificate_sha256 sb
 vmess transport.download.tls.cipher_suites sb
 vmess transport.download.tls.client_certificate sb
 vmess transport.download.tls.client_certificate_path denied: a local file

@@ -211,38 +211,43 @@ func TestOtherTransports(t *testing.T) {
 
 func TestWarnings(t *testing.T) {
 	t.Parallel()
+	// pcs says nothing to REALITY, which verifies no certificate: no warning of its own
 	_, warnings := decodeJSON(t, "vless://"+testUUID+"@example.org:443?security=reality&pbk=K&pqv=V&ech=E&pcs=P&fm=F&type=grpc&authority=a")
-	require.Len(t, warnings, 5)
+	require.Len(t, warnings, 4)
 }
 
 func TestErrors(t *testing.T) {
 	t.Parallel()
 	for name, link := range map[string]string{
-		"empty":             "",
-		"not a link":        "hello",
-		"scheme":            "gopher://example.org:70",
-		"no user":           "vless://example.org:443",
-		"empty user":        "vless://@example.org:443",
-		"no port":           "vless://" + testUUID + "@example.org",
-		"bad port":          "vless://" + testUUID + "@example.org:70000",
-		"zero port":         "vless://" + testUUID + "@example.org:0",
-		"no host":           "vless://" + testUUID + "@:443",
-		"bad ipv6":          "vless://" + testUUID + "@[::1:443",
-		"encryption":        "vless://" + testUUID + "@example.org:443?encryption=mlkem768x25519plus.native.0rtt.KEY",
-		"security":          "vless://" + testUUID + "@example.org:443?security=xtls",
-		"reality no key":    "vless://" + testUUID + "@example.org:443?security=reality",
-		"kcp":               "vless://" + testUUID + "@example.org:443?type=kcp",
-		"tcp http header":   "vless://" + testUUID + "@example.org:443?security=tls&type=tcp&headerType=http",
-		"tcp other header":  "vless://" + testUUID + "@example.org:443?type=tcp&headerType=srtp",
-		"grpc mode":         "vless://" + testUUID + "@example.org:443?type=grpc&mode=other",
-		"bad escape":        "vless://" + testUUID + "@example.org:443?type=ws&path=%zz",
-		"extra not json":    xhttpLink(`{"xPaddingBytes":`, url.QueryEscape, ""),
-		"extra not object":  xhttpLink(`"text"`, url.QueryEscape, ""),
-		"extra bad range":   xhttpLink(`{"xPaddingBytes":"a-b"}`, url.QueryEscape, ""),
-		"extra huge range":  xhttpLink(`{"xPaddingBytes":99999999999}`, url.QueryEscape, ""),
-		"extra bad type":    xhttpLink(`{"noGRPCHeader":"yes"}`, url.QueryEscape, ""),
-		"flat padding":      xhttpLink(`{}`, url.QueryEscape, "&x_padding_bytes=a%22b"),
-		"extra bad headers": xhttpLink(`{"headers":{"a":1}}`, url.QueryEscape, ""),
+		"empty":                 "",
+		"not a link":            "hello",
+		"scheme":                "gopher://example.org:70",
+		"no user":               "vless://example.org:443",
+		"empty user":            "vless://@example.org:443",
+		"no port":               "vless://" + testUUID + "@example.org",
+		"bad port":              "vless://" + testUUID + "@example.org:70000",
+		"zero port":             "vless://" + testUUID + "@example.org:0",
+		"no host":               "vless://" + testUUID + "@:443",
+		"bad ipv6":              "vless://" + testUUID + "@[::1:443",
+		"encryption":            "vless://" + testUUID + "@example.org:443?encryption=mlkem768x25519plus.native.0rtt.KEY",
+		"security":              "vless://" + testUUID + "@example.org:443?security=xtls",
+		"reality no key":        "vless://" + testUUID + "@example.org:443?security=reality",
+		"kcp":                   "vless://" + testUUID + "@example.org:443?type=kcp",
+		"gecko of 3000":         "hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":{"password":"x","packetSize":"0-3000"}}]}`),
+		"udphop of 3 s":         "hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"udphop","settings":{"mode":"intervalRemote","interval":3,"remotePorts":"1-2"}}]}`),
+		"udpHop of 3 s":         "hysteria2://p@example.org?fm=" + uriComponent(`{"quicParams":{"udpHop":{"ports":"1-2","interval":"3"}}}`),
+		"salamander unreadable": "hysteria2://p@example.org?fm=" + uriComponent(`{"udp":[{"type":"salamander","settings":"x"}]}`),
+		"tcp http header":       "vless://" + testUUID + "@example.org:443?security=tls&type=tcp&headerType=http",
+		"tcp other header":      "vless://" + testUUID + "@example.org:443?type=tcp&headerType=srtp",
+		"grpc mode":             "vless://" + testUUID + "@example.org:443?type=grpc&mode=other",
+		"bad escape":            "vless://" + testUUID + "@example.org:443?type=ws&path=%zz",
+		"extra not json":        xhttpLink(`{"xPaddingBytes":`, url.QueryEscape, ""),
+		"extra not object":      xhttpLink(`"text"`, url.QueryEscape, ""),
+		"extra bad range":       xhttpLink(`{"xPaddingBytes":"a-b"}`, url.QueryEscape, ""),
+		"extra huge range":      xhttpLink(`{"xPaddingBytes":99999999999}`, url.QueryEscape, ""),
+		"extra bad type":        xhttpLink(`{"noGRPCHeader":"yes"}`, url.QueryEscape, ""),
+		"flat padding":          xhttpLink(`{}`, url.QueryEscape, "&x_padding_bytes=a%22b"),
+		"extra bad headers":     xhttpLink(`{"headers":{"a":1}}`, url.QueryEscape, ""),
 	} {
 		outbound, _, err := Decode(link)
 		require.Error(t, err, name)

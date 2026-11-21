@@ -79,6 +79,8 @@ type DialerOptionsWrapper interface {
 
 type DialerOptions struct {
 	Detour string `json:"detour,omitempty" reference:"outbound"`
+	// FinalMask: the masks of the TCP connections the outbound opens itself (podkop-engine)
+	FinalMask *FinalMaskOptions `json:"finalmask,omitempty"`
 	AbstractDialerOptions
 }
 

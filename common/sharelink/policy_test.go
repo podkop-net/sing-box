@@ -179,28 +179,84 @@ func TestLeniencies(t *testing.T) {
 		"finalmask of the client's own": {
 			policyBase + "fm=%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%7D%5D%2C%22udp%22%3A%5B%7B%22type%22%3A%22noise%22%7D%5D%2C%22quicParams%22%3A%7B%7D%7D",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `"}`,
-			[]string{"fm (finalmask) is not supported and is ignored"},
+			[]string{"fm (finalmask): a fragment mask is ignored", "fm (finalmask): the mask noise is not applied"},
 		},
 		"finalmask that cannot be read": {
 			policyBase + "fm=x",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `"}`,
-			[]string{"fm (finalmask) is not supported and cannot be read"},
+			[]string{"fm (finalmask) cannot be read and is ignored"},
 		},
 		"packet as packetaddr": {
 			policyBase + "packetEncoding=packet",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","packet_encoding":"packetaddr"}`,
 			nil,
 		},
+		"finalmask: the ClientHello in small records": {
+			policyBase + "security=tls&fm=%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2211-24%22%2C%22delay%22%3A%220%22%7D%7D%5D%7D",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","finalmask":{"tcp":[{"type":"fragment","packets":"tlshello","length":"11-24"}]},"tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			nil,
+		},
+		"finalmask: the first writes in pieces, the delays left out": {
+			policyBase + "fm=%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%221-3%22%2C%22lengths%22%3A%5B%221%22%2C%225-10%22%5D%2C%22delays%22%3A%5B%2210-20%22%5D%2C%22maxSplit%22%3A%224%22%7D%7D%5D%2C%22udp%22%3A%5B%7B%22type%22%3A%22noise%22%7D%5D%7D",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","finalmask":{"tcp":[{"type":"fragment","packets":"1-3","lengths":["1","5-10"],"max_split":"4"}]}}`,
+			[]string{"the delays of the fragment mask are not applied", "the mask noise is not applied"},
+		},
+		"a pinned certificate of Xray": {
+			policyBase + "security=tls&pcs=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B%3A0B",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"certificate_sha256":["qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=","CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws="],"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			nil,
+		},
+		"a pinned certificate with REALITY": {
+			policyBase + "security=reality&pbk=K&sid=ab&pcs=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"K","short_id":"ab"}}}`,
+			nil,
+		},
 		"a pinned certificate": {
 			policyBase + "security=tls&pcs=0123abcd&vcn=example.org",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
-			[]string{"the pinned certificate (pcs, pinSHA256) is not supported", "vcn (the names the certificate is verified by) is not supported"},
+			[]string{"the pinned certificate (pcs, pinSHA256) cannot be read", "vcn (the names the certificate is verified by) is not supported"},
 		},
 		"the certificate verified by the name that is sent": {
 			policyBase + "security=tls&sni=s.example.org&vcn=other.example.org,S.example.org&cs=TLS_AES_128_GCM_SHA256",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
 			[]string{"cs (the cipher suites of TLS) is not supported and is ignored"},
 		},
+		"udphop over TCP: no UDP of its own to hop": {
+			policyBase + "fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22mode%22%3A%22intervalRemote%22%2C%22remotePorts%22%3A%221000-2000%22%7D%7D%2C%7B%22type%22%3A%22noise%22%7D%5D%7D",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `"}`,
+			[]string{"fm (finalmask): the masks noise, udphop are not applied"},
+		},
+		"udphop between addresses": {
+			"hysteria2://p@example.com:443/?fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22mode%22%3A%22intervalRemote%22%2C%22remoteIPs%22%3A%5B%22192.0.2.0%2F24%22%5D%2C%22remotePorts%22%3A%2220000-30000%22%7D%7D%5D%7D",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"server_ports":"20000:30000","password":"p","tls":{"enabled":true}}`,
+			[]string{"fm (finalmask): udphop between addresses (remoteIPs) is not supported"},
+		},
+		"udphop of the local port only": {
+			"hysteria2://p@example.com:443/?fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22mode%22%3A%22intervalLocal%22%7D%7D%5D%7D",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"password":"p","tls":{"enabled":true}}`,
+			[]string{"fm (finalmask): udphop of the local port only is not supported"},
+		},
+		"udphop of the local port with ports: Xray stays on the port of the link": {
+			"hysteria2://p@example.com:443/?fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22mode%22%3A%22intervalLocal%22%2C%22remotePorts%22%3A%2220000-30000%22%7D%7D%5D%7D",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"password":"p","tls":{"enabled":true}}`,
+			[]string{"fm (finalmask): udphop of the local port only is not supported"},
+		},
+		"udphop without a mode": {
+			"hysteria2://p@example.com:443/?fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22remotePorts%22%3A%2220000-30000%22%7D%7D%5D%7D",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"password":"p","tls":{"enabled":true}}`,
+			[]string{"fm (finalmask): udphop of an unknown mode is ignored"},
+		},
+		"noise in a Hysteria 2 link": {
+			"hysteria2://p@example.com:443/?fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22noise%22%7D%5D%7D",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"password":"p","tls":{"enabled":true}}`,
+			[]string{"fm (finalmask): the mask noise is not applied"},
+		},
+		"finalmask: the ClientHello in records with delays, a write each without the pause": {
+			policyBase + "security=tls&fm=%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2210-20%22%2C%22delay%22%3A%2210-20%22%7D%7D%5D%7D",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","finalmask":{"tcp":[{"type":"fragment","packets":"tlshello","length":"10-20","delays":["0","0"]}]},"tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			[]string{"the delays of the fragment mask are not applied"},
+		},
+
 		"a pinned certificate, not verified anyway": {
 			policyBase + "security=tls&pcs=0123abcd&allowInsecure=1",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"insecure":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
