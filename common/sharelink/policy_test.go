@@ -213,13 +213,33 @@ func TestLeniencies(t *testing.T) {
 		},
 		"a pinned certificate": {
 			policyBase + "security=tls&pcs=0123abcd&vcn=example.org",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
-			[]string{"the pinned certificate (pcs, pinSHA256) cannot be read", "vcn (the names the certificate is verified by) is not supported"},
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"certificate_server_name":"example.org","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			[]string{"the pinned certificate (pcs, pinSHA256) cannot be read"},
 		},
-		"the certificate verified by the name that is sent": {
+		"the certificate verified by the names of vcn": {
 			policyBase + "security=tls&sni=s.example.org&vcn=other.example.org,S.example.org&cs=TLS_AES_128_GCM_SHA256",
-			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","certificate_server_name":["other.example.org","S.example.org"],"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
 			[]string{"cs (the cipher suites of TLS) is not supported and is ignored"},
+		},
+		"vcn that is the name sent": {
+			policyBase + "security=tls&sni=s.example.org&vcn=S.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"server_name":"s.example.org","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			nil,
+		},
+		"vcn with a pinned certificate": {
+			policyBase + "security=tls&vcn=b.example.org&pcs=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"certificate_sha256":"qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=","certificate_server_name":"b.example.org","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			nil,
+		},
+		"vcn with REALITY": {
+			policyBase + "security=reality&pbk=K&sid=ab&vcn=b.example.org",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"K","short_id":"ab"}}}`,
+			nil,
+		},
+		"vcn of an insecure link": {
+			policyBase + "security=tls&vcn=b.example.org&allowInsecure=1",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"insecure":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			nil,
 		},
 		"udphop over TCP: no UDP of its own to hop": {
 			policyBase + "fm=%7B%22udp%22%3A%5B%7B%22type%22%3A%22udphop%22%2C%22settings%22%3A%7B%22mode%22%3A%22intervalRemote%22%2C%22remotePorts%22%3A%221000-2000%22%7D%7D%2C%7B%22type%22%3A%22noise%22%7D%5D%7D",
@@ -257,10 +277,25 @@ func TestLeniencies(t *testing.T) {
 			[]string{"the delays of the fragment mask are not applied"},
 		},
 
-		"a pinned certificate, not verified anyway": {
+		"a pin that cannot be read, of a link not verified anyway": {
 			policyBase + "security=tls&pcs=0123abcd&allowInsecure=1",
 			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"insecure":true,"utls":{"enabled":true,"fingerprint":"chrome"}}}`,
+			[]string{"the pinned certificate (pcs, pinSHA256) cannot be read and is ignored (a hash is not 32 bytes long): the server is not verified"},
+		},
+		"a pin of an insecure link: the pin is the check": {
+			policyBase + "security=tls&pcs=abababababababababababababababababababababababababababababababab&allowInsecure=1",
+			`{"type":"vless","server":"example.org","server_port":443,"uuid":"` + testUUID + `","tls":{"enabled":true,"certificate_sha256":"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=","utls":{"enabled":true,"fingerprint":"chrome"}}}`,
 			nil,
+		},
+		"the pin of Hysteria with dashes and insecure=1": {
+			"hysteria2://p@example.com:443/?insecure=1&pinSHA256=ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab",
+			`{"type":"hysteria2","server":"example.com","server_port":443,"password":"p","tls":{"enabled":true,"certificate_sha256":"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="}}`,
+			nil,
+		},
+		"naive: a pin and vcn are not for Cronet": {
+			"naive+https://u:p@example.org?pcs=abababababababababababababababababababababababababababababababab&vcn=b.example.org",
+			`{"type":"naive","server":"example.org","server_port":443,"username":"u","password":"p","tls":{"enabled":true}}`,
+			[]string{"naive verifies the certificate by the server name only"},
 		},
 		"ECH configuration": {
 			policyBase + "security=tls&ech=AEX+DQBBFQAgACDcTtW6VmPQkAvAnqIbGkSmKuOO+GbBdXvKkcOIAfS0PAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=",

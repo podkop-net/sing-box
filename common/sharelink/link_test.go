@@ -425,3 +425,26 @@ func TestFoundInTheWild(t *testing.T) {
 		require.Error(t, err, name)
 	}
 }
+
+// The download of XHTTP, a server of its own, verifies its certificate as the link's TLS does:
+// its pinnedPeerCertSha256 and verifyPeerCertByName.
+func TestXHTTPDownloadVerification(t *testing.T) {
+	t.Parallel()
+	extra := `{"downloadSettings":{"address":"d.example.org","port":443,"network":"xhttp","security":"tls",` +
+		`"tlsSettings":{"serverName":"d.example.org","pinnedPeerCertSha256":"abababababababababababababababababababababababababababababababab","verifyPeerCertByName":"real.example.org"}}}`
+	content, warnings := decodeJSON(t, xhttpLink(extra, uriComponent, ""))
+	require.Empty(t, warnings)
+	var outbound struct {
+		Transport struct {
+			Download struct {
+				TLS struct {
+					CertificateSHA256     string `json:"certificate_sha256"`
+					CertificateServerName string `json:"certificate_server_name"`
+				} `json:"tls"`
+			} `json:"download"`
+		} `json:"transport"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(content), &outbound))
+	require.Equal(t, "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=", outbound.Transport.Download.TLS.CertificateSHA256)
+	require.Equal(t, "real.example.org", outbound.Transport.Download.TLS.CertificateServerName)
+}

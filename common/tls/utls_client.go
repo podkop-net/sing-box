@@ -44,6 +44,9 @@ type UTLSClientConfig struct {
 	fallback *utlsFallback
 	// the ClientHello without the X25519MLKEM768 key share: a candidate of the fallback
 	noMLKEM bool
+	// how the server's certificate is verified with a pin or certificate_server_name (nil: as
+	// uTLS does)
+	verifier *peerVerifier
 }
 
 func (c *UTLSClientConfig) ServerName() string {
@@ -52,6 +55,9 @@ func (c *UTLSClientConfig) ServerName() string {
 
 func (c *UTLSClientConfig) SetServerName(serverName string) {
 	c.serverName = serverName
+	if c.verifier != nil {
+		c.config.VerifyPeerCertificate = c.verifier.forName(serverName)
+	}
 	if c.disableSNI {
 		c.config.ServerName = ""
 		if c.verifyServerName {
@@ -122,6 +128,7 @@ func (c *UTLSClientConfig) Clone() Config {
 		spoofMethod:           c.spoofMethod,
 		fallback:              c.fallback,
 		noMLKEM:               c.noMLKEM,
+		verifier:              c.verifier,
 	}
 	cloned.SetServerName(cloned.serverName)
 	return cloned
@@ -252,6 +259,10 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if serverName == "" && !options.Insecure && !allowEmptyServerName {
 		return nil, errMissingServerName
 	}
+	err := checkCertificateServerName(options)
+	if err != nil {
+		return nil, err
+	}
 
 	var tlsConfig utls.Config
 	tlsConfig.Time = ntp.TimeFuncFromContext(ctx)
@@ -318,6 +329,12 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		}
 		tlsConfig.RootCAs = certPool
 	}
+	// a pin or certificate_server_name: the verification of Xray's client, set per server name
+	// in SetServerName (podkop-engine)
+	verifier := newPeerVerifier(options, tlsConfig.RootCAs, tlsConfig.Time)
+	if verifier != nil {
+		tlsConfig.InsecureSkipVerify = true
+	}
 	var clientCertificate []byte
 	if len(options.ClientCertificate) > 0 {
 		clientCertificate = []byte(strings.Join(options.ClientCertificate, "\n"))
@@ -366,7 +383,8 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		config:                &tlsConfig,
 		serverName:            serverName,
 		disableSNI:            options.DisableSNI,
-		verifyServerName:      options.DisableSNI && !options.Insecure,
+		verifyServerName:      options.DisableSNI && !options.Insecure && verifier == nil,
+		verifier:              verifier,
 		handshakeTimeout:      handshakeTimeout,
 		id:                    id,
 		fragment:              options.Fragment,

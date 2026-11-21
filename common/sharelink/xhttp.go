@@ -77,10 +77,13 @@ type xrayStream struct {
 }
 
 type xrayTLS struct {
-	AllowInsecure bool           `json:"allowInsecure"`
-	ServerName    string         `json:"serverName"`
-	ALPN          xrayStringList `json:"alpn"`
-	Fingerprint   string         `json:"fingerprint"`
+	AllowInsecure bool `json:"allowInsecure"`
+	// pcs and vcn of the download's own TLS
+	PinnedPeerCertSha256 string         `json:"pinnedPeerCertSha256"`
+	VerifyPeerCertByName string         `json:"verifyPeerCertByName"`
+	ServerName           string         `json:"serverName"`
+	ALPN                 xrayStringList `json:"alpn"`
+	Fingerprint          string         `json:"fingerprint"`
 }
 
 type xrayREALITY struct {
@@ -432,6 +435,7 @@ func (d *decoder) xhttpDownload(content []byte) (*option.V2RayXHTTPDownloadOptio
 			Insecure:   tlsSettings.AllowInsecure,
 			ALPN:       badoption.Listable[string](tlsSettings.ALPN),
 		}
+		d.verification(options.TLS, tlsSettings.PinnedPeerCertSha256, tlsSettings.VerifyPeerCertByName)
 		options.TLS.UTLS, err = d.utlsOf(tlsSettings.Fingerprint, false)
 		if err != nil {
 			return nil, E.Cause(err, name)

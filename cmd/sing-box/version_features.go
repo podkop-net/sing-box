@@ -24,4 +24,8 @@ var versionFeatures = []string{
 	"tls.utls-fallback",
 	// the dialer option "finalmask": Xray's fragment mask on the TCP connections of an outbound
 	"dialer.finalmask",
+	// tls "certificate_sha256" (of sing-box 1.15) taking a pinned CA of the chain as Xray does
+	"tls.certificate_sha256",
+	// tls "certificate_server_name": the certificate verified by other names (Xray's vcn)
+	"tls.certificate_server_name",
 }

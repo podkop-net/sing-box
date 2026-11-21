@@ -35,6 +35,9 @@ type STDClientConfig struct {
 	recordFragment        bool
 	spoof                 string
 	spoofMethod           tlsspoof.Method
+	// how the server's certificate is verified with a pin or certificate_server_name (nil: as
+	// crypto/tls does)
+	verifier *peerVerifier
 }
 
 func (c *STDClientConfig) ServerName() string {
@@ -43,6 +46,9 @@ func (c *STDClientConfig) ServerName() string {
 
 func (c *STDClientConfig) SetServerName(serverName string) {
 	c.serverName = serverName
+	if c.verifier != nil {
+		c.config.VerifyPeerCertificate = c.verifier.forName(serverName)
+	}
 	if c.disableSNI {
 		c.config.ServerName = ""
 		if c.verifyServerName {
@@ -99,6 +105,7 @@ func (c *STDClientConfig) Clone() Config {
 		recordFragment:        c.recordFragment,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
+		verifier:              c.verifier,
 	}
 	cloned.SetServerName(cloned.serverName)
 	return cloned
@@ -125,6 +132,10 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	}
 	if serverName == "" && !options.Insecure && !allowEmptyServerName {
 		return nil, errMissingServerName
+	}
+	err := checkCertificateServerName(options)
+	if err != nil {
+		return nil, err
 	}
 
 	var tlsConfig tls.Config
@@ -193,6 +204,12 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 		}
 		tlsConfig.RootCAs = certPool
 	}
+	// a pin or certificate_server_name: the verification of Xray's client, set per server name
+	// in SetServerName (podkop-engine)
+	verifier := newPeerVerifier(options, tlsConfig.RootCAs, tlsConfig.Time)
+	if verifier != nil {
+		tlsConfig.InsecureSkipVerify = true
+	}
 	var clientCertificate []byte
 	if len(options.ClientCertificate) > 0 {
 		clientCertificate = []byte(strings.Join(options.ClientCertificate, "\n"))
@@ -237,7 +254,8 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 		config:                &tlsConfig,
 		serverName:            serverName,
 		disableSNI:            options.DisableSNI,
-		verifyServerName:      options.DisableSNI && !options.Insecure,
+		verifyServerName:      options.DisableSNI && !options.Insecure && verifier == nil,
+		verifier:              verifier,
 		handshakeTimeout:      handshakeTimeout,
 		fragment:              options.Fragment,
 		fragmentFallbackDelay: time.Duration(options.FragmentFallbackDelay),

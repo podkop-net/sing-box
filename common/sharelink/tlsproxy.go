@@ -59,5 +59,11 @@ func (d *decoder) naive() (any, error) {
 		}
 	}
 	options.TLS = d.tlsAlways()
+	if len(options.TLS.CertificateSHA256) > 0 || len(options.TLS.CertificateServerName) > 0 {
+		// Cronet verifies by the server name against its roots: the naive outbound refuses both
+		d.warn("naive verifies the certificate by the server name only: the pinned certificate (pcs, pinSHA256) and vcn are not used")
+		options.TLS.CertificateSHA256 = nil
+		options.TLS.CertificateServerName = nil
+	}
 	return options, nil
 }

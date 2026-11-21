@@ -31,6 +31,7 @@ anytls tls.alpn sb
 anytls tls.certificate sb
 anytls tls.certificate_path denied: a local file
 anytls tls.certificate_public_key_sha256 sb
+anytls tls.certificate_server_name sb
 anytls tls.certificate_sha256 sb
 anytls tls.cipher_suites sb
 anytls tls.client_certificate sb
@@ -96,6 +97,7 @@ http tls.alpn sb
 http tls.certificate sb
 http tls.certificate_path denied: a local file
 http tls.certificate_public_key_sha256 sb
+http tls.certificate_server_name sb
 http tls.certificate_sha256 sb
 http tls.cipher_suites sb
 http tls.client_certificate sb
@@ -177,6 +179,7 @@ hysteria tls.alpn sb
 hysteria tls.certificate sb
 hysteria tls.certificate_path denied: a local file
 hysteria tls.certificate_public_key_sha256 sb
+hysteria tls.certificate_server_name sb
 hysteria tls.certificate_sha256 sb
 hysteria tls.cipher_suites sb
 hysteria tls.client_certificate sb
@@ -262,6 +265,7 @@ hysteria2 tls.alpn sb
 hysteria2 tls.certificate sb
 hysteria2 tls.certificate_path denied: a local file
 hysteria2 tls.certificate_public_key_sha256 sb
+hysteria2 tls.certificate_server_name sb
 hysteria2 tls.certificate_sha256 sb
 hysteria2 tls.cipher_suites sb
 hysteria2 tls.client_certificate sb
@@ -332,6 +336,7 @@ naive tls.alpn sb
 naive tls.certificate sb
 naive tls.certificate_path denied: a local file
 naive tls.certificate_public_key_sha256 sb
+naive tls.certificate_server_name sb
 naive tls.certificate_sha256 sb
 naive tls.cipher_suites sb
 naive tls.client_certificate sb
@@ -480,6 +485,7 @@ trojan tls.alpn sb
 trojan tls.certificate sb
 trojan tls.certificate_path denied: a local file
 trojan tls.certificate_public_key_sha256 sb
+trojan tls.certificate_server_name sb
 trojan tls.certificate_sha256 sb
 trojan tls.cipher_suites sb
 trojan tls.client_certificate sb
@@ -536,6 +542,7 @@ trojan transport.download.tls.alpn sb
 trojan transport.download.tls.certificate sb
 trojan transport.download.tls.certificate_path denied: a local file
 trojan transport.download.tls.certificate_public_key_sha256 sb
+trojan transport.download.tls.certificate_server_name sb
 trojan transport.download.tls.certificate_sha256 sb
 trojan transport.download.tls.cipher_suites sb
 trojan transport.download.tls.client_certificate sb
@@ -666,6 +673,7 @@ tuic tls.alpn sb
 tuic tls.certificate sb
 tuic tls.certificate_path denied: a local file
 tuic tls.certificate_public_key_sha256 sb
+tuic tls.certificate_server_name sb
 tuic tls.certificate_sha256 sb
 tuic tls.cipher_suites sb
 tuic tls.client_certificate sb
@@ -745,6 +753,7 @@ vless tls.alpn sb
 vless tls.certificate sb
 vless tls.certificate_path denied: a local file
 vless tls.certificate_public_key_sha256 sb
+vless tls.certificate_server_name sb
 vless tls.certificate_sha256 sb
 vless tls.cipher_suites sb
 vless tls.client_certificate sb
@@ -801,6 +810,7 @@ vless transport.download.tls.alpn sb
 vless transport.download.tls.certificate sb
 vless transport.download.tls.certificate_path denied: a local file
 vless transport.download.tls.certificate_public_key_sha256 sb
+vless transport.download.tls.certificate_server_name sb
 vless transport.download.tls.certificate_sha256 sb
 vless transport.download.tls.cipher_suites sb
 vless transport.download.tls.client_certificate sb
@@ -936,6 +946,7 @@ vmess tls.alpn sb
 vmess tls.certificate sb
 vmess tls.certificate_path denied: a local file
 vmess tls.certificate_public_key_sha256 sb
+vmess tls.certificate_server_name sb
 vmess tls.certificate_sha256 sb
 vmess tls.cipher_suites sb
 vmess tls.client_certificate sb
@@ -992,6 +1003,7 @@ vmess transport.download.tls.alpn sb
 vmess transport.download.tls.certificate sb
 vmess transport.download.tls.certificate_path denied: a local file
 vmess transport.download.tls.certificate_public_key_sha256 sb
+vmess transport.download.tls.certificate_server_name sb
 vmess transport.download.tls.certificate_sha256 sb
 vmess transport.download.tls.cipher_suites sb
 vmess transport.download.tls.client_certificate sb

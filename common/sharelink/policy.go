@@ -6,7 +6,7 @@ package sharelink
 // the outbound made of it would not work: an error means that the link, as it is, does
 // not work in sing-box. What the client alone decides (a fingerprint, a fragmenting of
 // its own packets, a multiplexing mode the server serves either way) and what only adds
-// a check (a pinned certificate, the ML-DSA check of REALITY) is a warning: the outbound
+// a check this engine does not have (the ML-DSA check of REALITY) is a warning: the outbound
 // is made and connects.
 //
 // refusals lists every refusal by its ID with what it rests on. "lab" is the interop

@@ -131,6 +131,10 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if options.UTLS == nil || !options.UTLS.Enabled {
 		return nil, E.New("uTLS is required by reality client")
 	}
+	// REALITY checks the server by its own key, not by a certificate's names (podkop-engine)
+	if len(options.CertificateServerName) > 0 {
+		return nil, E.New("certificate_server_name is unavailable in reality")
+	}
 
 	classicFingerprint, err := checkRealityFingerprint(options.UTLS.Fingerprint)
 	if err != nil {

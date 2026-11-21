@@ -94,6 +94,14 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if options.TLS.Reality != nil && options.TLS.Reality.Enabled {
 		return nil, E.New("reality is not supported on naive outbound")
 	}
+	// Cronet verifies by the server name against its roots: a pin or other names would be left
+	// unused (podkop-engine)
+	if len(options.TLS.CertificateSHA256) > 0 || len(options.TLS.CertificatePublicKeySHA256) > 0 {
+		return nil, E.New("certificate_sha256 and certificate_public_key_sha256 are not supported on naive outbound")
+	}
+	if len(options.TLS.CertificateServerName) > 0 {
+		return nil, E.New("certificate_server_name is not supported on naive outbound")
+	}
 
 	serverAddress := options.ServerOptions.Build()
 
