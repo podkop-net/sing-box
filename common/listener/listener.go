@@ -40,6 +40,7 @@ type Listener struct {
 	tproxy                   bool
 
 	tcpListener          net.Listener
+	accepted             acceptedConns
 	systemProxy          settings.SystemProxy
 	udpConn              *net.UDPConn
 	udpAddr              M.Socksaddr
@@ -143,10 +144,12 @@ func (l *Listener) Close() error {
 		}
 		err = E.Errors(err, l.systemProxy.Close())
 	}
-	return E.Errors(err, common.Close(
+	err = E.Errors(err, common.Close(
 		l.tcpListener,
 		common.PtrOrNil(l.udpConn),
 	))
+	l.accepted.close()
+	return err
 }
 
 func (l *Listener) bindInterfaceFunc() control.Func {
