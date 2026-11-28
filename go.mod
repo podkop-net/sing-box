@@ -202,5 +202,8 @@ require (
 replace github.com/sagernet/sing-vmess => github.com/FiyeroT/sing-vmess v0.2.9-pdk.3
 
 // Chrome's QUIC ClientHello in the order of the CPU: ChaCha20 first without AES hardware, as Chrome
-// does
+// does; the count of the peer's packets of a connection (ConnectionStats)
 replace github.com/sagernet/quic-go => github.com/podkop-net/quic-go v0.61.0-sing-box-mod.15-pdk.1
+
+// the statistics of the current QUIC connection of a hysteria2 or tuic client
+replace github.com/sagernet/sing-quic => github.com/podkop-net/sing-quic v0.7.2-pdk.2
